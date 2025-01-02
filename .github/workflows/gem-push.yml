@@ -1,0 +1,31 @@
+name: Ruby Gem
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "lib/parquet/version.rb"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "lib/parquet/version.rb"
+
+jobs:
+  build:
+    name: Build + Publish
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+      contents: write # IMPORTANT: this permission is required for `rake release` to push the release tag
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Ruby 3.2
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2
+          bundler-cache: true # runs 'bundle install' and caches installed gems automatically
+
+      # Run tests and release
+      - uses: rubygems/release-gem@v1

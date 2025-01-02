@@ -1,0 +1,30 @@
+PATH
+  remote: .
+  specs:
+    parquet (0.0.1)
+      rb_sys (~> 0.9.39)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    benchmark-ips (2.14.0)
+    minitest (5.25.4)
+    rake (13.2.1)
+    rake-compiler (1.2.0)
+      rake
+    rb_sys (0.9.104)
+
+PLATFORMS
+  arm64-darwin-23
+  ruby
+
+DEPENDENCIES
+  benchmark-ips (~> 2.12)
+  minitest (~> 5.0)
+  parquet!
+  rake
+  rake-compiler (~> 1.2.0)
+  rb_sys (~> 0.9.56)
+
+BUNDLED WITH
+   2.5.11

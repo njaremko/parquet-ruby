@@ -1,0 +1,11 @@
+/target*
+/tmp
+/**/*.bundle
+.direnv
+pkg/
+**/.DS_Store
+.env
+/benchmark/*.csv*
+profile.json
+**/*.parquet
+!test/data.parquet
