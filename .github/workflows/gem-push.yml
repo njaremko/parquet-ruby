@@ -9,6 +9,7 @@ on:
     branches: ["main"]
     paths:
       - "lib/parquet/version.rb"
+  workflow_dispatch:
 
 jobs:
   build:
