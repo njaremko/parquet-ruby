@@ -26,14 +26,14 @@ fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, E
 }
 
 #[derive(Debug)]
-pub struct ParquetArgs {
+pub struct ParquetRowsArgs {
     pub to_read: Value,
     pub result_type: String,
     pub columns: Option<Vec<String>>,
 }
 
 /// Parse common arguments for CSV parsing
-pub fn parse_parquet_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetArgs, Error> {
+pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRowsArgs, Error> {
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
 
@@ -67,9 +67,63 @@ pub fn parse_parquet_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetArgs, Er
         None => String::from("hash"),
     };
 
-    Ok(ParquetArgs {
+    Ok(ParquetRowsArgs {
         to_read,
         result_type,
         columns: kwargs.optional.1,
+    })
+}
+
+#[derive(Debug)]
+pub struct ParquetColumnsArgs {
+    pub to_read: Value,
+    pub result_type: String,
+    pub columns: Option<Vec<String>>,
+    pub batch_size: Option<usize>,
+}
+
+/// Parse common arguments for CSV parsing
+pub fn parse_parquet_columns_args(
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<ParquetColumnsArgs, Error> {
+    let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
+    let (to_read,) = parsed_args.required;
+
+    let kwargs = get_kwargs::<_, (), (Option<Value>, Option<Vec<String>>, Option<usize>), ()>(
+        parsed_args.keywords,
+        &[],
+        &["result_type", "columns", "batch_size"],
+    )?;
+
+    let result_type = match kwargs
+        .optional
+        .0
+        .map(|value| parse_string_or_symbol(ruby, value))
+    {
+        Some(Ok(Some(parsed))) => match parsed.as_str() {
+            "hash" | "array" => parsed,
+            _ => {
+                return Err(Error::new(
+                    magnus::exception::runtime_error(),
+                    "result_type must be either 'hash' or 'array'",
+                ))
+            }
+        },
+        Some(Ok(None)) => String::from("hash"),
+        Some(Err(_)) => {
+            return Err(Error::new(
+                magnus::exception::type_error(),
+                "result_type must be a String or Symbol",
+            ))
+        }
+        None => String::from("hash"),
+    };
+
+    Ok(ParquetColumnsArgs {
+        to_read,
+        result_type,
+        columns: kwargs.optional.1,
+        batch_size: kwargs.optional.2,
     })
 }

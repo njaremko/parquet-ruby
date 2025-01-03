@@ -18,6 +18,7 @@ use magnus::{Error, Ruby};
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("Parquet")?;
-    module.define_module_function("each_row", magnus::method!(parse_parquet, -1))?;
+    module.define_module_function("each_row", magnus::method!(parse_parquet_rows, -1))?;
+    module.define_module_function("each_column", magnus::method!(parse_parquet_columns, -1))?;
     Ok(())
 }

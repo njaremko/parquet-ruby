@@ -48,9 +48,17 @@ begin
       raise "Age mismatch: #{age} != #{count}" if age != count
     end
 
-    x.report("Parquet") do
+    x.report("Parquet rows") do
       count = 0
       Parquet.each_row("benchmark/test.parquet", columns: %w[age]) { |row| count += row["age"] }
+      raise "Age mismatch: #{age} != #{count}" if age != count
+    end
+
+    x.report("Parquet columns") do
+      count = 0
+      Parquet.each_column("benchmark/test.parquet", columns: %w[age]) do |batch|
+        batch["age"].each { |val| count += val.to_i }
+      end
       raise "Age mismatch: #{age} != #{count}" if age != count
     end
 
