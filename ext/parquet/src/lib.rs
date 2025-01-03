@@ -1,9 +1,15 @@
+mod enumerator;
 pub mod header_cache;
 mod reader;
+mod ruby_integration;
 mod ruby_reader;
+mod types;
 mod utils;
 
+use crate::enumerator::*;
 use crate::reader::*;
+use crate::ruby_integration::*;
+use crate::types::*;
 
 use magnus::{Error, Ruby};
 

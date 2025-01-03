@@ -6,7 +6,7 @@
 /// so this optimization could be removed if any issues arise.
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicU32, LazyLock, Mutex},
+    sync::{atomic::AtomicU32, LazyLock, Mutex, OnceLock},
 };
 use thiserror::Error;
 
@@ -77,5 +77,27 @@ impl StringCache {
         }
 
         Ok(())
+    }
+}
+
+pub struct HeaderCacheCleanupIter<I> {
+    pub inner: I,
+    pub headers: OnceLock<Vec<&'static str>>,
+}
+
+impl<I: Iterator> Iterator for HeaderCacheCleanupIter<I> {
+    type Item = I::Item;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+impl<I> Drop for HeaderCacheCleanupIter<I> {
+    fn drop(&mut self) {
+        if let Some(headers) = self.headers.get() {
+            StringCache::clear(&headers).unwrap();
+        }
     }
 }
