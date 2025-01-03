@@ -45,4 +45,14 @@ class BasicTest < Minitest::Test
     assert rows.all? { |row| row.is_a?(Hash) } # Verify all rows are hashes
     assert rows.all? { |row| row.key?("id") && row.key?("name") } # Verify schema consistency
   end
+
+  def test_each_row_with_columns
+    rows = []
+    Parquet.each_row("test/data.parquet", columns: %w[id]) { |row| rows << row }
+    refute_empty rows
+    assert_kind_of Hash, rows.first
+    assert_equal rows.first.keys.sort, %w[id].sort # Verify expected columns
+    assert rows.all? { |row| row.is_a?(Hash) } # Verify all rows are hashes
+    assert rows.all? { |row| row.key?("id") } # Verify schema consistency
+  end
 end

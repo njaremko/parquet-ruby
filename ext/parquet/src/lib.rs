@@ -1,3 +1,4 @@
+mod allocator;
 mod enumerator;
 pub mod header_cache;
 mod reader;

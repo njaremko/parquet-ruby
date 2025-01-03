@@ -77,6 +77,7 @@
           devShells.default = pkgs.mkShell {
             packages = with pkgs;[
               ruby_3_3
+              duckdb
               bundler
               rust-analyzer-unwrapped
               rust-dev-toolchain

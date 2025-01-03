@@ -6,11 +6,14 @@ use crate::{
     create_enumerator, utils::*, EnumeratorArgs, ForgottenFileHandle, ParquetField, Record,
     SeekableRubyValue,
 };
+use ahash::RandomState;
 use magnus::rb_sys::AsRawValue;
 use magnus::value::{Opaque, ReprValue};
 use magnus::{block::Yield, Error as MagnusError, Ruby, Value};
+use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
 use parquet::record::reader::RowIter as ParquetRowIter;
+use parquet::schema::types::{Type as SchemaType, TypePtr};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self};
@@ -18,19 +21,19 @@ use std::mem::ManuallyDrop;
 use std::os::fd::FromRawFd;
 use std::sync::OnceLock;
 use thiserror::Error;
-use xxhash_rust::xxh3::Xxh3Builder;
 
 #[inline]
 pub fn parse_parquet<'a>(
     rb_self: Value,
     args: &[Value],
-) -> Result<Yield<Box<dyn Iterator<Item = Record<Xxh3Builder>>>>, MagnusError> {
+) -> Result<Yield<Box<dyn Iterator<Item = Record<RandomState>>>>, MagnusError> {
     let original = unsafe { Ruby::get_unchecked() };
     let ruby: &'static Ruby = Box::leak(Box::new(original));
 
     let ParquetArgs {
         to_read,
         result_type,
+        columns,
     } = parse_parquet_args(&ruby, args)?;
 
     if !ruby.block_given() {
@@ -38,15 +41,18 @@ pub fn parse_parquet<'a>(
             rb_self,
             to_read,
             result_type,
+            columns,
         });
     }
 
-    let iter = if to_read.is_kind_of(ruby.class_string()) {
+    let (schema, mut iter) = if to_read.is_kind_of(ruby.class_string()) {
         let path_string = to_read.to_r_string()?;
         let file_path = unsafe { path_string.as_str()? };
         let file = File::open(file_path).unwrap();
         let reader = SerializedFileReader::new(file).unwrap();
-        ParquetRowIter::from_file_into(Box::new(reader))
+        let schema = reader.metadata().file_metadata().schema().clone();
+
+        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
     } else if to_read.is_kind_of(ruby.class_io()) {
         let raw_value = to_read.as_raw();
         let fd = std::panic::catch_unwind(|| unsafe { rb_sys::rb_io_descriptor(raw_value) })
@@ -61,14 +67,28 @@ pub fn parse_parquet<'a>(
         let file = unsafe { File::from_raw_fd(fd) };
         let file = ForgottenFileHandle(ManuallyDrop::new(file));
         let reader = SerializedFileReader::new(file).unwrap();
-        ParquetRowIter::from_file_into(Box::new(reader))
+        let schema = reader.metadata().file_metadata().schema().clone();
+
+        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
     } else {
         let readable = SeekableRubyValue(Opaque::from(to_read));
         let reader = SerializedFileReader::new(readable).unwrap();
-        ParquetRowIter::from_file_into(Box::new(reader))
+        let schema = reader.metadata().file_metadata().schema().clone();
+
+        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
     };
 
-    let iter: Box<dyn Iterator<Item = Record<Xxh3Builder>>> = match result_type.as_str() {
+    if let Some(cols) = columns {
+        let projection = create_projection_schema(&schema, &cols);
+        iter = iter.project(Some(projection.to_owned())).map_err(|e| {
+            MagnusError::new(
+                ruby.exception_runtime_error(),
+                format!("Failed to create projection: {}", e),
+            )
+        })?;
+    }
+
+    let iter: Box<dyn Iterator<Item = Record<RandomState>>> = match result_type.as_str() {
         "hash" => {
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
@@ -120,6 +140,24 @@ pub fn parse_parquet<'a>(
     };
 
     Ok(Yield::Iter(iter))
+}
+
+fn create_projection_schema(schema: &SchemaType, columns: &[String]) -> SchemaType {
+    if let SchemaType::GroupType { fields, .. } = schema {
+        let projected_fields: Vec<TypePtr> = fields
+            .iter()
+            .filter(|field| columns.contains(&field.name().to_string()))
+            .cloned()
+            .collect();
+
+        SchemaType::GroupType {
+            basic_info: schema.get_basic_info().clone(),
+            fields: projected_fields,
+        }
+    } else {
+        // Return original schema if not a group type
+        schema.clone()
+    }
 }
 
 #[derive(Error, Debug)]

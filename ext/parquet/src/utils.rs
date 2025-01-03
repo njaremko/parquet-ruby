@@ -29,6 +29,7 @@ fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, E
 pub struct ParquetArgs {
     pub to_read: Value,
     pub result_type: String,
+    pub columns: Option<Vec<String>>,
 }
 
 /// Parse common arguments for CSV parsing
@@ -36,8 +37,11 @@ pub fn parse_parquet_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetArgs, Er
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
 
-    let kwargs =
-        get_kwargs::<_, (), (Option<Value>,), ()>(parsed_args.keywords, &[], &["result_type"])?;
+    let kwargs = get_kwargs::<_, (), (Option<Value>, Option<Vec<String>>), ()>(
+        parsed_args.keywords,
+        &[],
+        &["result_type", "columns"],
+    )?;
 
     let result_type = match kwargs
         .optional
@@ -66,5 +70,6 @@ pub fn parse_parquet_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetArgs, Er
     Ok(ParquetArgs {
         to_read,
         result_type,
+        columns: kwargs.optional.1,
     })
 }

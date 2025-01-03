@@ -1,61 +1,54 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "osv"
-require "fastcsv"
-require "stringio"
-require "time"
+require "parquet"
+require "duckdb"
+require "fileutils"
 
-# Generate a larger test file for more meaningful benchmarks
-def generate_test_data(rows = 1_000_000)
-  headers = %w[
-    id
-    name
-    age
-    email
-    city
-    country
-    salary
-    department
-    hire_date
-    manager_id
-    performance_score
-    project_count
-    active
-    notes
-    last_login
-  ]
-  StringIO.new.tap do |io|
-    io.puts headers.join(",")
-    rows.times do |i|
-      row = [
-        i,
-        "Person#{i}",
-        rand(18..80),
-        "person#{i}@example.com",
-        "City#{i}",
-        "Country#{i}",
-        rand(30_000..200_000),
-        %w[Engineering Sales Marketing HR Finance].sample,
-        "2020-#{rand(1..12)}-#{rand(1..28)}",
-        rand(1..1000),
-        rand(1..5).to_f,
-        rand(1..10),
-        [true, false].sample,
-        "",
-        ""
-      ]
-      io.puts row.join(",")
-    end
-    io.rewind
+RubyVM::YJIT.enable
+
+# Generate test data using DuckDB
+DuckDB::Database.open do |db|
+  db.connect do |con|
+    # Create a table with sample data
+    con.query(
+      'CREATE TABLE test_data AS
+      SELECT
+        row_number() OVER () as id,
+        chr((ascii(\'A\') + (random() * 26)::INTEGER)::INTEGER) || \' \' ||
+        chr((ascii(\'A\') + (random() * 26)::INTEGER)::INTEGER) as name,
+        (random() * 80 + 18)::INTEGER as age,
+        \'person\' || row_number() OVER () || \'@example.com\' as email,
+        \'City\' || (random() * 100)::INTEGER as city,
+        \'Country\' || (random() * 50)::INTEGER as country,
+        (random() * 170000 + 30000)::INTEGER as salary,
+        CASE (random() * 5)::INTEGER
+          WHEN 0 THEN \'Engineering\'
+          WHEN 1 THEN \'Sales\'
+          WHEN 2 THEN \'Marketing\'
+          WHEN 3 THEN \'HR\'
+          ELSE \'Finance\'
+        END as department,
+        date_add(\'2020-01-01\'::DATE, INTERVAL ((random() * 365)::INTEGER) DAY) as hire_date,
+        (random() * 1000)::INTEGER as manager_id,
+        round(random() * 4 + 1, 1) as performance_score,
+        (random() * 10)::INTEGER as project_count,
+        random() > 0.5 as active,
+        \'\' as notes,
+        \'\' as last_login
+      FROM range(1000000)'
+    )
+
+    # Export to parquet
+    con.query('COPY test_data TO \'benchmark_test.parquet\' (FORMAT PARQUET)')
   end
 end
 
-# Generate test data and write to file
-test_data = generate_test_data.string
-File.write("benchmark_test.csv", test_data)
-
-io = StringIO.new(test_data)
+# Calculate total age for validation
+total_age =
+  DuckDB::Database.open do |db|
+    db.connect { |con| con.query('SELECT sum(age) FROM read_parquet(\'benchmark_test.parquet\')').first[0] }
+  end
 
 # Process the file in a loop for 10 seconds
 end_time = Time.now + 10
@@ -63,13 +56,12 @@ iterations = 0
 
 while Time.now < end_time
   count = 0
-  OSV.for_each(io, result_type: :array) { |row| count += row[2].to_i }
-  # FastCSV.raw_parse(io) { |row| count += row[2].to_i }
-  io.rewind
+  Parquet.each_row("benchmark_test.parquet", columns: %w[age]) { |row| count += row["age"] }
+  raise "Age mismatch: #{total_age} != #{count}" if total_age != count
   iterations += 1
 end
 
 puts "Completed #{iterations} iterations in 10 seconds"
 
 # Cleanup
-File.delete("benchmark_test.csv")
+FileUtils.rm_f("benchmark_test.parquet")

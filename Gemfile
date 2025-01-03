@@ -9,4 +9,6 @@ gemspec
 group :development, :test do
   gem "minitest", "~> 5.0"
   gem "benchmark-ips", "~> 2.12"
+  gem "polars-df"
+  gem "duckdb"
 end
