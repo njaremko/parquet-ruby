@@ -1,12 +1,15 @@
 use std::{borrow::Cow, collections::HashMap, hash::BuildHasher};
 
+use itertools::Itertools;
 use magnus::{value::ReprValue, IntoValue, Ruby, Value};
 use parquet::record::Field;
+
+use crate::header_cache::StringCacheKey;
 
 #[derive(Debug)]
 pub enum Record<S: BuildHasher + Default> {
     Vec(Vec<ParquetField>),
-    Map(HashMap<&'static str, ParquetField, S>),
+    Map(HashMap<StringCacheKey, ParquetField, S>),
 }
 
 impl<S: BuildHasher + Default> IntoValue for Record<S> {
@@ -19,9 +22,23 @@ impl<S: BuildHasher + Default> IntoValue for Record<S> {
             }
             Record::Map(map) => {
                 let hash = handle.hash_new_capa(map.len());
-                map.into_iter()
-                    .try_for_each(|(k, v)| hash.aset(k, v))
-                    .unwrap();
+
+                let mut values: [Value; 128] = [handle.qnil().as_value(); 128];
+                let mut i = 0;
+
+                for chunk in &map.into_iter().chunks(128) {
+                    for (k, v) in chunk {
+                        values[i] = handle.into_value(k);
+                        values[i + 1] = handle.into_value(v);
+                        i += 2;
+                    }
+                    hash.bulk_insert(&values[..i]).unwrap();
+
+                    // Zero out used values
+                    values[..i].fill(handle.qnil().as_value());
+                    i = 0;
+                }
+
                 hash.into_value_with(handle)
             }
         }

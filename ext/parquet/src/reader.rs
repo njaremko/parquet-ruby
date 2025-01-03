@@ -97,10 +97,14 @@ pub fn parse_parquet<'a>(
                     row.ok().map(|row| {
                         let headers = headers_clone.get_or_init(|| {
                             let column_count = row.get_column_iter().count();
-                            let mut headers = Vec::with_capacity(column_count);
-                            row.get_column_iter().for_each(|(k, _)| {
-                                headers.push(StringCache::intern(k.to_owned()).unwrap())
-                            });
+
+                            let mut header_string = Vec::with_capacity(column_count);
+                            for (k, _) in row.get_column_iter() {
+                                header_string.push(k.to_owned());
+                            }
+
+                            let headers = StringCache::intern_many(&header_string).unwrap();
+
                             headers
                         });
 
