@@ -8,7 +8,7 @@ gemspec
 
 group :development do
   gem "benchmark-ips", "~> 2.12"
-  gem "polars-df"
+  # gem "polars-df"
   gem "duckdb"
 end
 
