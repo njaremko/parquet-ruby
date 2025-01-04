@@ -218,6 +218,7 @@ class BasicTest < Minitest::Test
       end
     end
 
+    # Test hash result type
     rows = []
     Parquet.each_row("test/complex.parquet") { |row| rows << row }
 
@@ -226,6 +227,36 @@ class BasicTest < Minitest::Test
     assert_equal({ "key" => "value" }, rows.first["map_col"])
     assert_equal({ "nested" => { "field" => 42 } }, rows.first["struct_col"])
     assert_nil rows.first["nullable_col"]
+
+    # Test array result type
+    array_rows = []
+    Parquet.each_row("test/complex.parquet", result_type: :array) { |row| array_rows << row }
+
+    assert_equal 1, array_rows.first[0] # id
+    assert_equal [1, 2, 3], array_rows.first[1] # int_array
+    assert_equal({ "key" => "value" }, array_rows.first[2]) # map_col
+    assert_equal({ "nested" => { "field" => 42 } }, array_rows.first[3]) # struct_col
+    assert_nil array_rows.first.fetch(4) # nullable_col
+
+    # Test each_column variant with hash result type
+    columns = []
+    Parquet.each_column("test/complex.parquet", result_type: :hash) { |col| columns << col }
+
+    assert_equal [1], columns.first["id"]
+    assert_equal [[1, 2, 3]], columns.first["int_array"]
+    assert_equal [{ "key" => "value" }], columns.first["map_col"]
+    assert_equal [{ "nested" => { "field" => 42 } }], columns.first["struct_col"]
+    assert_nil columns.first["nullable_col"].first
+
+    # Test each_column variant with array result type
+    array_columns = []
+    Parquet.each_column("test/complex.parquet", result_type: :array) { |col| array_columns << col }
+
+    assert_equal [1], array_columns.first[0] # id
+    assert_equal [[1, 2, 3]], array_columns.first[1] # int_array
+    assert_equal [{ "key" => "value" }], array_columns.first[2] # map_col
+    assert_equal [{ "nested" => { "field" => 42 } }], array_columns.first[3] # struct_col
+    assert_equal [nil], array_columns.first[4] # nullable_col
   ensure
     File.delete("test/complex.parquet") if File.exist?("test/complex.parquet")
   end
@@ -262,8 +293,8 @@ class BasicTest < Minitest::Test
     assert_in_delta 3.14, row["float32_col"], 0.0001
     assert_in_delta 3.14159265359, row["float64_col"], 0.0000000001
     assert_equal "2023-01-01", row["date_col"].to_s
-    assert_equal "2023-01-01T12:00:00Z", row["timestamp_col"].to_s
-    assert_equal "2023-01-01T03:00:00Z", row["timestamptz_col"].to_s
+    assert_equal "2023-01-01 12:00:00 UTC", row["timestamp_col"].to_s
+    assert_equal "2023-01-01 03:00:00 UTC", row["timestamptz_col"].to_s
   ensure
     File.delete("test/numeric.parquet") if File.exist?("test/numeric.parquet")
   end
@@ -291,7 +322,6 @@ class BasicTest < Minitest::Test
 
     columns = []
     Parquet.each_column("test/numeric.parquet", result_type: :hash) { |col| columns << col }
-
     assert_equal [1], columns.first["int8_col"]
     assert_equal [1000], columns.first["int16_col"]
     assert_equal [1_000_000], columns.first["int32_col"]
@@ -299,8 +329,8 @@ class BasicTest < Minitest::Test
     assert_in_delta 3.14, columns.first["float32_col"].first, 0.0001
     assert_in_delta 3.14159265359, columns.first["float64_col"].first, 0.0000000001
     assert_equal ["2023-01-01"], columns.first["date_col"].map(&:to_s)
-    assert_equal ["2023-01-01T12:00:00Z"], columns.first["timestamp_col"].map(&:to_s)
-    assert_equal ["2023-01-01T03:00:00Z"], columns.first["timestamptz_col"].map(&:to_s)
+    assert_equal ["2023-01-01 12:00:00 UTC"], columns.first["timestamp_col"].map(&:to_s)
+    assert_equal ["2023-01-01 03:00:00 UTC"], columns.first["timestamptz_col"].map(&:to_s)
   ensure
     File.delete("test/numeric.parquet") if File.exist?("test/numeric.parquet")
   end
@@ -329,5 +359,211 @@ class BasicTest < Minitest::Test
     assert_equal row_count, count
   ensure
     File.delete("test/large.parquet") if File.exist?("test/large.parquet")
+  end
+
+  def test_empty_table
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query("CREATE TABLE empty_data (id INTEGER, name VARCHAR)")
+        con.query("COPY empty_data TO 'test/empty_table.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/empty_table.parquet") { |row| rows << row }
+    assert_empty rows
+
+    columns = []
+    Parquet.each_column("test/empty_table.parquet", result_type: :hash) { |col| columns << col }
+    refute_empty columns # Should still return schema info
+    assert_empty columns.first["id"]
+    assert_empty columns.first["name"]
+  ensure
+    File.delete("test/empty_table.parquet") if File.exist?("test/empty_table.parquet")
+  end
+
+  def test_wide_table
+    column_count = 1000
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        columns = (0...column_count).map { |i| "col#{i} INTEGER" }.join(", ")
+        values = (0...column_count).map { |i| "#{i} as col#{i}" }.join(", ")
+        con.query("CREATE TABLE wide_data AS SELECT #{values} FROM range(1)")
+        con.query("COPY wide_data TO 'test/wide.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/wide.parquet") { |row| rows << row }
+    assert_equal column_count, rows.first.keys.length
+    assert_equal 0, rows.first["col0"]
+    assert_equal column_count - 1, rows.first["col#{column_count - 1}"]
+
+    # Test reading specific columns from wide table
+    selected_columns = ["col0", "col#{column_count - 1}"]
+    rows = []
+    Parquet.each_row("test/wide.parquet", columns: selected_columns) { |row| rows << row }
+    assert_equal selected_columns.sort, rows.first.keys.sort
+  ensure
+    File.delete("test/wide.parquet") if File.exist?("test/wide.parquet")
+  end
+
+  def test_repeated_column_names
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query(<<~SQL)
+          CREATE TABLE repeated_cols AS
+          SELECT
+            1 as id,
+            'first' as name,
+            'second' as name
+          FROM range(1)
+        SQL
+        con.query("COPY repeated_cols TO 'test/repeated_cols.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    # The behavior with repeated column names should be consistent
+    rows = []
+    Parquet.each_row("test/repeated_cols.parquet") { |row| rows << row }
+    assert_equal 1, rows.first["id"]
+    assert_includes %w[first second], rows.first["name"]
+  ensure
+    File.delete("test/repeated_cols.parquet") if File.exist?("test/repeated_cols.parquet")
+  end
+
+  def test_special_character_column_names
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query(<<~SQL)
+          CREATE TABLE special_chars AS
+          SELECT
+            1 as "id",
+            2 as "column with spaces",
+            3 as "special!@#$%^&*()_+",
+            4 as "日本語",
+            5 as "col.with.dots"
+          FROM range(1)
+        SQL
+        con.query("COPY special_chars TO 'test/special_chars.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/special_chars.parquet") { |row| rows << row }
+    assert_equal 1, rows.first["id"]
+    assert_equal 2, rows.first["column with spaces"]
+    assert_equal 3, rows.first["special!@#$%^&*()_+"]
+    assert_equal 4, rows.first["日本語"]
+    assert_equal 5, rows.first["col.with.dots"]
+
+    # Test column selection with special characters
+    special_columns = ["column with spaces", "日本語"]
+    rows = []
+    Parquet.each_row("test/special_chars.parquet", columns: special_columns) { |row| rows << row }
+    assert_equal special_columns.sort, rows.first.keys.sort
+  ensure
+    File.delete("test/special_chars.parquet") if File.exist?("test/special_chars.parquet")
+  end
+
+  def test_binary_data
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        temp = '\'\x00\x01\x02\x03\x04\'::BLOB'
+        con.query(<<~SQL)
+          CREATE TABLE binary_data AS
+          SELECT
+            1 as id,
+            #{temp} as binary_col
+          FROM range(1)
+        SQL
+        con.query("COPY binary_data TO 'test/binary.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/binary.parquet") { |row| rows << row }
+    assert_equal 1, rows.first["id"]
+    expected = [0x00, 0x01, 0x02, 0x03, 0x04]
+    assert_equal expected, rows.first["binary_col"].bytes
+  ensure
+    File.delete("test/binary.parquet") if File.exist?("test/binary.parquet")
+  end
+
+  def test_decimal_types
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query(<<~SQL)
+          CREATE TABLE decimal_data AS
+          SELECT
+            CAST(123.45 AS DECIMAL(5,2)) as decimal_5_2,
+            CAST(123456.789 AS DECIMAL(9,3)) as decimal_9_3,
+            CAST(-123.45 AS DECIMAL(5,2)) as negative_decimal
+          FROM range(1)
+        SQL
+        con.query("COPY decimal_data TO 'test/decimal.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/decimal.parquet") { |row| rows << row }
+    assert_equal BigDecimal("123.45"), rows.first["decimal_5_2"]
+    assert_equal BigDecimal("123456.789"), rows.first["decimal_9_3"]
+    assert_equal BigDecimal("-123.45"), rows.first["negative_decimal"]
+  ensure
+    File.delete("test/decimal.parquet") if File.exist?("test/decimal.parquet")
+  end
+
+  def test_boolean_types
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query(<<~SQL)
+          CREATE TABLE boolean_data AS
+          SELECT
+            true as true_col,
+            false as false_col,
+            NULL::BOOLEAN as null_bool
+          FROM range(1)
+        SQL
+        con.query("COPY boolean_data TO 'test/boolean.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    rows = []
+    Parquet.each_row("test/boolean.parquet") { |row| rows << row }
+    assert_equal true, rows.first["true_col"]
+    assert_equal false, rows.first["false_col"]
+    assert_nil rows.first["null_bool"]
+  ensure
+    File.delete("test/boolean.parquet") if File.exist?("test/boolean.parquet")
+  end
+
+  def test_invalid_column_specifications
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query(<<~SQL)
+          CREATE TABLE test_data AS
+          SELECT 1 as id, 'name' as name FROM range(1)
+        SQL
+        con.query("COPY test_data TO 'test/cols.parquet' (FORMAT 'parquet')")
+      end
+    end
+
+    # Test with non-existent columns
+    rows = []
+    Parquet.each_row("test/cols.parquet", columns: ["nonexistent"]) { |row| rows << row }
+    assert_empty rows.first
+
+    # Test with mixed valid and invalid columns
+    rows = []
+    Parquet.each_row("test/cols.parquet", columns: %w[id nonexistent]) { |row| rows << row }
+    assert_equal ["id"], rows.first.keys
+
+    # Test with empty column list
+    rows = []
+    Parquet.each_row("test/cols.parquet", columns: []) { |row| rows << row }
+    assert_empty rows.first
+  ensure
+    File.delete("test/cols.parquet") if File.exist?("test/cols.parquet")
   end
 end

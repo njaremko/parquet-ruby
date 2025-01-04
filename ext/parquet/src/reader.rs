@@ -175,13 +175,15 @@ pub fn parse_parquet_columns<'a>(
         });
     }
 
-    let batch_reader = if to_read.is_kind_of(ruby.class_string()) {
+    let (batch_reader, schema, num_rows) = if to_read.is_kind_of(ruby.class_string()) {
         let path_string = to_read.to_r_string()?;
         let file_path = unsafe { path_string.as_str()? };
         let file = File::open(file_path).map_err(|e| ReaderError::FileOpen(e))?;
 
         let mut builder =
             ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| ReaderError::Parquet(e))?;
+        let schema = builder.schema().clone();
+        let num_rows = builder.metadata().file_metadata().num_rows();
 
         // If columns are specified, project only those columns
         if let Some(cols) = &columns {
@@ -201,7 +203,7 @@ pub fn parse_parquet_columns<'a>(
 
         let reader = builder.build().unwrap();
 
-        reader
+        (reader, schema, num_rows)
     } else if to_read.is_kind_of(ruby.class_io()) {
         let raw_value = to_read.as_raw();
         let fd = std::panic::catch_unwind(|| unsafe { rb_sys::rb_io_descriptor(raw_value) })
@@ -217,6 +219,8 @@ pub fn parse_parquet_columns<'a>(
         let file = ForgottenFileHandle(ManuallyDrop::new(file));
 
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let schema = builder.schema().clone();
+        let num_rows = builder.metadata().file_metadata().num_rows();
 
         if let Some(batch_size) = batch_size {
             builder = builder.with_batch_size(batch_size);
@@ -236,11 +240,13 @@ pub fn parse_parquet_columns<'a>(
 
         let reader = builder.build().unwrap();
 
-        reader
+        (reader, schema, num_rows)
     } else {
         let readable = SeekableRubyValue(Opaque::from(to_read));
 
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(readable).unwrap();
+        let schema = builder.schema().clone();
+        let num_rows = builder.metadata().file_metadata().num_rows();
 
         if let Some(batch_size) = batch_size {
             builder = builder.with_batch_size(batch_size);
@@ -260,8 +266,21 @@ pub fn parse_parquet_columns<'a>(
 
         let reader = builder.build().unwrap();
 
-        reader
+        (reader, schema, num_rows)
     };
+
+    if num_rows == 0 {
+        let mut map =
+            HashMap::with_capacity_and_hasher(schema.fields().len(), RandomState::default());
+        for field in schema.fields() {
+            map.insert(
+                StringCache::intern(field.name().to_string()).unwrap(),
+                vec![],
+            );
+        }
+        let column_record = vec![ColumnRecord::Map(map)];
+        return Ok(Yield::Iter(Box::new(column_record.into_iter())));
+    }
 
     let iter: Box<dyn Iterator<Item = ColumnRecord<RandomState>>> = match result_type.as_str() {
         "hash" => {

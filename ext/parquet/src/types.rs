@@ -3,13 +3,14 @@ use std::{borrow::Cow, collections::HashMap, hash::BuildHasher, sync::Arc};
 use arrow_array::cast::downcast_array;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Float16Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, NullArray, StringArray,
+    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_schema::{DataType, TimeUnit};
 use itertools::Itertools;
 use magnus::{value::ReprValue, IntoValue, Ruby, Value};
+use parquet::data_type::Decimal;
 use parquet::record::Field;
 
 use crate::header_cache::StringCacheKey;
@@ -40,17 +41,25 @@ impl<S: BuildHasher + Default> IntoValue for RowRecord<S> {
                 let mut values: [Value; 128] = [handle.qnil().as_value(); 128];
                 let mut i = 0;
 
-                for chunk in &map.into_iter().chunks(128) {
+                for chunk in &map.into_iter().chunks(64) {
+                    // Reduced to 64 to ensure space for pairs
                     for (k, v) in chunk {
+                        if i + 1 >= values.len() {
+                            // Bulk insert current batch if array is full
+                            hash.bulk_insert(&values[..i]).unwrap();
+                            values[..i].fill(handle.qnil().as_value());
+                            i = 0;
+                        }
                         values[i] = handle.into_value(k);
                         values[i + 1] = handle.into_value(v);
                         i += 2;
                     }
-                    hash.bulk_insert(&values[..i]).unwrap();
-
-                    // Zero out used values
-                    values[..i].fill(handle.qnil().as_value());
-                    i = 0;
+                    // Insert any remaining pairs
+                    if i > 0 {
+                        hash.bulk_insert(&values[..i]).unwrap();
+                        values[..i].fill(handle.qnil().as_value());
+                        i = 0;
+                    }
                 }
 
                 hash.into_value_with(handle)
@@ -79,19 +88,27 @@ impl<S: BuildHasher + Default> IntoValue for ColumnRecord<S> {
                 let mut values: [Value; 128] = [handle.qnil().as_value(); 128];
                 let mut i = 0;
 
-                for chunk in &map.into_iter().chunks(128) {
+                for chunk in &map.into_iter().chunks(64) {
+                    // Reduced to 64 to ensure space for pairs
                     for (k, v) in chunk {
+                        if i + 1 >= values.len() {
+                            // Bulk insert current batch if array is full
+                            hash.bulk_insert(&values[..i]).unwrap();
+                            values[..i].fill(handle.qnil().as_value());
+                            i = 0;
+                        }
                         values[i] = handle.into_value(k);
                         let ary = handle.ary_new_capa(v.len());
                         v.into_iter().try_for_each(|v| ary.push(v)).unwrap();
                         values[i + 1] = handle.into_value(ary);
                         i += 2;
                     }
-                    hash.bulk_insert(&values[..i]).unwrap();
-
-                    // Zero out used values
-                    values[..i].fill(handle.qnil().as_value());
-                    i = 0;
+                    // Insert any remaining pairs
+                    if i > 0 {
+                        hash.bulk_insert(&values[..i]).unwrap();
+                        values[..i].fill(handle.qnil().as_value());
+                        i = 0;
+                    }
                 }
 
                 hash.into_value_with(handle)
@@ -115,7 +132,7 @@ pub struct ParquetField(pub Field);
 impl IntoValue for ParquetField {
     fn into_value_with(self, handle: &Ruby) -> Value {
         match self.0 {
-            Field::Byte(b) => b.into_value_with(handle),
+            Field::Null => handle.qnil().as_value(),
             Field::Bool(b) => b.into_value_with(handle),
             Field::Short(s) => s.into_value_with(handle),
             Field::Int(i) => i.into_value_with(handle),
@@ -128,6 +145,7 @@ impl IntoValue for ParquetField {
             Field::Float(f) => f.into_value_with(handle),
             Field::Double(d) => d.into_value_with(handle),
             Field::Str(s) => s.into_value_with(handle),
+            Field::Byte(b) => b.into_value_with(handle),
             Field::Bytes(b) => handle.str_from_slice(b.data()).as_value(),
             Field::Date(d) => {
                 let ts = jiff::Timestamp::from_second((d as i64) * 86400).unwrap();
@@ -136,11 +154,19 @@ impl IntoValue for ParquetField {
             }
             Field::TimestampMillis(ts) => {
                 let ts = jiff::Timestamp::from_millisecond(ts).unwrap();
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             Field::TimestampMicros(ts) => {
                 let ts = jiff::Timestamp::from_microsecond(ts).unwrap();
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             Field::ListInternal(list) => {
                 let elements = list.elements();
@@ -165,7 +191,24 @@ impl IntoValue for ParquetField {
                     .unwrap();
                 hash.into_value_with(handle)
             }
-            Field::Null => handle.qnil().as_value(),
+            Field::Decimal(d) => {
+                let value = match d {
+                    Decimal::Int32 { value, scale, .. } => {
+                        let unscaled = i32::from_be_bytes(value);
+                        format!("{}e-{}", unscaled, scale)
+                    }
+                    Decimal::Int64 { value, scale, .. } => {
+                        let unscaled = i64::from_be_bytes(value);
+                        format!("{}e-{}", unscaled, scale)
+                    }
+                    Decimal::Bytes { value, scale, .. } => {
+                        // Convert bytes to string representation of unscaled value
+                        let unscaled = String::from_utf8_lossy(value.data());
+                        format!("{}e-{}", unscaled, scale)
+                    }
+                };
+                handle.eval(&format!("BigDecimal(\"{value}\")")).unwrap()
+            }
             Field::Group(row) => {
                 let hash = handle.hash_new();
                 row.get_column_iter()
@@ -178,13 +221,12 @@ impl IntoValue for ParquetField {
                     .unwrap();
                 hash.into_value_with(handle)
             }
-            e => panic!("Unsupported field type: {:?}", e),
         }
     }
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ParquetValue {
     Int8(i8),
     Int16(i16),
@@ -277,115 +319,174 @@ impl TryFrom<Arc<dyn Array>> for ParquetValueVec {
     }
 }
 
+// Add macro for handling numeric array conversions
+macro_rules! impl_numeric_array_conversion {
+    ($column:expr, $array_type:ty, $variant:ident) => {{
+        let array = downcast_array::<$array_type>($column);
+        if array.is_nullable() {
+            array
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if array.is_null(i) {
+                        ParquetValue::Null
+                    } else {
+                        ParquetValue::$variant(*x)
+                    }
+                })
+                .collect()
+        } else {
+            array
+                .values()
+                .iter()
+                .map(|x| ParquetValue::$variant(*x))
+                .collect()
+        }
+    }};
+}
+
+// Add macro for handling boolean array conversions
+macro_rules! impl_boolean_array_conversion {
+    ($column:expr, $array_type:ty, $variant:ident) => {{
+        let array = downcast_array::<$array_type>($column);
+        if array.is_nullable() {
+            array
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if array.is_null(i) {
+                        ParquetValue::Null
+                    } else {
+                        ParquetValue::$variant(x)
+                    }
+                })
+                .collect()
+        } else {
+            array
+                .values()
+                .iter()
+                .map(|x| ParquetValue::$variant(x))
+                .collect()
+        }
+    }};
+}
+
+// Add macro for handling timestamp array conversions
+macro_rules! impl_timestamp_array_conversion {
+    ($column:expr, $array_type:ty, $variant:ident, $tz:expr) => {{
+        let array = downcast_array::<$array_type>($column);
+        if array.is_nullable() {
+            array
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if array.is_null(i) {
+                        ParquetValue::Null
+                    } else {
+                        ParquetValue::$variant(*x, $tz.clone())
+                    }
+                })
+                .collect()
+        } else {
+            array
+                .values()
+                .iter()
+                .map(|x| ParquetValue::$variant(*x, $tz.clone()))
+                .collect()
+        }
+    }};
+}
+
 impl TryFrom<&dyn Array> for ParquetValueVec {
     type Error = String;
 
     fn try_from(column: &dyn Array) -> Result<Self, Self::Error> {
         let tmp_vec = match column.data_type() {
-            DataType::Int8 => downcast_array::<Int8Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Int8(*x))
-                .collect(),
-            DataType::Int16 => downcast_array::<Int16Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Int16(*x))
-                .collect(),
-            DataType::Int32 => downcast_array::<Int32Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Int32(*x))
-                .collect(),
-            DataType::Int64 => downcast_array::<Int64Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Int64(*x))
-                .collect(),
-            DataType::UInt8 => downcast_array::<UInt8Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::UInt8(*x))
-                .collect(),
-            DataType::UInt16 => downcast_array::<UInt16Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::UInt16(*x))
-                .collect(),
-            DataType::UInt32 => downcast_array::<UInt32Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::UInt32(*x))
-                .collect(),
-            DataType::UInt64 => downcast_array::<UInt64Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::UInt64(*x))
-                .collect(),
-            DataType::Float16 => downcast_array::<Float16Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Float16(f32::from(*x)))
-                .collect(),
-            DataType::Float32 => downcast_array::<Float32Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Float32(*x))
-                .collect(),
-            DataType::Float64 => downcast_array::<Float64Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Float64(*x))
-                .collect(),
-            DataType::Boolean => downcast_array::<BooleanArray>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Boolean(x))
-                .collect(),
-            DataType::Utf8 => downcast_array::<StringArray>(column)
-                .iter()
-                .map(|x| ParquetValue::String(x.unwrap_or_default().to_string()))
-                .collect(),
-            DataType::Binary => downcast_array::<BinaryArray>(column)
-                .iter()
-                .map(|x| ParquetValue::Bytes(x.unwrap_or_default().to_vec()))
-                .collect(),
-            DataType::Date32 => downcast_array::<Date32Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Date32(*x))
-                .collect(),
-            DataType::Date64 => downcast_array::<Date64Array>(column)
-                .values()
-                .iter()
-                .map(|x| ParquetValue::Date64(*x))
-                .collect(),
+            DataType::Boolean => impl_boolean_array_conversion!(column, BooleanArray, Boolean),
+            DataType::Int8 => impl_numeric_array_conversion!(column, Int8Array, Int8),
+            DataType::Int16 => impl_numeric_array_conversion!(column, Int16Array, Int16),
+            DataType::Int32 => impl_numeric_array_conversion!(column, Int32Array, Int32),
+            DataType::Int64 => impl_numeric_array_conversion!(column, Int64Array, Int64),
+            DataType::UInt8 => impl_numeric_array_conversion!(column, UInt8Array, UInt8),
+            DataType::UInt16 => impl_numeric_array_conversion!(column, UInt16Array, UInt16),
+            DataType::UInt32 => impl_numeric_array_conversion!(column, UInt32Array, UInt32),
+            DataType::UInt64 => impl_numeric_array_conversion!(column, UInt64Array, UInt64),
+            DataType::Float32 => impl_numeric_array_conversion!(column, Float32Array, Float32),
+            DataType::Float64 => impl_numeric_array_conversion!(column, Float64Array, Float64),
+            DataType::Date32 => impl_numeric_array_conversion!(column, Date32Array, Date32),
+            DataType::Date64 => impl_numeric_array_conversion!(column, Date64Array, Date64),
             DataType::Timestamp(TimeUnit::Second, tz) => {
-                downcast_array::<TimestampSecondArray>(column)
-                    .values()
-                    .iter()
-                    .map(|x| ParquetValue::TimestampSecond(*x, tz.clone()))
-                    .collect()
+                impl_timestamp_array_conversion!(column, TimestampSecondArray, TimestampSecond, tz)
             }
             DataType::Timestamp(TimeUnit::Millisecond, tz) => {
-                downcast_array::<TimestampMillisecondArray>(column)
-                    .values()
-                    .iter()
-                    .map(|x| ParquetValue::TimestampMillis(*x, tz.clone()))
-                    .collect()
+                impl_timestamp_array_conversion!(
+                    column,
+                    TimestampMillisecondArray,
+                    TimestampMillis,
+                    tz
+                )
             }
             DataType::Timestamp(TimeUnit::Microsecond, tz) => {
-                downcast_array::<TimestampMicrosecondArray>(column)
-                    .values()
-                    .iter()
-                    .map(|x| ParquetValue::TimestampMicros(*x, tz.clone()))
-                    .collect()
+                impl_timestamp_array_conversion!(
+                    column,
+                    TimestampMicrosecondArray,
+                    TimestampMicros,
+                    tz
+                )
             }
             DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
-                downcast_array::<TimestampNanosecondArray>(column)
-                    .values()
+                impl_timestamp_array_conversion!(
+                    column,
+                    TimestampNanosecondArray,
+                    TimestampNanos,
+                    tz
+                )
+            }
+            // Because f16 is unstable in Rust, we convert it to f32
+            DataType::Float16 => {
+                let array = downcast_array::<Float16Array>(column);
+                if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                ParquetValue::Float16(f32::from(*x))
+                            }
+                        })
+                        .collect()
+                } else {
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| ParquetValue::Float16(f32::from(*x)))
+                        .collect()
+                }
+            }
+            DataType::Utf8 => {
+                let array = downcast_array::<StringArray>(column);
+                array
                     .iter()
-                    .map(|x| ParquetValue::TimestampNanos(*x, tz.clone()))
+                    .map(|opt_x| match opt_x {
+                        Some(x) => ParquetValue::String(x.to_string()),
+                        None => ParquetValue::Null,
+                    })
+                    .collect()
+            }
+            DataType::Binary => {
+                let array = downcast_array::<BinaryArray>(column);
+                array
+                    .iter()
+                    .map(|opt_x| match opt_x {
+                        Some(x) => ParquetValue::Bytes(x.to_vec()),
+                        None => ParquetValue::Null,
+                    })
                     .collect()
             }
             DataType::List(_field) => {
@@ -403,7 +504,37 @@ impl TryFrom<&dyn Array> for ParquetValueVec {
                     })
                     .collect()
             }
-            DataType::Null => vec![ParquetValue::Null],
+            DataType::Struct(_) => {
+                let struct_array = downcast_array::<StructArray>(column);
+                let mut values = Vec::with_capacity(struct_array.len());
+                for i in 0..struct_array.len() {
+                    if struct_array.is_null(i) {
+                        values.push(ParquetValue::Null);
+                        continue;
+                    }
+
+                    let mut map = std::collections::HashMap::new();
+                    for (field_idx, field) in struct_array.fields().iter().enumerate() {
+                        let column = struct_array.column(field_idx);
+                        let field_values = match ParquetValueVec::try_from(column.slice(i, 1)) {
+                            Ok(vec) => vec.into_inner(),
+                            Err(e) => {
+                                panic!("Error converting struct field to ParquetValueVec: {}", e)
+                            }
+                        };
+                        map.insert(
+                            ParquetValue::String(field.name().to_string()),
+                            field_values.into_iter().next().unwrap(),
+                        );
+                    }
+                    values.push(ParquetValue::Map(map));
+                }
+                values
+            }
+            DataType::Null => {
+                let x = downcast_array::<NullArray>(column);
+                vec![ParquetValue::Null; x.len()]
+            }
             _ => {
                 return Err(format!("Unsupported data type: {:?}", column.data_type()));
             }
@@ -483,19 +614,35 @@ impl IntoValue for ParquetValue {
             }
             ParquetValue::TimestampSecond(ts, tz) => {
                 let ts = parse_zoned_timestamp(&ParquetValue::TimestampSecond(ts, tz));
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             ParquetValue::TimestampMillis(ts, tz) => {
                 let ts = parse_zoned_timestamp(&ParquetValue::TimestampMillis(ts, tz));
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             ParquetValue::TimestampMicros(ts, tz) => {
                 let ts = parse_zoned_timestamp(&ParquetValue::TimestampMicros(ts, tz));
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             ParquetValue::TimestampNanos(ts, tz) => {
                 let ts = parse_zoned_timestamp(&ParquetValue::TimestampNanos(ts, tz));
-                ts.to_string().into_value_with(handle)
+                let time_class = handle.class_time();
+                time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
+                    .unwrap()
+                    .into_value_with(handle)
             }
             ParquetValue::List(l) => {
                 let ary = handle.ary_new_capa(l.len());
@@ -535,8 +682,39 @@ fn parse_zoned_timestamp(value: &ParquetValue) -> jiff::Timestamp {
 
     // If timezone is provided, convert to zoned timestamp
     if let Some(tz) = tz {
-        // Handle both fixed offset timezones like "+09:00" and IANA timezones like "America/New_York"
-        ts.intz(&tz).unwrap().timestamp()
+        // Handle fixed offset timezones like "+09:00" first
+        if tz.starts_with('+') || tz.starts_with('-') {
+            // Parse the offset string into hours and minutes
+            let (hours, minutes) = if tz.len() >= 5 && tz.contains(':') {
+                // Format: "+09:00" or "-09:00"
+                let h = tz[1..3].parse::<i32>().unwrap_or(0);
+                let m = tz[4..6].parse::<i32>().unwrap_or(0);
+                (h, m)
+            } else if tz.len() >= 3 {
+                // Format: "+09" or "-09"
+                let h = tz[1..3].parse::<i32>().unwrap_or(0);
+                (h, 0)
+            } else {
+                (0, 0)
+            };
+
+            // Apply sign
+            let total_minutes = if tz.starts_with('-') {
+                -(hours * 60 + minutes)
+            } else {
+                hours * 60 + minutes
+            };
+
+            // Create fixed timezone
+            let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset((total_minutes / 60) as i8));
+            ts.to_zoned(tz).timestamp()
+        } else {
+            // Try IANA timezone
+            match ts.intz(&tz) {
+                Ok(zoned) => zoned.timestamp(),
+                Err(_) => ts, // Fall back to UTC if timezone is invalid
+            }
+        }
     } else {
         // No timezone provided - treat as UTC
         ts
