@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.4
+
+- Fix the "Homepage" field in the gemspec
+
 ## 0.0.3
 
 - Added `each_column` method for efficient column-oriented reading of Parquet files

@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
     Parquet is a high-performance Parquet library for Ruby, written in Rust.
     It wraps the official Apache Rust implementation to provide fast, correct Parquet parsing.
   EOF
-  spec.homepage = "https://github.com/njaremko/parquet"
+  spec.homepage = "https://github.com/njaremko/parquet-ruby"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1.0"
 
