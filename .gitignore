@@ -1,5 +1,5 @@
 /target*
-flamegraph.svg
+**/*.svg
 /tmp
 /**/*.bundle
 .direnv

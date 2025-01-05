@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.5
+
+- Remove unused rust dependencies
+
 ## 0.0.4
 
 - Fix the "Homepage" field in the gemspec
