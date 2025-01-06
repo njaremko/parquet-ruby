@@ -21,6 +21,12 @@ pub enum ParserResultType {
     Array,
 }
 
+impl ParserResultType {
+    pub fn iter() -> impl Iterator<Item = Self> {
+        [Self::Hash, Self::Array].into_iter()
+    }
+}
+
 impl TryFrom<&str> for ParserResultType {
     type Error = String;
 

@@ -45,38 +45,36 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
         &["result_type", "columns"],
     )?;
 
-    let result_type = match kwargs
+    let result_type: ParserResultType = match kwargs
         .optional
         .0
         .map(|value| parse_string_or_symbol(ruby, value))
     {
-        Some(Ok(Some(parsed))) => match parsed.as_str() {
-            "hash" | "array" => parsed,
-            _ => {
-                return Err(Error::new(
-                    magnus::exception::runtime_error(),
-                    "result_type must be either 'hash' or 'array'",
-                ))
-            }
-        },
-        Some(Ok(None)) => String::from("hash"),
+        Some(Ok(Some(parsed))) => parsed.try_into().map_err(|e| {
+            Error::new(
+                magnus::exception::runtime_error(),
+                format!(
+                    "Invalid result type: {e}. Must be one of {}",
+                    ParserResultType::iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?,
+        Some(Ok(None)) => ParserResultType::Hash,
         Some(Err(_)) => {
             return Err(Error::new(
                 magnus::exception::type_error(),
                 "result_type must be a String or Symbol",
             ))
         }
-        None => String::from("hash"),
+        None => ParserResultType::Hash,
     };
 
     Ok(ParquetRowsArgs {
         to_read,
-        result_type: result_type.try_into().map_err(|e| {
-            Error::new(
-                magnus::exception::runtime_error(),
-                format!("Invalid result type: {e}"),
-            )
-        })?,
+        result_type,
         columns: kwargs.optional.1,
     })
 }
@@ -103,38 +101,36 @@ pub fn parse_parquet_columns_args(
         &["result_type", "columns", "batch_size"],
     )?;
 
-    let result_type = match kwargs
+    let result_type: ParserResultType = match kwargs
         .optional
         .0
         .map(|value| parse_string_or_symbol(ruby, value))
     {
-        Some(Ok(Some(parsed))) => match parsed.as_str() {
-            "hash" | "array" => parsed,
-            _ => {
-                return Err(Error::new(
-                    magnus::exception::runtime_error(),
-                    "result_type must be either 'hash' or 'array'",
-                ))
-            }
-        },
-        Some(Ok(None)) => String::from("hash"),
+        Some(Ok(Some(parsed))) => parsed.try_into().map_err(|e| {
+            Error::new(
+                magnus::exception::runtime_error(),
+                format!(
+                    "Invalid result type: {e}. Must be one of {}",
+                    ParserResultType::iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?,
+        Some(Ok(None)) => ParserResultType::Hash,
         Some(Err(_)) => {
             return Err(Error::new(
                 magnus::exception::type_error(),
                 "result_type must be a String or Symbol",
             ))
         }
-        None => String::from("hash"),
+        None => ParserResultType::Hash,
     };
 
     Ok(ParquetColumnsArgs {
         to_read,
-        result_type: result_type.try_into().map_err(|e| {
-            Error::new(
-                magnus::exception::runtime_error(),
-                format!("Invalid result type: {e}"),
-            )
-        })?,
+        result_type,
         columns: kwargs.optional.1,
         batch_size: kwargs.optional.2,
     })
