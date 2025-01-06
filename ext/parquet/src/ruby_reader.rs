@@ -14,9 +14,8 @@ pub struct RubyReader<T> {
     offset: usize,
 }
 
-pub trait SeekableRead: std::io::Read + Seek {}
-impl SeekableRead for RubyReader<Value> {}
-impl SeekableRead for RubyReader<RString> {}
+pub trait SeekableRead: Read + Seek {}
+impl<T: Read + Seek> SeekableRead for T {}
 
 pub fn build_ruby_reader(
     ruby: &Ruby,

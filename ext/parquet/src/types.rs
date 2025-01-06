@@ -15,6 +15,41 @@ use parquet::record::Field;
 
 use crate::header_cache::StringCacheKey;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ParserResultType {
+    Hash,
+    Array,
+}
+
+impl TryFrom<&str> for ParserResultType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "hash" => Ok(ParserResultType::Hash),
+            "array" => Ok(ParserResultType::Array),
+            _ => Err(format!("Invalid parser result type: {}", value)),
+        }
+    }
+}
+
+impl TryFrom<String> for ParserResultType {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl std::fmt::Display for ParserResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParserResultType::Hash => write!(f, "hash"),
+            ParserResultType::Array => write!(f, "array"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RowRecord<S: BuildHasher + Default> {
     Vec(Vec<ParquetField>),

@@ -3,12 +3,12 @@ use magnus::{
     block::Yield, value::ReprValue, Error as MagnusError, KwArgs, RArray, RHash, Symbol, Value,
 };
 
-use crate::{ColumnRecord, RowRecord};
+use crate::{ColumnRecord, ParserResultType, RowRecord};
 
 pub struct RowEnumeratorArgs {
     pub rb_self: Value,
     pub to_read: Value,
-    pub result_type: String,
+    pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
 }
 
@@ -17,7 +17,10 @@ pub fn create_row_enumerator(
     args: RowEnumeratorArgs,
 ) -> Result<Yield<Box<dyn Iterator<Item = RowRecord<RandomState>>>>, MagnusError> {
     let kwargs = RHash::new();
-    kwargs.aset(Symbol::new("result_type"), Symbol::new(args.result_type))?;
+    kwargs.aset(
+        Symbol::new("result_type"),
+        Symbol::new(args.result_type.to_string()),
+    )?;
     if let Some(columns) = args.columns {
         kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
     }
@@ -30,7 +33,7 @@ pub fn create_row_enumerator(
 pub struct ColumnEnumeratorArgs {
     pub rb_self: Value,
     pub to_read: Value,
-    pub result_type: String,
+    pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
 }
@@ -40,7 +43,10 @@ pub fn create_column_enumerator(
     args: ColumnEnumeratorArgs,
 ) -> Result<Yield<Box<dyn Iterator<Item = ColumnRecord<RandomState>>>>, MagnusError> {
     let kwargs = RHash::new();
-    kwargs.aset(Symbol::new("result_type"), Symbol::new(args.result_type))?;
+    kwargs.aset(
+        Symbol::new("result_type"),
+        Symbol::new(args.result_type.to_string()),
+    )?;
     if let Some(columns) = args.columns {
         kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
     }

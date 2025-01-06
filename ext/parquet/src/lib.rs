@@ -7,6 +7,9 @@ mod ruby_reader;
 mod types;
 mod utils;
 
+mod parquet_column_reader;
+mod parquet_row_reader;
+
 use crate::enumerator::*;
 use crate::reader::*;
 use crate::ruby_integration::*;

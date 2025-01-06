@@ -4,6 +4,8 @@ use magnus::{
     Error, RString, Ruby, Symbol, Value,
 };
 
+use crate::ParserResultType;
+
 fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, Error> {
     if value.is_nil() {
         Ok(None)
@@ -28,7 +30,7 @@ fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, E
 #[derive(Debug)]
 pub struct ParquetRowsArgs {
     pub to_read: Value,
-    pub result_type: String,
+    pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
 }
 
@@ -69,7 +71,12 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
 
     Ok(ParquetRowsArgs {
         to_read,
-        result_type,
+        result_type: result_type.try_into().map_err(|e| {
+            Error::new(
+                magnus::exception::runtime_error(),
+                format!("Invalid result type: {e}"),
+            )
+        })?,
         columns: kwargs.optional.1,
     })
 }
@@ -77,7 +84,7 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
 #[derive(Debug)]
 pub struct ParquetColumnsArgs {
     pub to_read: Value,
-    pub result_type: String,
+    pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
 }
@@ -122,7 +129,12 @@ pub fn parse_parquet_columns_args(
 
     Ok(ParquetColumnsArgs {
         to_read,
-        result_type,
+        result_type: result_type.try_into().map_err(|e| {
+            Error::new(
+                magnus::exception::runtime_error(),
+                format!("Invalid result type: {e}"),
+            )
+        })?,
         columns: kwargs.optional.1,
         batch_size: kwargs.optional.2,
     })
