@@ -1,4 +1,5 @@
 # typed: strict
+
 module Parquet
   # Options:
   #   - `input`: String, File, or IO object containing parquet data
@@ -12,7 +13,7 @@ module Parquet
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
       blk: T.nilable(T.proc.params(row: T.any(T::Hash[String, T.untyped], T::Array[T.untyped])).void)
-    ).returns(T.any(Enumerator, NilClass))
+    ).returns(T.any(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])], NilClass))
   end
   def self.each_row(input, result_type: nil, columns: nil, &blk)
   end
@@ -31,7 +32,7 @@ module Parquet
       batch_size: T.nilable(Integer),
       blk:
         T.nilable(T.proc.params(batch: T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])).void)
-    ).returns(T.any(Enumerator, NilClass))
+    ).returns(T.any(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])], NilClass))
   end
   def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, &blk)
   end
