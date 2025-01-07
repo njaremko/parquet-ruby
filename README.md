@@ -4,8 +4,6 @@
 
 This project is a Ruby library wrapping the [parquet-rs](https://github.com/apache/parquet-rs) rust crate.
 
-At the moment, it only supports iterating rows as either a hash or an array.
-
 ## Usage
 
 This library provides high-level bindings to parquet-rs with two primary APIs for reading Parquet files: row-wise and column-wise iteration. The column-wise API generally offers better performance, especially when working with subset of columns.
