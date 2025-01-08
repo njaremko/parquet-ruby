@@ -36,4 +36,34 @@ module Parquet
   end
   def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, &blk)
   end
+
+  # Options:
+  #   - `read_from`: An Enumerator yielding arrays of values representing each row
+  #   - `schema`: Array of hashes specifying column names and types
+  #   - `write_to`: String path or IO object to write the parquet file to
+  #   - `batch_size`: Optional batch size for writing (defaults to 1000)
+  sig do
+    params(
+      read_from: T::Enumerator[T::Array[T.untyped]],
+      schema: T::Array[T::Hash[String, String]],
+      write_to: T.any(String, IO),
+      batch_size: T.nilable(Integer)
+    ).void
+  end
+  def self.write_rows(read_from, schema:, write_to:, batch_size: nil)
+  end
+
+  # Options:
+  #   - `read_from`: An Enumerator yielding arrays of column batches
+  #   - `schema`: Array of hashes specifying column names and types
+  #   - `write_to`: String path or IO object to write the parquet file to
+  sig do
+    params(
+      read_from: T::Enumerator[T::Array[T::Array[T.untyped]]],
+      schema: T::Array[T::Hash[String, String]],
+      write_to: T.any(String, IO)
+    ).void
+  end
+  def self.write_columns(read_from, schema:, write_to:)
+  end
 end

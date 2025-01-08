@@ -386,7 +386,6 @@ class BasicTest < Minitest::Test
     column_count = 1000
     DuckDB::Database.open do |db|
       db.connect do |con|
-        columns = (0...column_count).map { |i| "col#{i} INTEGER" }.join(", ")
         values = (0...column_count).map { |i| "#{i} as col#{i}" }.join(", ")
         con.query("CREATE TABLE wide_data AS SELECT #{values} FROM range(1)")
         con.query("COPY wide_data TO 'test/wide.parquet' (FORMAT 'parquet')")
@@ -565,5 +564,156 @@ class BasicTest < Minitest::Test
     assert_empty rows.first
   ensure
     File.delete("test/cols.parquet") if File.exist?("test/cols.parquet")
+  end
+
+  def test_write_rows
+    # Test different input formats
+    data = [[1, "Alice", 95.5], [3, "Bob", 82.3], [3, "Charlie", 88.7], [4, "David", 91.2], [5, "Eve", 1.5e2]]
+
+    # Create an enumerator from the array
+    rows = data.each
+
+    # Write to a parquet file
+    Parquet.write_rows(
+      rows,
+      schema: [{ "id" => "int64" }, { "name" => "string" }, { "score" => "double" }],
+      write_to: "test/students.parquet"
+    )
+
+    # Read and verify the data using DuckDB
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query("SELECT * FROM 'test/students.parquet' ORDER BY id") do |result|
+          rows = result.to_a
+          assert_equal 5, rows.length
+
+          # Test numeric input
+          assert_equal 1, rows[0]["id"]
+          assert_equal "Alice", rows[0]["name"]
+          assert_in_delta 95.5, rows[0]["score"], 0.0001
+
+          assert_equal 3, rows[1]["id"]
+          assert_equal "Bob", rows[1]["name"]
+          assert_in_delta 82.3, rows[1]["score"], 0.0001
+
+          assert_equal 3, rows[2]["id"]
+          assert_equal "Charlie", rows[2]["name"]
+          assert_in_delta 88.7, rows[2]["score"], 0.0001
+
+          assert_equal 4, rows[3]["id"]
+          assert_equal "David", rows[3]["name"]
+          assert_in_delta 91.2, rows[3]["score"], 0.0001
+
+          assert_equal 5, rows[4]["id"]
+          assert_equal "Eve", rows[4]["name"]
+          assert_in_delta 150.0, rows[4]["score"], 0.0001
+        end
+      end
+    end
+
+    # Test writing to a file
+    File.open("test/students_from_io.parquet", "wb") do |file|
+      rows = data.each
+      Parquet.write_rows(
+        rows,
+        schema: [{ "id" => "int64" }, { "name" => "string" }, { "score" => "double" }],
+        write_to: file
+      )
+    end
+
+    # Verify the data written through IO
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query("SELECT * FROM 'test/students_from_io.parquet' ORDER BY id") do |result|
+          rows = result.to_a
+          assert_equal 5, rows.length
+
+          assert_equal 1, rows[0]["id"]
+          assert_equal "Alice", rows[0]["name"]
+          assert_in_delta 95.5, rows[0]["score"], 0.0001
+
+          assert_equal 5, rows[4]["id"]
+          assert_equal "Eve", rows[4]["name"]
+          assert_in_delta 150.0, rows[4]["score"], 0.0001
+        end
+      end
+    end
+  ensure
+    File.delete("test/students.parquet") if File.exist?("test/students.parquet")
+    File.delete("test/students_from_io.parquet") if File.exist?("test/students_from_io.parquet")
+  end
+
+  def test_write_columns
+    # Create batches of column data
+    batches = [
+      # First batch
+      [
+        [1, 2], # id column
+        %w[Alice Bob], # name column
+        [95.5, 82.3], # score column
+        [Time.new(2024, 1, 1), Time.new(2024, 1, 2)], # date column
+        [Time.new(2024, 1, 1, 10, 30), Time.new(2024, 1, 2, 14, 45)], # timestamp column
+        [true, false]
+      ],
+      # Second batch
+      [
+        [3], # id column
+        ["Charlie"], # name column
+        [88.7], # score column
+        [Time.new(2024, 1, 3)], # date column
+        [Time.new(2024, 1, 3, 9, 15)], # timestamp column
+        [true]
+      ]
+    ]
+
+    # Create an enumerator from the batches
+    columns = batches.each
+
+    # Write to a parquet file
+    Parquet.write_columns(
+      columns,
+      schema: [
+        { "id" => "int64" },
+        { "name" => "string" },
+        { "score" => "double" },
+        { "date" => "date32" },
+        { "timestamp" => "timestamp_millis" },
+        { "data" => "boolean" }
+      ],
+      write_to: "test/students.parquet"
+    )
+
+    # Read and verify the data using DuckDB
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query("SELECT * FROM 'test/students.parquet' ORDER BY id") do |result|
+          rows = result.to_a
+          assert_equal 3, rows.length
+
+          assert_equal 1, rows[0]["id"]
+          assert_equal "Alice", rows[0]["name"]
+          assert_in_delta 95.5, rows[0]["score"], 0.0001
+          assert_equal "2024-01-01", rows[0]["date"].to_s
+          assert_equal "2024-01-01 10:30:00", rows[0]["timestamp"].to_s
+          assert_equal true, rows[0]["data"]
+
+          assert_equal 2, rows[1]["id"]
+          assert_equal "Bob", rows[1]["name"]
+          assert_in_delta 82.3, rows[1]["score"], 0.0001
+          assert_equal "2024-01-02", rows[1]["date"].to_s
+          assert_equal "2024-01-02 14:45:00", rows[1]["timestamp"].to_s
+          assert_equal false, rows[1]["data"]
+
+          assert_equal 3, rows[2]["id"]
+          assert_equal "Charlie", rows[2]["name"]
+          assert_in_delta 88.7, rows[2]["score"], 0.0001
+          assert_equal "2024-01-03", rows[2]["date"].to_s
+          assert_equal "2024-01-03 09:15:00", rows[2]["timestamp"].to_s
+          assert_equal true, rows[2]["data"]
+        end
+      end
+    end
+  ensure
+    File.delete("test/students.parquet") if File.exist?("test/students.parquet")
   end
 end
