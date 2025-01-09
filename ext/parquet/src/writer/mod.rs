@@ -6,7 +6,12 @@ use std::{
     sync::Arc,
 };
 
-use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder};
+use arrow_array::builder::{
+    BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder, Float32Builder, Float64Builder,
+    Int16Builder, Int32Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder,
+    TimestampMicrosecondBuilder, TimestampMillisecondBuilder, UInt16Builder, UInt32Builder,
+    UInt64Builder, UInt8Builder,
+};
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Float16Array,
     Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
@@ -24,10 +29,11 @@ use magnus::{
 use parquet::{arrow::ArrowWriter, errors::ParquetError};
 use tempfile::NamedTempFile;
 
-mod type_conversion {
-    use jiff::tz::{Offset, TimeZone};
+use crate::ParquetValue;
 
+mod type_conversion {
     use super::*;
+    use jiff::tz::{Offset, TimeZone};
 
     pub struct NumericConverter<T> {
         _phantom: std::marker::PhantomData<T>,
@@ -162,12 +168,22 @@ mod type_conversion {
         }
     }
 
-    pub fn convert_to_list(value: Value) -> Result<Vec<Value>, MagnusError> {
+    pub fn convert_to_list(
+        value: Value,
+        type_: ParquetSchemaType,
+    ) -> Result<Vec<Value>, MagnusError> {
         let ruby = unsafe { Ruby::get_unchecked() };
         if value.is_kind_of(ruby.class_array()) {
             let array = RArray::from_value(value).ok_or_else(|| {
                 MagnusError::new(magnus::exception::type_error(), "Invalid list format")
             })?;
+
+            // Validate each item in the array
+            for item in array.each() {
+                let item_value = item?;
+                convert_array_to_arrow(vec![item_value], &type_)?;
+            }
+
             Ok(array.into_iter().collect())
         } else {
             Err(MagnusError::new(
@@ -357,7 +373,6 @@ mod type_conversion {
             ParquetSchemaType::Map => {
                 panic!("Map type not yet supported");
             }
-            ParquetSchemaType::Struct => unimplemented!("Struct type not yet supported"),
         }
     }
 }
@@ -396,7 +411,6 @@ pub enum ParquetSchemaType {
     TimestampMicros,
     List,
     Map,
-    Struct,
 }
 
 #[derive(Debug)]
@@ -506,7 +520,6 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                     }
                     ParquetSchemaType::List => unimplemented!("List type not yet supported"),
                     ParquetSchemaType::Map => unimplemented!("Map type not yet supported"),
-                    ParquetSchemaType::Struct => unimplemented!("Struct type not yet supported"),
                 },
                 true,
             )
@@ -627,7 +640,6 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
                     }
                     ParquetSchemaType::List => unimplemented!("List type not yet supported"),
                     ParquetSchemaType::Map => unimplemented!("Map type not yet supported"),
-                    ParquetSchemaType::Struct => unimplemented!("Struct type not yet supported"),
                 },
                 true,
             )
@@ -719,7 +731,7 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
 struct ColumnCollector {
     name: String,
     type_: ParquetSchemaType,
-    values: Vec<Value>,
+    values: Vec<ParquetValue>,
 }
 
 impl ColumnCollector {
@@ -732,13 +744,101 @@ impl ColumnCollector {
     }
 
     fn push_value(&mut self, value: Value) -> Result<(), MagnusError> {
-        self.values.push(value);
+        let parquet_value = match &self.type_ {
+            ParquetSchemaType::Int8 => {
+                let v =
+                    type_conversion::NumericConverter::<i8>::convert_with_string_fallback(value)?;
+                ParquetValue::Int8(v)
+            }
+            ParquetSchemaType::Int16 => {
+                let v =
+                    type_conversion::NumericConverter::<i16>::convert_with_string_fallback(value)?;
+                ParquetValue::Int16(v)
+            }
+            ParquetSchemaType::Int32 => {
+                let v =
+                    type_conversion::NumericConverter::<i32>::convert_with_string_fallback(value)?;
+                ParquetValue::Int32(v)
+            }
+            ParquetSchemaType::Int64 => {
+                let v =
+                    type_conversion::NumericConverter::<i64>::convert_with_string_fallback(value)?;
+                ParquetValue::Int64(v)
+            }
+            ParquetSchemaType::UInt8 => {
+                let v =
+                    type_conversion::NumericConverter::<u8>::convert_with_string_fallback(value)?;
+                ParquetValue::UInt8(v)
+            }
+            ParquetSchemaType::UInt16 => {
+                let v =
+                    type_conversion::NumericConverter::<u16>::convert_with_string_fallback(value)?;
+                ParquetValue::UInt16(v)
+            }
+            ParquetSchemaType::UInt32 => {
+                let v =
+                    type_conversion::NumericConverter::<u32>::convert_with_string_fallback(value)?;
+                ParquetValue::UInt32(v)
+            }
+            ParquetSchemaType::UInt64 => {
+                let v =
+                    type_conversion::NumericConverter::<u64>::convert_with_string_fallback(value)?;
+                ParquetValue::UInt64(v)
+            }
+            ParquetSchemaType::Float => {
+                let v =
+                    type_conversion::NumericConverter::<f32>::convert_with_string_fallback(value)?;
+                ParquetValue::Float32(v)
+            }
+            ParquetSchemaType::Double => {
+                let v =
+                    type_conversion::NumericConverter::<f64>::convert_with_string_fallback(value)?;
+                ParquetValue::Float64(v)
+            }
+            ParquetSchemaType::String => {
+                let v = String::try_convert(value)?;
+                ParquetValue::String(v)
+            }
+            ParquetSchemaType::Binary => {
+                let v = type_conversion::convert_to_binary(value)?;
+                ParquetValue::Bytes(v)
+            }
+            ParquetSchemaType::Boolean => {
+                let v = type_conversion::convert_to_boolean(value)?;
+                ParquetValue::Boolean(v)
+            }
+            ParquetSchemaType::Date32 => {
+                let v = type_conversion::convert_to_date32(value)?;
+                ParquetValue::Date32(v)
+            }
+            ParquetSchemaType::TimestampMillis => {
+                let v = type_conversion::convert_to_timestamp_millis(value)?;
+                ParquetValue::TimestampMillis(v, None)
+            }
+            ParquetSchemaType::TimestampMicros => {
+                let v = type_conversion::convert_to_timestamp_micros(value)?;
+                ParquetValue::TimestampMicros(v, None)
+            }
+            ParquetSchemaType::List => {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    "List type not yet supported",
+                ))
+            }
+            ParquetSchemaType::Map => {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    "Map type not yet supported",
+                ))
+            }
+        };
+        self.values.push(parquet_value);
         Ok(())
     }
 
     fn take_array(&mut self) -> Result<Arc<dyn Array>, MagnusError> {
         let values = std::mem::take(&mut self.values);
-        type_conversion::convert_array_to_arrow(values, &self.type_)
+        arrow_conversion::parquet_values_to_arrow(values, &self.type_)
     }
 }
 
@@ -874,7 +974,6 @@ impl FromStr for ParquetSchemaType {
             "timestamp_micros" => Ok(ParquetSchemaType::TimestampMicros),
             "list" => Ok(ParquetSchemaType::List),
             "map" => Ok(ParquetSchemaType::Map),
-            "struct" => Ok(ParquetSchemaType::Struct),
             _ => Err(MagnusError::new(
                 magnus::exception::runtime_error(),
                 format!("Invalid schema type: {}", s),
@@ -939,5 +1038,286 @@ impl Write for IoLikeValue {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
         Ok(())
+    }
+}
+
+mod arrow_conversion {
+    use super::*;
+    use crate::ParquetValue;
+
+    pub fn parquet_values_to_arrow(
+        values: Vec<ParquetValue>,
+        type_: &ParquetSchemaType,
+    ) -> Result<Arc<dyn Array>, MagnusError> {
+        match type_ {
+            ParquetSchemaType::Int8 => {
+                let mut builder = Int8Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Int8(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Int8, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Int16 => {
+                let mut builder = Int16Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Int16(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Int16, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Int32 => {
+                let mut builder = Int32Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Int32(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Int32, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Int64 => {
+                let mut builder = Int64Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Int64(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Int64, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::UInt8 => {
+                let mut builder = UInt8Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::UInt8(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected UInt8, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::UInt16 => {
+                let mut builder = UInt16Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::UInt16(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected UInt16, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::UInt32 => {
+                let mut builder = UInt32Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::UInt32(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected UInt32, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::UInt64 => {
+                let mut builder = UInt64Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::UInt64(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected UInt64, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Float => {
+                let mut builder = Float32Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Float32(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Float32, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Double => {
+                let mut builder = Float64Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Float64(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Float64, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::String => {
+                let mut builder = StringBuilder::with_capacity(values.len(), values.len() * 32);
+                for value in values {
+                    match value {
+                        ParquetValue::String(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected String, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Binary => {
+                let mut builder = BinaryBuilder::with_capacity(values.len(), values.len() * 32);
+                for value in values {
+                    match value {
+                        ParquetValue::Bytes(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Binary, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Boolean => {
+                let mut builder = BooleanBuilder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Boolean(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Boolean, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::Date32 => {
+                let mut builder = Date32Builder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::Date32(v) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected Date32, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::TimestampMillis => {
+                let mut builder = TimestampMillisecondBuilder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::TimestampMillis(v, _) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected TimestampMillis, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::TimestampMicros => {
+                let mut builder = TimestampMicrosecondBuilder::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        ParquetValue::TimestampMicros(v, _) => builder.append_value(v),
+                        ParquetValue::Null => builder.append_null(),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Expected TimestampMicros, got {:?}", value),
+                            ))
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ParquetSchemaType::List => {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    "List type not yet supported",
+                ))
+            }
+            ParquetSchemaType::Map => {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    "Map type not yet supported",
+                ))
+            }
+        }
     }
 }
