@@ -1,11 +1,14 @@
+mod parquet_column_reader;
+mod parquet_row_reader;
+
 use std::io;
 
 use magnus::{Error as MagnusError, Ruby};
 use thiserror::Error;
 
 use crate::header_cache::CacheError;
-pub use crate::parquet_column_reader::parse_parquet_columns;
-pub use crate::parquet_row_reader::parse_parquet_rows;
+pub use parquet_column_reader::parse_parquet_columns;
+pub use parquet_row_reader::parse_parquet_rows;
 
 #[derive(Error, Debug)]
 pub enum ReaderError {
