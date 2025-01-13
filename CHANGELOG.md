@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.8
+
+- Added support for writing Parquet files with compression:
+  - Supports common compression codecs: gzip, snappy, lz4, zstd
+  - Configurable via `compression` option when writing files
+  - Example: `Parquet.write_rows(data, schema: schema, write_to: path, compression: "gzip")`
+  - Default is uncompressed if no compression specified
+
 ## 0.2.7
 
 - Added support for specifying `format` in schema for parsing time strings in the iterators when writing to Parquet

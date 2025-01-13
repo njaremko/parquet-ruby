@@ -65,15 +65,18 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #   - `write_to`: String path or IO object to write the parquet file to
   #   - `batch_size`: Optional batch size for writing (defaults to 1000)
+  #   - `compression`: Optional compression type to use (defaults to "zstd")
+  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   sig do
     params(
       read_from: T::Enumerator[T::Array[T.untyped]],
       schema: T::Array[T::Hash[String, String]],
       write_to: T.any(String, IO),
-      batch_size: T.nilable(Integer)
+      batch_size: T.nilable(Integer),
+      compression: T.nilable(String)
     ).void
   end
-  def self.write_rows(read_from, schema:, write_to:, batch_size: nil)
+  def self.write_rows(read_from, schema:, write_to:, batch_size: nil, compression: nil)
   end
 
   # Options:
@@ -89,13 +92,16 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #     - Looks like [{"column_name" => {"type" => "date32", "format" => "%Y-%m-%d"}}, {"column_name" => "int8"}]
   #   - `write_to`: String path or IO object to write the parquet file to
+  #   - `compression`: Optional compression type to use (defaults to "zstd")
+  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   sig do
     params(
       read_from: T::Enumerator[T::Array[T::Array[T.untyped]]],
       schema: T::Array[T::Hash[String, String]],
-      write_to: T.any(String, IO)
+      write_to: T.any(String, IO),
+      compression: T.nilable(String)
     ).void
   end
-  def self.write_columns(read_from, schema:, write_to:)
+  def self.write_columns(read_from, schema:, write_to:, compression: nil)
   end
 end

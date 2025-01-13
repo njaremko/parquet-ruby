@@ -11,7 +11,11 @@ use magnus::{
     value::ReprValue,
     Error as MagnusError, RArray, Ruby, TryConvert, Value,
 };
-use parquet::arrow::ArrowWriter;
+use parquet::{
+    arrow::ArrowWriter,
+    basic::{Compression, GzipLevel, ZstdLevel},
+    file::properties::WriterProperties,
+};
 use tempfile::NamedTempFile;
 
 use crate::{
@@ -28,11 +32,12 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (read_from,) = parsed_args.required;
 
-    let kwargs = get_kwargs::<_, (Value, Value), (Option<Option<usize>>,), ()>(
-        parsed_args.keywords,
-        &["schema", "write_to"],
-        &["batch_size"],
-    )?;
+    let kwargs =
+        get_kwargs::<_, (Value, Value), (Option<Option<usize>>, Option<Option<String>>), ()>(
+            parsed_args.keywords,
+            &["schema", "write_to"],
+            &["batch_size", "compression"],
+        )?;
 
     let schema_array = RArray::from_value(kwargs.required.0).ok_or_else(|| {
         MagnusError::new(
@@ -105,6 +110,7 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
         write_to: kwargs.required.1,
         schema,
         batch_size: kwargs.optional.0.flatten(),
+        compression: kwargs.optional.1.flatten(),
     })
 }
 
@@ -117,6 +123,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         write_to,
         schema,
         batch_size,
+        compression,
     } = parse_parquet_write_args(args)?;
 
     let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
@@ -158,7 +165,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
     let arrow_schema = Arc::new(Schema::new(arrow_fields));
 
     // Create the writer
-    let mut writer = create_writer(&ruby, &write_to, arrow_schema.clone())?;
+    let mut writer = create_writer(&ruby, &write_to, arrow_schema.clone(), compression)?;
 
     if read_from.is_kind_of(ruby.class_enumerator()) {
         // Create collectors for each column
@@ -238,7 +245,8 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
         read_from,
         write_to,
         schema,
-        batch_size: _, // Batch size is determined by the input
+        batch_size: _,
+        compression,
     } = parse_parquet_write_args(args)?;
 
     // Convert schema to Arrow schema
@@ -278,7 +286,7 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
     let arrow_schema = Arc::new(Schema::new(arrow_fields));
 
     // Create the writer
-    let mut writer = create_writer(&ruby, &write_to, arrow_schema.clone())?;
+    let mut writer = create_writer(&ruby, &write_to, arrow_schema.clone(), compression)?;
 
     if read_from.is_kind_of(ruby.class_enumerator()) {
         loop {
@@ -360,12 +368,25 @@ fn create_writer(
     ruby: &Ruby,
     write_to: &Value,
     schema: Arc<Schema>,
+    compression: Option<String>,
 ) -> Result<WriterOutput, MagnusError> {
+    // Create writer properties with compression based on the option
+    let props = WriterProperties::builder()
+        .set_compression(match compression.as_deref() {
+            Some("none") | Some("uncompressed") => Compression::UNCOMPRESSED,
+            Some("snappy") => Compression::SNAPPY,
+            Some("gzip") => Compression::GZIP(GzipLevel::default()),
+            Some("lz4") => Compression::LZ4,
+            Some("zstd") => Compression::ZSTD(ZstdLevel::default()),
+            _ => Compression::UNCOMPRESSED,
+        })
+        .build();
+
     if write_to.is_kind_of(ruby.class_string()) {
         let path = write_to.to_r_string()?.to_string()?;
         let file: Box<dyn SendableWrite> = Box::new(File::create(path).unwrap());
         let writer =
-            ArrowWriter::try_new(file, schema, None).map_err(|e| ParquetErrorWrapper(e))?;
+            ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| ParquetErrorWrapper(e))?;
         Ok(WriterOutput::File(writer))
     } else {
         // Create a temporary file to write to instead of directly to the IoLikeValue
@@ -382,7 +403,7 @@ fn create_writer(
             )
         })?);
         let writer =
-            ArrowWriter::try_new(file, schema, None).map_err(|e| ParquetErrorWrapper(e))?;
+            ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| ParquetErrorWrapper(e))?;
         Ok(WriterOutput::TempFile(writer, temp_file))
     }
 }

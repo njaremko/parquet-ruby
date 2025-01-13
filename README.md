@@ -152,8 +152,15 @@ batches = [
 # Create an enumerator from the batches
 columns = batches.each
 
-# Write to a parquet file
+# Write to a parquet file with default ZSTD compression
 Parquet.write_columns(columns, schema: schema, write_to: "data.parquet")
+
+# Write to a parquet file with specific compression
+Parquet.write_columns(columns,
+  schema: schema,
+  write_to: "data.parquet",
+  compression: "snappy"  # Supported: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+)
 
 # Write to an IO object
 File.open("data.parquet", "wb") do |file|
