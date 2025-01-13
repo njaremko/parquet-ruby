@@ -40,18 +40,20 @@ impl std::fmt::Display for ParserResultType {
 }
 
 #[derive(Debug, Clone)]
-pub struct ListField {
-    pub item_type: ParquetSchemaType,
+pub struct ListField<'a> {
+    pub item_type: ParquetSchemaType<'a>,
+    pub format: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
-pub struct MapField {
-    pub key_type: ParquetSchemaType,
-    pub value_type: ParquetSchemaType,
+pub struct MapField<'a> {
+    pub key_type: ParquetSchemaType<'a>,
+    pub value_type: ParquetSchemaType<'a>,
+    pub format: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
-pub enum ParquetSchemaType {
+pub enum ParquetSchemaType<'a> {
     Int8,
     Int16,
     Int32,
@@ -68,6 +70,6 @@ pub enum ParquetSchemaType {
     Date32,
     TimestampMillis,
     TimestampMicros,
-    List(Box<ListField>),
-    Map(Box<MapField>),
+    List(Box<ListField<'a>>),
+    Map(Box<MapField<'a>>),
 }

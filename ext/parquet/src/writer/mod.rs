@@ -59,11 +59,45 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
             ));
         }
 
-        let (name, type_str) = &entries[0];
+        let (name, type_value) = &entries[0];
         let name = String::try_convert(name.clone())?;
-        let type_ = ParquetSchemaType::try_convert(type_str.clone())?;
 
-        schema.push(SchemaField { name, type_ });
+        let (type_, format) = if type_value.is_kind_of(ruby.class_hash()) {
+            let type_hash: Vec<(Value, Value)> = type_value.funcall("to_a", ())?;
+            let mut type_str = None;
+            let mut format_str = None;
+
+            for (key, value) in type_hash {
+                let key = String::try_convert(key)?;
+                match key.as_str() {
+                    "type" => type_str = Some(value),
+                    "format" => format_str = Some(String::try_convert(value)?),
+                    _ => {
+                        return Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            format!("Unknown key '{}' in type definition", key),
+                        ))
+                    }
+                }
+            }
+
+            let type_str = type_str.ok_or_else(|| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    "Missing 'type' in type definition",
+                )
+            })?;
+
+            (ParquetSchemaType::try_convert(type_str)?, format_str)
+        } else {
+            (ParquetSchemaType::try_convert(type_value.clone())?, None)
+        };
+
+        schema.push(SchemaField {
+            name,
+            type_,
+            format,
+        });
     }
 
     Ok(ParquetWriteArgs {
@@ -130,7 +164,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         // Create collectors for each column
         let mut column_collectors: Vec<ColumnCollector> = schema
             .into_iter()
-            .map(|field| ColumnCollector::new(field.name, field.type_))
+            .map(|field| ColumnCollector::new(field.name, field.type_, field.format))
             .collect();
 
         let mut rows_in_batch = 0;

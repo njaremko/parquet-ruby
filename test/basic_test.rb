@@ -734,4 +734,76 @@ class BasicTest < Minitest::Test
   ensure
     File.delete("test/students.parquet") if File.exist?("test/students.parquet")
   end
+
+  def test_schema_with_format
+    # Test writing rows with format specified in schema
+    rows = [
+      ["2024-01-01", "2024-01-01 10:30:00+0000"],
+      ["2024-01-02", "2024-01-02 14:45:00+0000"],
+      ["2024-01-03", "2024-01-03 09:15:00+0000"]
+    ].each
+
+    Parquet.write_rows(
+      rows,
+      schema: [
+        { "date" => { "type" => "date32", "format" => "%Y-%m-%d" } },
+        { "timestamp" => { "type" => "timestamp_millis", "format" => "%Y-%m-%d %H:%M:%S%z" } }
+      ],
+      write_to: "test/formatted.parquet"
+    )
+
+    # Test writing columns with format specified in schema
+    columns = [
+      [
+        %w[2024-01-01 2024-01-02 2024-01-03],
+        ["2024-01-01 10:30:00+0000", "2024-01-02 14:45:00+0000", "2024-01-03 09:15:00+0000"]
+      ]
+    ].each
+
+    Parquet.write_columns(
+      columns,
+      schema: [
+        { "date" => { "type" => "date32", "format" => "%Y-%m-%d" } },
+        { "timestamp" => { "type" => "timestamp_millis", "format" => "%Y-%m-%d %H:%M:%S%z" } }
+      ],
+      write_to: "test/formatted_columns.parquet"
+    )
+
+    # Read and verify the row-based data using DuckDB
+    DuckDB::Database.open do |db|
+      db.connect do |con|
+        con.query("SELECT * FROM 'test/formatted.parquet'") do |result|
+          rows = result.to_a
+          assert_equal 3, rows.length
+
+          assert_equal "2024-01-01", rows[0]["date"].to_s
+          assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+
+          assert_equal "2024-01-02", rows[1]["date"].to_s
+          assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+
+          assert_equal "2024-01-03", rows[2]["date"].to_s
+          assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
+        end
+
+        # Verify column-based data matches row-based data
+        con.query("SELECT * FROM 'test/formatted_columns.parquet'") do |result|
+          rows = result.to_a
+          assert_equal 3, rows.length
+
+          assert_equal "2024-01-01", rows[0]["date"].to_s
+          assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+
+          assert_equal "2024-01-02", rows[1]["date"].to_s
+          assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+
+          assert_equal "2024-01-03", rows[2]["date"].to_s
+          assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
+        end
+      end
+    end
+  ensure
+    File.delete("test/formatted.parquet") if File.exist?("test/formatted.parquet")
+    File.delete("test/formatted_columns.parquet") if File.exist?("test/formatted_columns.parquet")
+  end
 end

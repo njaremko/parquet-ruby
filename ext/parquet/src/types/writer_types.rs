@@ -12,16 +12,17 @@ use tempfile::NamedTempFile;
 use crate::types::{ListField, MapField, ParquetSchemaType};
 
 #[derive(Debug)]
-pub struct SchemaField {
+pub struct SchemaField<'a> {
     pub name: String,
-    pub type_: ParquetSchemaType,
+    pub type_: ParquetSchemaType<'a>,
+    pub format: Option<String>,
 }
 
 #[derive(Debug)]
-pub struct ParquetWriteArgs {
+pub struct ParquetWriteArgs<'a> {
     pub read_from: Value,
     pub write_to: Value,
-    pub schema: Vec<SchemaField>,
+    pub schema: Vec<SchemaField<'a>>,
     pub batch_size: Option<usize>,
 }
 
@@ -51,7 +52,7 @@ impl Write for IoLikeValue {
     }
 }
 
-impl FromStr for ParquetSchemaType {
+impl<'a> FromStr for ParquetSchemaType<'a> {
     type Err = MagnusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -74,10 +75,12 @@ impl FromStr for ParquetSchemaType {
             "timestamp_micros" => Ok(ParquetSchemaType::TimestampMicros),
             "list" => Ok(ParquetSchemaType::List(Box::new(ListField {
                 item_type: ParquetSchemaType::Int8,
+                format: None,
             }))),
             "map" => Ok(ParquetSchemaType::Map(Box::new(MapField {
                 key_type: ParquetSchemaType::String,
                 value_type: ParquetSchemaType::Int8,
+                format: None,
             }))),
             _ => Err(MagnusError::new(
                 magnus::exception::runtime_error(),
@@ -87,7 +90,7 @@ impl FromStr for ParquetSchemaType {
     }
 }
 
-impl TryConvert for ParquetSchemaType {
+impl<'a> TryConvert for ParquetSchemaType<'a> {
     fn try_convert(value: Value) -> Result<Self, MagnusError> {
         let ruby = unsafe { Ruby::get_unchecked() };
         let schema_type = parse_string_or_symbol(&ruby, value)?;
@@ -98,7 +101,7 @@ impl TryConvert for ParquetSchemaType {
 
 // We know this type is safe to move between threads because it's just an enum
 // with simple primitive types and strings
-unsafe impl Send for ParquetSchemaType {}
+unsafe impl<'a> Send for ParquetSchemaType<'a> {}
 
 fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, MagnusError> {
     if value.is_nil() {
@@ -162,17 +165,19 @@ impl From<ParquetErrorWrapper> for MagnusError {
     }
 }
 
-pub struct ColumnCollector {
+pub struct ColumnCollector<'a> {
     pub name: String,
-    pub type_: ParquetSchemaType,
+    pub type_: ParquetSchemaType<'a>,
+    pub format: Option<String>,
     pub values: Vec<crate::types::ParquetValue>,
 }
 
-impl ColumnCollector {
-    pub fn new(name: String, type_: ParquetSchemaType) -> Self {
+impl<'a> ColumnCollector<'a> {
+    pub fn new(name: String, type_: ParquetSchemaType<'a>, format: Option<String>) -> Self {
         Self {
             name,
             type_,
+            format,
             values: Vec::new(),
         }
     }
@@ -244,15 +249,15 @@ impl ColumnCollector {
                 ParquetValue::Boolean(v)
             }
             ParquetSchemaType::Date32 => {
-                let v = convert_to_date32(value, None)?;
+                let v = convert_to_date32(value, self.format.as_deref())?;
                 ParquetValue::Date32(v)
             }
             ParquetSchemaType::TimestampMillis => {
-                let v = convert_to_timestamp_millis(value, None)?;
+                let v = convert_to_timestamp_millis(value, self.format.as_deref())?;
                 ParquetValue::TimestampMillis(v, None)
             }
             ParquetSchemaType::TimestampMicros => {
-                let v = convert_to_timestamp_micros(value, None)?;
+                let v = convert_to_timestamp_micros(value, self.format.as_deref())?;
                 ParquetValue::TimestampMicros(v, None)
             }
             ParquetSchemaType::List(list_field) => {

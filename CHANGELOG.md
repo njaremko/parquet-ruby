@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.7
+
+- Added support for specifying `format` in schema for parsing time strings in the iterators when writing to Parquet
+  - Allows parsing date strings with `format` option in schema (e.g. `"%Y-%m-%d"` for dates)
+  - Allows parsing timestamp strings with `format` option in schema (e.g. `"%Y-%m-%d %H:%M:%S%z"` for timestamps)
+  - Works with both `write_rows` and `write_columns` methods
+
 ## 0.2.6
 
 - Fix handling of explicit `nil` for optional arguments
