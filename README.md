@@ -81,3 +81,95 @@ Additional arguments for `each_column`:
 - `batch_size`: Number of rows per batch (defaults to implementation-defined value)
 
 When no block is given, both methods return an Enumerator.
+
+### Writing Row-wise Data
+
+The `write_rows` method allows you to write data row by row:
+
+```ruby
+require "parquet"
+
+# Define the schema for your data
+schema = [
+  { "id" => "int64" },
+  { "name" => "string" },
+  { "score" => "double" }
+]
+
+# Create an enumerator that yields arrays of row values
+rows = [
+  [1, "Alice", 95.5],
+  [2, "Bob", 82.3],
+  [3, "Charlie", 88.7]
+].each
+
+# Write to a file
+Parquet.write_rows(rows, schema: schema, write_to: "data.parquet")
+
+# Write to an IO object
+File.open("data.parquet", "wb") do |file|
+  Parquet.write_rows(rows, schema: schema, write_to: file)
+end
+
+# Optionally specify batch size (default is 1000)
+Parquet.write_rows(rows,
+  schema: schema,
+  write_to: "data.parquet",
+  batch_size: 500
+)
+```
+
+### Writing Column-wise Data
+
+The `write_columns` method provides a more efficient way to write data in column-oriented batches:
+
+```ruby
+require "parquet"
+
+# Define the schema
+schema = [
+  { "id" => "int64" },
+  { "name" => "string" },
+  { "score" => "double" }
+]
+
+# Create batches of column data
+batches = [
+  # First batch
+  [
+    [1, 2],          # id column
+    ["Alice", "Bob"], # name column
+    [95.5, 82.3]     # score column
+  ],
+  # Second batch
+  [
+    [3],             # id column
+    ["Charlie"],     # name column
+    [88.7]           # score column
+  ]
+]
+
+# Create an enumerator from the batches
+columns = batches.each
+
+# Write to a parquet file
+Parquet.write_columns(columns, schema: schema, write_to: "data.parquet")
+
+# Write to an IO object
+File.open("data.parquet", "wb") do |file|
+  Parquet.write_columns(columns, schema: schema, write_to: file)
+end
+```
+
+The following data types are supported in the schema:
+
+- `int8`, `int16`, `int32`, `int64`
+- `uint8`, `uint16`, `uint32`, `uint64`
+- `float`, `double`
+- `string`
+- `binary`
+- `boolean`
+- `date32`
+- `timestamp_millis`, `timestamp_micros`
+
+Note: List and Map types are currently not supported.

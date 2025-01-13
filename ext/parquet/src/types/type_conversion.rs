@@ -340,70 +340,12 @@ pub fn convert_to_map(
     }
 }
 
-// Add macro for handling numeric array conversions
-#[macro_export]
-macro_rules! impl_numeric_array_conversion {
-    ($column:expr, $array_type:ty, $variant:ident) => {{
-        let array = downcast_array::<$array_type>($column);
-        if array.is_nullable() {
-            array
-                .values()
-                .iter()
-                .enumerate()
-                .map(|(i, x)| {
-                    if array.is_null(i) {
-                        ParquetValue::Null
-                    } else {
-                        ParquetValue::$variant(*x)
-                    }
-                })
-                .collect()
-        } else {
-            array
-                .values()
-                .iter()
-                .map(|x| ParquetValue::$variant(*x))
-                .collect()
-        }
-    }};
-}
-
-// Add macro for handling boolean array conversions
-#[macro_export]
-macro_rules! impl_boolean_array_conversion {
-    ($column:expr, $array_type:ty, $variant:ident) => {{
-        let array = downcast_array::<$array_type>($column);
-        if array.is_nullable() {
-            array
-                .values()
-                .iter()
-                .enumerate()
-                .map(|(i, x)| {
-                    if array.is_null(i) {
-                        ParquetValue::Null
-                    } else {
-                        ParquetValue::$variant(x)
-                    }
-                })
-                .collect()
-        } else {
-            array
-                .values()
-                .iter()
-                .map(|x| ParquetValue::$variant(x))
-                .collect()
-        }
-    }};
-}
-
-// Add macro for handling timestamp array conversions
-#[macro_export]
 macro_rules! impl_timestamp_to_arrow_conversion {
     ($values:expr, $builder_type:ty, $variant:ident) => {{
         let mut builder = <$builder_type>::with_capacity($values.len());
         for value in $values {
             match value {
-                ParquetValue::$variant(v, _) => builder.append_value(v),
+                ParquetValue::$variant(v, _tz) => builder.append_value(v),
                 ParquetValue::Null => builder.append_null(),
                 _ => {
                     return Err(MagnusError::new(
@@ -478,6 +420,90 @@ macro_rules! impl_array_conversion {
         }
         Ok(Arc::new(builder.finish()))
     }};
+}
+
+#[macro_export]
+macro_rules! append_list_value {
+    ($list_builder:expr, $item_type:path, $value:expr, $builder_type:ty, $value_variant:path) => {
+        match (&$item_type, &$value) {
+            ($item_type, $value_variant(v)) => {
+                $list_builder
+                    .values()
+                    .as_any_mut()
+                    .downcast_mut::<$builder_type>()
+                    .unwrap()
+                    .append_value(v.clone());
+            }
+            (_, ParquetValue::Null) => {
+                $list_builder.append_null();
+            }
+            _ => {
+                return Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Type mismatch in list: expected {:?}, got {:?}",
+                        $item_type, $value
+                    ),
+                ))
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! append_list_value_copy {
+    ($list_builder:expr, $item_type:path, $value:expr, $builder_type:ty, $value_variant:path) => {
+        match (&$item_type, &$value) {
+            ($item_type, $value_variant(v)) => {
+                $list_builder
+                    .values()
+                    .as_any_mut()
+                    .downcast_mut::<$builder_type>()
+                    .unwrap()
+                    .append_value(*v);
+            }
+            (_, ParquetValue::Null) => {
+                $list_builder.append_null();
+            }
+            _ => {
+                return Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Type mismatch in list: expected {:?}, got {:?}",
+                        $item_type, $value
+                    ),
+                ))
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! append_timestamp_list_value {
+    ($list_builder:expr, $item_type:path, $value:expr, $builder_type:ty, $value_variant:path) => {
+        match (&$item_type, &$value) {
+            ($item_type, $value_variant(v, _tz)) => {
+                $list_builder
+                    .values()
+                    .as_any_mut()
+                    .downcast_mut::<$builder_type>()
+                    .unwrap()
+                    .append_value(*v);
+            }
+            (_, ParquetValue::Null) => {
+                $list_builder.append_null();
+            }
+            _ => {
+                return Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Type mismatch in list: expected {:?}, got {:?}",
+                        $item_type, $value
+                    ),
+                ))
+            }
+        }
+    };
 }
 
 pub fn convert_parquet_values_to_arrow(
@@ -571,151 +597,123 @@ pub fn convert_parquet_values_to_arrow(
                     ParquetValue::List(items) => {
                         list_builder.append(true);
                         for item in items {
-                            match (&list_field.item_type, &item) {
-                                (ParquetSchemaType::Int8, ParquetValue::Int8(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Int8Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Int16, ParquetValue::Int16(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Int16Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Int32, ParquetValue::Int32(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Int32Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Int64, ParquetValue::Int64(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Int64Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::UInt8, ParquetValue::UInt8(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<UInt8Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::UInt16, ParquetValue::UInt16(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<UInt16Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::UInt32, ParquetValue::UInt32(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<UInt32Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::UInt64, ParquetValue::UInt64(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<UInt64Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Float, ParquetValue::Float32(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Float32Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Double, ParquetValue::Float64(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Float64Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::String, ParquetValue::String(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<StringBuilder>()
-                                        .unwrap()
-                                        .append_value(v);
-                                }
-                                (ParquetSchemaType::Binary, ParquetValue::Bytes(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<BinaryBuilder>()
-                                        .unwrap()
-                                        .append_value(v);
-                                }
-                                (ParquetSchemaType::Boolean, ParquetValue::Boolean(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<BooleanBuilder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (ParquetSchemaType::Date32, ParquetValue::Date32(v)) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<Date32Builder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (
+                            match list_field.item_type {
+                                ParquetSchemaType::Int8 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Int8,
+                                    item,
+                                    Int8Builder,
+                                    ParquetValue::Int8
+                                ),
+                                ParquetSchemaType::Int16 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Int16,
+                                    item,
+                                    Int16Builder,
+                                    ParquetValue::Int16
+                                ),
+                                ParquetSchemaType::Int32 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Int32,
+                                    item,
+                                    Int32Builder,
+                                    ParquetValue::Int32
+                                ),
+                                ParquetSchemaType::Int64 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Int64,
+                                    item,
+                                    Int64Builder,
+                                    ParquetValue::Int64
+                                ),
+                                ParquetSchemaType::UInt8 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::UInt8,
+                                    item,
+                                    UInt8Builder,
+                                    ParquetValue::UInt8
+                                ),
+                                ParquetSchemaType::UInt16 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::UInt16,
+                                    item,
+                                    UInt16Builder,
+                                    ParquetValue::UInt16
+                                ),
+                                ParquetSchemaType::UInt32 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::UInt32,
+                                    item,
+                                    UInt32Builder,
+                                    ParquetValue::UInt32
+                                ),
+                                ParquetSchemaType::UInt64 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::UInt64,
+                                    item,
+                                    UInt64Builder,
+                                    ParquetValue::UInt64
+                                ),
+                                ParquetSchemaType::Float => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Float,
+                                    item,
+                                    Float32Builder,
+                                    ParquetValue::Float32
+                                ),
+                                ParquetSchemaType::Double => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Double,
+                                    item,
+                                    Float64Builder,
+                                    ParquetValue::Float64
+                                ),
+                                ParquetSchemaType::String => append_list_value!(
+                                    list_builder,
+                                    ParquetSchemaType::String,
+                                    item,
+                                    StringBuilder,
+                                    ParquetValue::String
+                                ),
+                                ParquetSchemaType::Binary => append_list_value!(
+                                    list_builder,
+                                    ParquetSchemaType::Binary,
+                                    item,
+                                    BinaryBuilder,
+                                    ParquetValue::Bytes
+                                ),
+                                ParquetSchemaType::Boolean => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Boolean,
+                                    item,
+                                    BooleanBuilder,
+                                    ParquetValue::Boolean
+                                ),
+                                ParquetSchemaType::Date32 => append_list_value_copy!(
+                                    list_builder,
+                                    ParquetSchemaType::Date32,
+                                    item,
+                                    Date32Builder,
+                                    ParquetValue::Date32
+                                ),
+                                ParquetSchemaType::TimestampMillis => append_timestamp_list_value!(
+                                    list_builder,
                                     ParquetSchemaType::TimestampMillis,
-                                    ParquetValue::TimestampMillis(v, _),
-                                ) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<TimestampMillisecondBuilder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (
+                                    item,
+                                    TimestampMillisecondBuilder,
+                                    ParquetValue::TimestampMillis
+                                ),
+                                ParquetSchemaType::TimestampMicros => append_timestamp_list_value!(
+                                    list_builder,
                                     ParquetSchemaType::TimestampMicros,
-                                    ParquetValue::TimestampMicros(v, _),
-                                ) => {
-                                    list_builder
-                                        .values()
-                                        .as_any_mut()
-                                        .downcast_mut::<TimestampMicrosecondBuilder>()
-                                        .unwrap()
-                                        .append_value(*v);
-                                }
-                                (_, ParquetValue::Null) => {
-                                    list_builder.append_null();
-                                }
-                                _ => {
+                                    item,
+                                    TimestampMicrosecondBuilder,
+                                    ParquetValue::TimestampMicros
+                                ),
+                                ParquetSchemaType::List(_) | ParquetSchemaType::Map(_) => {
                                     return Err(MagnusError::new(
                                         magnus::exception::type_error(),
-                                        format!(
-                                            "Type mismatch in list: expected {:?}, got {:?}",
-                                            list_field.item_type, item
-                                        ),
+                                        "Nested lists and maps are not supported",
                                     ))
                                 }
                             }

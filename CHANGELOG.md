@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5
+
+- Arbitrarily bumping the verison a bit imply that the gem isn't alpha quality.
+- Add support for writing all types except for structs and arrays
+
 ## 0.0.5
 
 - Remove unused rust dependencies

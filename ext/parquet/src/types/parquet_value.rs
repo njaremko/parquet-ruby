@@ -1,7 +1,4 @@
-use crate::{
-    impl_boolean_array_conversion, impl_date_conversion, impl_numeric_array_conversion,
-    impl_timestamp_array_conversion, impl_timestamp_conversion,
-};
+use crate::{impl_date_conversion, impl_timestamp_array_conversion, impl_timestamp_conversion};
 
 use super::*;
 
@@ -265,6 +262,57 @@ impl TryFrom<Arc<dyn Array>> for ParquetValueVec {
     fn try_from(column: Arc<dyn Array>) -> Result<Self, Self::Error> {
         ParquetValueVec::try_from(&*column)
     }
+}
+
+macro_rules! impl_numeric_array_conversion {
+    ($column:expr, $array_type:ty, $variant:ident) => {{
+        let array = downcast_array::<$array_type>($column);
+        if array.is_nullable() {
+            array
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if array.is_null(i) {
+                        ParquetValue::Null
+                    } else {
+                        ParquetValue::$variant(*x)
+                    }
+                })
+                .collect()
+        } else {
+            array
+                .values()
+                .iter()
+                .map(|x| ParquetValue::$variant(*x))
+                .collect()
+        }
+    }};
+}
+macro_rules! impl_boolean_array_conversion {
+    ($column:expr, $array_type:ty, $variant:ident) => {{
+        let array = downcast_array::<$array_type>($column);
+        if array.is_nullable() {
+            array
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if array.is_null(i) {
+                        ParquetValue::Null
+                    } else {
+                        ParquetValue::$variant(x)
+                    }
+                })
+                .collect()
+        } else {
+            array
+                .values()
+                .iter()
+                .map(|x| ParquetValue::$variant(x))
+                .collect()
+        }
+    }};
 }
 
 impl TryFrom<&dyn Array> for ParquetValueVec {
