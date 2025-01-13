@@ -592,12 +592,12 @@ pub fn convert_parquet_values_to_arrow(
             };
 
             let mut list_builder = ListBuilder::new(value_builder);
+
             for value in values {
                 match value {
                     ParquetValue::List(items) => {
-                        list_builder.append(true);
                         for item in items {
-                            match list_field.item_type {
+                            match &list_field.item_type {
                                 ParquetSchemaType::Int8 => append_list_value_copy!(
                                     list_builder,
                                     ParquetSchemaType::Int8,

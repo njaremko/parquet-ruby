@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Fix handling of explicit `nil` for optional arguments
+
 ## 0.2.5
 
 - Arbitrarily bumping the verison a bit imply that the gem isn't alpha quality.

@@ -28,7 +28,7 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (read_from,) = parsed_args.required;
 
-    let kwargs = get_kwargs::<_, (Value, Value), (Option<usize>,), ()>(
+    let kwargs = get_kwargs::<_, (Value, Value), (Option<Option<usize>>,), ()>(
         parsed_args.keywords,
         &["schema", "write_to"],
         &["batch_size"],
@@ -70,7 +70,7 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
         read_from,
         write_to: kwargs.required.1,
         schema,
-        batch_size: kwargs.optional.0,
+        batch_size: kwargs.optional.0.flatten(),
     })
 }
 

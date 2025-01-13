@@ -568,7 +568,14 @@ class BasicTest < Minitest::Test
 
   def test_write_rows
     # Test different input formats
-    data = [[1, "Alice", 95.5], [3, "Bob", 82.3], [3, "Charlie", 88.7], [4, "David", 91.2], [5, "Eve", 1.5e2]]
+    data = [
+      [1, "Alice", 95.5],
+      [3, "Bob", 82.3],
+      [3, "Charlie", 88.7],
+      [4, "David", 91.2],
+      [5, "Eve", 1.5e2],
+      [6, nil, nil]
+    ]
 
     # Create an enumerator from the array
     rows = data.each
@@ -607,6 +614,10 @@ class BasicTest < Minitest::Test
           assert_equal 5, rows[4]["id"]
           assert_equal "Eve", rows[4]["name"]
           assert_in_delta 150.0, rows[4]["score"], 0.0001
+
+          assert_equal 6, rows[5]["id"]
+          assert_nil rows[5]["name"]
+          assert_nil rows[5]["score"]
         end
       end
     end
@@ -657,12 +668,12 @@ class BasicTest < Minitest::Test
       ],
       # Second batch
       [
-        [3], # id column
-        ["Charlie"], # name column
-        [88.7], # score column
-        [Time.new(2024, 1, 3)], # date column
-        [Time.new(2024, 1, 3, 9, 15)], # timestamp column
-        [true]
+        [3, 4], # id column
+        ["Charlie", nil], # name column
+        [88.7, nil], # score column
+        [Time.new(2024, 1, 3), nil], # date column
+        [Time.new(2024, 1, 3, 9, 15), nil], # timestamp column
+        [true, nil]
       ]
     ]
 
@@ -688,7 +699,7 @@ class BasicTest < Minitest::Test
       db.connect do |con|
         con.query("SELECT * FROM 'test/students.parquet' ORDER BY id") do |result|
           rows = result.to_a
-          assert_equal 3, rows.length
+          assert_equal 4, rows.length
 
           assert_equal 1, rows[0]["id"]
           assert_equal "Alice", rows[0]["name"]
@@ -710,6 +721,13 @@ class BasicTest < Minitest::Test
           assert_equal "2024-01-03", rows[2]["date"].to_s
           assert_equal "2024-01-03 09:15:00", rows[2]["timestamp"].to_s
           assert_equal true, rows[2]["data"]
+
+          assert_equal 4, rows[3]["id"]
+          assert_nil rows[3]["name"]
+          assert_nil rows[3]["score"]
+          assert_nil rows[3]["date"]
+          assert_nil rows[3]["timestamp"]
+          assert_nil rows[3]["data"]
         end
       end
     end

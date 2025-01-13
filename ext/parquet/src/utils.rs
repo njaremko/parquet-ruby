@@ -39,7 +39,7 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
 
-    let kwargs = get_kwargs::<_, (), (Option<Value>, Option<Vec<String>>), ()>(
+    let kwargs = get_kwargs::<_, (), (Option<Option<Value>>, Option<Option<Vec<String>>>), ()>(
         parsed_args.keywords,
         &[],
         &["result_type", "columns"],
@@ -48,6 +48,7 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
     let result_type: ParserResultType = match kwargs
         .optional
         .0
+        .flatten()
         .map(|value| parse_string_or_symbol(ruby, value))
     {
         Some(Ok(Some(parsed))) => parsed.try_into().map_err(|e| {
@@ -75,7 +76,7 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
     Ok(ParquetRowsArgs {
         to_read,
         result_type,
-        columns: kwargs.optional.1,
+        columns: kwargs.optional.1.flatten(),
     })
 }
 
@@ -95,7 +96,16 @@ pub fn parse_parquet_columns_args(
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
 
-    let kwargs = get_kwargs::<_, (), (Option<Value>, Option<Vec<String>>, Option<usize>), ()>(
+    let kwargs = get_kwargs::<
+        _,
+        (),
+        (
+            Option<Option<Value>>,
+            Option<Option<Vec<String>>>,
+            Option<Option<usize>>,
+        ),
+        (),
+    >(
         parsed_args.keywords,
         &[],
         &["result_type", "columns", "batch_size"],
@@ -104,6 +114,7 @@ pub fn parse_parquet_columns_args(
     let result_type: ParserResultType = match kwargs
         .optional
         .0
+        .flatten()
         .map(|value| parse_string_or_symbol(ruby, value))
     {
         Some(Ok(Some(parsed))) => parsed.try_into().map_err(|e| {
@@ -131,7 +142,7 @@ pub fn parse_parquet_columns_args(
     Ok(ParquetColumnsArgs {
         to_read,
         result_type,
-        columns: kwargs.optional.1,
-        batch_size: kwargs.optional.2,
+        columns: kwargs.optional.1.flatten(),
+        batch_size: kwargs.optional.2.flatten(),
     })
 }

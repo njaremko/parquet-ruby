@@ -157,6 +157,10 @@ impl IntoValue for ParquetValue {
 
 impl ParquetValue {
     pub fn from_value(value: Value, type_: &ParquetSchemaType) -> Result<Self, MagnusError> {
+        if value.is_nil() {
+            return Ok(ParquetValue::Null);
+        }
+
         match type_ {
             ParquetSchemaType::Int8 => {
                 let v = NumericConverter::<i8>::convert_with_string_fallback(value)?;

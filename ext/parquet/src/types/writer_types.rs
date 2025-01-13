@@ -185,6 +185,11 @@ impl ColumnCollector {
             NumericConverter,
         };
 
+        if value.is_nil() {
+            self.values.push(ParquetValue::Null);
+            return Ok(());
+        }
+
         let parquet_value = match &self.type_ {
             ParquetSchemaType::Int8 => {
                 let v = NumericConverter::<i8>::convert_with_string_fallback(value)?;
