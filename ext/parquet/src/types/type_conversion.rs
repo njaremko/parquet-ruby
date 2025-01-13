@@ -30,17 +30,29 @@ where
     }
 }
 
-pub fn convert_to_date32(value: Value) -> Result<i32, MagnusError> {
+pub fn convert_to_date32(value: Value, format: Option<String>) -> Result<i32, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
-        // Parse string into Timestamp using jiff
-        let date: jiff::civil::Date = s.parse().map_err(|e| {
-            MagnusError::new(
-                magnus::exception::type_error(),
-                format!("Failed to parse '{}' as date32: {}", s, e),
-            )
-        })?;
+        // Parse string into Date using jiff
+        let date = if let Some(fmt) = format {
+            jiff::civil::Date::strptime(&s, &fmt).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Failed to parse '{}' with format '{}' as date32: {}",
+                        s, fmt, e
+                    ),
+                )
+            })?
+        } else {
+            s.parse().map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse '{}' as date32: {}", s, e),
+                )
+            })?
+        };
 
         let timestamp = date.at(0, 0, 0, 0);
 
@@ -63,17 +75,32 @@ pub fn convert_to_date32(value: Value) -> Result<i32, MagnusError> {
     }
 }
 
-pub fn convert_to_timestamp_millis(value: Value) -> Result<i64, MagnusError> {
+pub fn convert_to_timestamp_millis(
+    value: Value,
+    format: Option<String>,
+) -> Result<i64, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
-        let timestamp: jiff::Timestamp = s.parse().map_err(|e| {
-            MagnusError::new(
-                magnus::exception::type_error(),
-                format!("Failed to parse '{}' as timestamp_millis: {}", s, e),
-            )
-        })?;
+        let timestamp = if let Some(fmt) = format {
+            jiff::Timestamp::strptime(&s, &fmt).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Failed to parse '{}' with format '{}' as timestamp_millis: {}",
+                        s, fmt, e
+                    ),
+                )
+            })?
+        } else {
+            s.parse().map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse '{}' as timestamp_millis: {}", s, e),
+                )
+            })?
+        };
         // Convert to milliseconds
         Ok(timestamp.as_millisecond())
     } else if value.is_kind_of(ruby.class_time()) {
@@ -91,17 +118,32 @@ pub fn convert_to_timestamp_millis(value: Value) -> Result<i64, MagnusError> {
     }
 }
 
-pub fn convert_to_timestamp_micros(value: Value) -> Result<i64, MagnusError> {
+pub fn convert_to_timestamp_micros(
+    value: Value,
+    format: Option<String>,
+) -> Result<i64, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
-        let timestamp: jiff::Timestamp = s.parse().map_err(|e| {
-            MagnusError::new(
-                magnus::exception::type_error(),
-                format!("Failed to parse '{}' as timestamp_micros: {}", s, e),
-            )
-        })?;
+        let timestamp = if let Some(fmt) = format {
+            jiff::Timestamp::strptime(&s, &fmt).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Failed to parse '{}' with format '{}' as timestamp_micros: {}",
+                        s, fmt, e
+                    ),
+                )
+            })?
+        } else {
+            s.parse().map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse '{}' as timestamp_micros: {}", s, e),
+                )
+            })?
+        };
         // Convert to microseconds
         Ok(timestamp.as_microsecond())
     } else if value.is_kind_of(ruby.class_time()) {
@@ -204,15 +246,15 @@ pub fn convert_to_list(
                     ParquetValue::Boolean(v)
                 }
                 ParquetSchemaType::Date32 => {
-                    let v = convert_to_date32(item_value)?;
+                    let v = convert_to_date32(item_value, None)?;
                     ParquetValue::Date32(v)
                 }
                 ParquetSchemaType::TimestampMillis => {
-                    let v = convert_to_timestamp_millis(item_value)?;
+                    let v = convert_to_timestamp_millis(item_value, None)?;
                     ParquetValue::TimestampMillis(v, None)
                 }
                 ParquetSchemaType::TimestampMicros => {
-                    let v = convert_to_timestamp_micros(item_value)?;
+                    let v = convert_to_timestamp_micros(item_value, None)?;
                     ParquetValue::TimestampMicros(v, None)
                 }
                 ParquetSchemaType::List(_) | ParquetSchemaType::Map(_) => {
@@ -310,15 +352,15 @@ pub fn convert_to_map(
                     ParquetValue::Boolean(v)
                 }
                 ParquetSchemaType::Date32 => {
-                    let v = convert_to_date32(value)?;
+                    let v = convert_to_date32(value, None)?;
                     ParquetValue::Date32(v)
                 }
                 ParquetSchemaType::TimestampMillis => {
-                    let v = convert_to_timestamp_millis(value)?;
+                    let v = convert_to_timestamp_millis(value, None)?;
                     ParquetValue::TimestampMillis(v, None)
                 }
                 ParquetSchemaType::TimestampMicros => {
-                    let v = convert_to_timestamp_micros(value)?;
+                    let v = convert_to_timestamp_micros(value, None)?;
                     ParquetValue::TimestampMicros(v, None)
                 }
                 ParquetSchemaType::List(_) | ParquetSchemaType::Map(_) => {

@@ -215,15 +215,15 @@ impl ParquetValue {
                 Ok(ParquetValue::Boolean(v))
             }
             ParquetSchemaType::Date32 => {
-                let v = convert_to_date32(value)?;
+                let v = convert_to_date32(value, None)?;
                 Ok(ParquetValue::Date32(v))
             }
             ParquetSchemaType::TimestampMillis => {
-                let v = convert_to_timestamp_millis(value)?;
+                let v = convert_to_timestamp_millis(value, None)?;
                 Ok(ParquetValue::TimestampMillis(v, None))
             }
             ParquetSchemaType::TimestampMicros => {
-                let v = convert_to_timestamp_micros(value)?;
+                let v = convert_to_timestamp_micros(value, None)?;
                 Ok(ParquetValue::TimestampMicros(v, None))
             }
             ParquetSchemaType::List(_) | ParquetSchemaType::Map(_) => Err(MagnusError::new(

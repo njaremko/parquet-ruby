@@ -244,15 +244,15 @@ impl ColumnCollector {
                 ParquetValue::Boolean(v)
             }
             ParquetSchemaType::Date32 => {
-                let v = convert_to_date32(value)?;
+                let v = convert_to_date32(value, None)?;
                 ParquetValue::Date32(v)
             }
             ParquetSchemaType::TimestampMillis => {
-                let v = convert_to_timestamp_millis(value)?;
+                let v = convert_to_timestamp_millis(value, None)?;
                 ParquetValue::TimestampMillis(v, None)
             }
             ParquetSchemaType::TimestampMicros => {
-                let v = convert_to_timestamp_micros(value)?;
+                let v = convert_to_timestamp_micros(value, None)?;
                 ParquetValue::TimestampMicros(v, None)
             }
             ParquetSchemaType::List(list_field) => {
