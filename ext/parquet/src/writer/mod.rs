@@ -26,18 +26,29 @@ use crate::{
 
 const DEFAULT_BATCH_SIZE: usize = 1000;
 
+// Maximum memory usage per batch (64MB by default)
+const DEFAULT_MEMORY_THRESHOLD: usize = 64 * 1024 * 1024;
+
 /// Parse arguments for Parquet writing
 pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (read_from,) = parsed_args.required;
 
-    let kwargs =
-        get_kwargs::<_, (Value, Value), (Option<Option<usize>>, Option<Option<String>>), ()>(
-            parsed_args.keywords,
-            &["schema", "write_to"],
-            &["batch_size", "compression"],
-        )?;
+    let kwargs = get_kwargs::<
+        _,
+        (Value, Value),
+        (
+            Option<Option<usize>>,
+            Option<Option<usize>>,
+            Option<Option<String>>,
+        ),
+        (),
+    >(
+        parsed_args.keywords,
+        &["schema", "write_to"],
+        &["batch_size", "flush_threshold", "compression"],
+    )?;
 
     let schema_array = RArray::from_value(kwargs.required.0).ok_or_else(|| {
         MagnusError::new(
@@ -110,7 +121,8 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
         write_to: kwargs.required.1,
         schema,
         batch_size: kwargs.optional.0.flatten(),
-        compression: kwargs.optional.1.flatten(),
+        flush_threshold: kwargs.optional.1.flatten(),
+        compression: kwargs.optional.2.flatten(),
     })
 }
 
@@ -124,9 +136,12 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         schema,
         batch_size,
         compression,
+        flush_threshold,
     } = parse_parquet_write_args(args)?;
 
     let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+
+    let flush_threshold = flush_threshold.unwrap_or(DEFAULT_MEMORY_THRESHOLD);
 
     // Convert schema to Arrow schema
     let arrow_fields: Vec<Field> = schema
@@ -205,7 +220,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
 
                     // When we reach batch size, write the batch
                     if rows_in_batch >= batch_size {
-                        write_batch(&mut writer, &mut column_collectors)?;
+                        write_batch(&mut writer, &mut column_collectors, flush_threshold)?;
                         rows_in_batch = 0;
                     }
                 }
@@ -213,7 +228,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                     if e.is_kind_of(ruby.exception_stop_iteration()) {
                         // Write any remaining rows
                         if rows_in_batch > 0 {
-                            write_batch(&mut writer, &mut column_collectors)?;
+                            write_batch(&mut writer, &mut column_collectors, flush_threshold)?;
                         }
                         break;
                     }
@@ -247,7 +262,10 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
         schema,
         batch_size: _,
         compression,
+        flush_threshold,
     } = parse_parquet_write_args(args)?;
+
+    let flush_threshold = flush_threshold.unwrap_or(DEFAULT_MEMORY_THRESHOLD);
 
     // Convert schema to Arrow schema
     let arrow_fields: Vec<Field> = schema
@@ -339,6 +357,14 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
                     writer
                         .write(&record_batch)
                         .map_err(|e| ParquetErrorWrapper(e))?;
+
+                    match &mut writer {
+                        WriterOutput::File(w) | WriterOutput::TempFile(w, _) => {
+                            if w.in_progress_size() >= flush_threshold {
+                                w.flush().map_err(|e| ParquetErrorWrapper(e))?;
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     if e.is_kind_of(ruby.exception_stop_iteration()) {
@@ -435,6 +461,7 @@ fn copy_temp_file_to_io_like(
 fn write_batch(
     writer: &mut WriterOutput,
     collectors: &mut [ColumnCollector],
+    flush_threshold: usize,
 ) -> Result<(), MagnusError> {
     // Convert columns to Arrow arrays
     let arrow_arrays: Vec<(String, Arc<dyn Array>)> = collectors
@@ -453,6 +480,14 @@ fn write_batch(
     writer
         .write(&record_batch)
         .map_err(|e| ParquetErrorWrapper(e))?;
+
+    match writer {
+        WriterOutput::File(w) | WriterOutput::TempFile(w, _) => {
+            if w.in_progress_size() >= flush_threshold {
+                w.flush().map_err(|e| ParquetErrorWrapper(e))?;
+            }
+        }
+    }
 
     Ok(())
 }

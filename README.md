@@ -117,6 +117,13 @@ Parquet.write_rows(rows,
   write_to: "data.parquet",
   batch_size: 500
 )
+
+# Optionally specify memory threshold for flushing (default is 64MB)
+Parquet.write_rows(rows,
+  schema: schema,
+  write_to: "data.parquet",
+  flush_threshold: 32 * 1024 * 1024  # 32MB
+)
 ```
 
 ### Writing Column-wise Data
@@ -155,11 +162,12 @@ columns = batches.each
 # Write to a parquet file with default ZSTD compression
 Parquet.write_columns(columns, schema: schema, write_to: "data.parquet")
 
-# Write to a parquet file with specific compression
+# Write to a parquet file with specific compression and memory threshold
 Parquet.write_columns(columns,
   schema: schema,
   write_to: "data.parquet",
-  compression: "snappy"  # Supported: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  compression: "snappy",  # Supported: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  flush_threshold: 32 * 1024 * 1024  # 32MB
 )
 
 # Write to an IO object

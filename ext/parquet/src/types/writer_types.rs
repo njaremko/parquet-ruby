@@ -24,6 +24,7 @@ pub struct ParquetWriteArgs<'a> {
     pub write_to: Value,
     pub schema: Vec<SchemaField<'a>>,
     pub batch_size: Option<usize>,
+    pub flush_threshold: Option<usize>,
     pub compression: Option<String>,
 }
 
