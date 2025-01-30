@@ -14,7 +14,8 @@ bytes = "^1.9"
 itertools = "^0.14"
 jiff = "0.1.19"
 magnus = { version = "0.7", features = ["rb-sys"] }
-parquet = { version = "^54.0", features = ["json", "object_store"] }
+parquet = { version = "^54.0", features = ["json"] }
+rand = "0.9"
 rb-sys = "^0.9"
 thiserror = "2.0"
 tempfile = "^3.15"

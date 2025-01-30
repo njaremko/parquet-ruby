@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter},
+    mem,
     sync::Arc,
 };
 
@@ -16,6 +17,7 @@ use parquet::{
     basic::{Compression, GzipLevel, ZstdLevel},
     file::properties::WriterProperties,
 };
+use rand::Rng;
 use tempfile::NamedTempFile;
 
 use crate::{
@@ -24,7 +26,9 @@ use crate::{
     IoLikeValue, ParquetSchemaType, ParquetWriteArgs, SchemaField, SendableWrite,
 };
 
-const DEFAULT_BATCH_SIZE: usize = 1000;
+const SAMPLE_SIZE: usize = 100; // Number of rows to sample for size estimation
+const MIN_BATCH_SIZE: usize = 100; // Minimum batch size to maintain efficiency
+const INITIAL_BATCH_SIZE: usize = 100; // Initial batch size while sampling
 
 // Maximum memory usage per batch (64MB by default)
 const DEFAULT_MEMORY_THRESHOLD: usize = 64 * 1024 * 1024;
@@ -126,6 +130,53 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
     })
 }
 
+/// Estimate the size of a row
+fn estimate_single_row_size(row: &RArray, schema: &[SchemaField]) -> Result<usize, MagnusError> {
+    let mut row_size = 0;
+    for (field, value) in schema.iter().zip(row.into_iter()) {
+        // Estimate size based on type and value
+        row_size += match &field.type_ {
+            // Use reference to avoid moving
+            ParquetSchemaType::Int8 | ParquetSchemaType::UInt8 => 1,
+            ParquetSchemaType::Int16 | ParquetSchemaType::UInt16 => 2,
+            ParquetSchemaType::Int32
+            | ParquetSchemaType::UInt32
+            | ParquetSchemaType::Float
+            | ParquetSchemaType::Date32 => 4,
+            ParquetSchemaType::Int64
+            | ParquetSchemaType::UInt64
+            | ParquetSchemaType::Double
+            | ParquetSchemaType::TimestampMillis
+            | ParquetSchemaType::TimestampMicros => 8,
+            ParquetSchemaType::String => {
+                if let Ok(s) = String::try_convert(value) {
+                    s.len() + mem::size_of::<usize>() // account for length prefix
+                } else {
+                    16 // default estimate for string
+                }
+            }
+            ParquetSchemaType::Binary => {
+                if let Ok(bytes) = Vec::<u8>::try_convert(value) {
+                    bytes.len() + mem::size_of::<usize>() // account for length prefix
+                } else {
+                    16 // default estimate for binary
+                }
+            }
+            ParquetSchemaType::Boolean => 1,
+            ParquetSchemaType::List(_) | ParquetSchemaType::Map(_) => {
+                32 // rough estimate for complex types
+            }
+        };
+    }
+    Ok(row_size)
+}
+
+/// Calculate optimal batch size based on memory threshold and estimated row size
+fn calculate_batch_size(row_size: usize, memory_threshold: usize) -> usize {
+    let batch_size = memory_threshold / row_size;
+    batch_size.max(MIN_BATCH_SIZE)
+}
+
 #[inline]
 pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
@@ -134,12 +185,10 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         read_from,
         write_to,
         schema,
-        batch_size,
+        batch_size: user_batch_size,
         compression,
         flush_threshold,
     } = parse_parquet_write_args(args)?;
-
-    let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 
     let flush_threshold = flush_threshold.unwrap_or(DEFAULT_MEMORY_THRESHOLD);
 
@@ -185,11 +234,19 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
     if read_from.is_kind_of(ruby.class_enumerator()) {
         // Create collectors for each column
         let mut column_collectors: Vec<ColumnCollector> = schema
-            .into_iter()
-            .map(|field| ColumnCollector::new(field.name, field.type_, field.format))
+            .iter()
+            .map(|field| {
+                // Clone the type to avoid moving from a reference
+                let type_clone = field.type_.clone();
+                ColumnCollector::new(field.name.clone(), type_clone, field.format.clone())
+            })
             .collect();
 
         let mut rows_in_batch = 0;
+        let mut total_rows = 0;
+        let mut rng = rand::rng();
+        let mut size_samples = Vec::with_capacity(SAMPLE_SIZE);
+        let mut current_batch_size = user_batch_size.unwrap_or(INITIAL_BATCH_SIZE);
 
         loop {
             match read_from.funcall::<_, _, Value>("next", ()) {
@@ -211,15 +268,30 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                         ));
                     }
 
-                    // Process each value in the row immediately
+                    // Sample row sizes using reservoir sampling
+                    if size_samples.len() < SAMPLE_SIZE {
+                        size_samples.push(estimate_single_row_size(&row_array, &schema)?);
+                    } else if rng.random_range(0..=total_rows) < SAMPLE_SIZE {
+                        let idx = rng.random_range(0..SAMPLE_SIZE);
+                        size_samples[idx] = estimate_single_row_size(&row_array, &schema)?;
+                    }
+
+                    // Process each value in the row
                     for (collector, value) in column_collectors.iter_mut().zip(row_array) {
                         collector.push_value(value)?;
                     }
 
                     rows_in_batch += 1;
+                    total_rows += 1;
+
+                    // Recalculate batch size if we have enough samples and no user-specified size
+                    if size_samples.len() >= SAMPLE_SIZE && user_batch_size.is_none() {
+                        let avg_row_size = size_samples.iter().sum::<usize>() / size_samples.len();
+                        current_batch_size = calculate_batch_size(avg_row_size, flush_threshold);
+                    }
 
                     // When we reach batch size, write the batch
-                    if rows_in_batch >= batch_size {
+                    if rows_in_batch >= current_batch_size {
                         write_batch(&mut writer, &mut column_collectors, flush_threshold)?;
                         rows_in_batch = 0;
                     }
@@ -483,7 +555,7 @@ fn write_batch(
 
     match writer {
         WriterOutput::File(w) | WriterOutput::TempFile(w, _) => {
-            if w.in_progress_size() >= flush_threshold {
+            if w.in_progress_size() >= flush_threshold || w.memory_size() >= flush_threshold {
                 w.flush().map_err(|e| ParquetErrorWrapper(e))?;
             }
         }

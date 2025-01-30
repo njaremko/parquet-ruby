@@ -96,6 +96,54 @@ class BasicTest < Minitest::Test
     assert_equal [1, 2, 3], rows.map { |r| r["id"] }
   end
 
+  def test_write_large_file
+    # Create a temporary file path
+    temp_path = "test/large_data.parquet"
+    begin
+      # Generate schema for id and large string column
+      schema = [
+        { "id" => "int64" },
+        { "data" => "string" }
+      ]
+
+
+
+      # Write 100k rows using an enumerator to avoid memory allocation
+      Parquet.write_rows(
+        Enumerator.new do |yielder|
+          100_000.times do |i|
+            # Create a 3MB string (approximately) with random chars
+            large_string = ('a'..'z').to_a[rand(26)] * 1_000_000
+            yielder << [i, large_string]
+          end
+        end,
+        schema: schema,
+        write_to: temp_path,
+        batch_size: 10
+      )
+
+      # Verify file exists and has content
+      assert File.exist?(temp_path)
+      assert File.size(temp_path) > 0
+
+      # Read back first few rows to verify structure
+      rows = []
+      Parquet.each_row(temp_path) do |row|
+        rows << row
+        break if rows.length >= 3
+      end
+
+      assert_equal 3, rows.length
+      assert_equal 0, rows[0]["id"]
+      assert_equal large_string, rows[0]["data"]
+      assert_equal 1, rows[1]["id"]
+      assert_equal large_string, rows[1]["data"]
+
+    ensure
+      File.unlink(temp_path) if File.exist?(temp_path)
+    end
+  end
+
   def test_each_column
     batches = []
     Parquet.each_column("test/data.parquet", result_type: :array) { |col| batches << col }
