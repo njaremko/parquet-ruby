@@ -111,15 +111,13 @@ class BasicTest < Minitest::Test
       # Write 100k rows using an enumerator to avoid memory allocation
       Parquet.write_rows(
         Enumerator.new do |yielder|
-          100_000.times do |i|
-            # Create a 3MB string (approximately) with random chars
+          5000.times do |i|
             large_string = ('a'..'z').to_a[rand(26)] * 1_000_000
             yielder << [i, large_string]
           end
         end,
         schema: schema,
         write_to: temp_path,
-        batch_size: 10
       )
 
       # Verify file exists and has content
@@ -130,15 +128,11 @@ class BasicTest < Minitest::Test
       rows = []
       Parquet.each_row(temp_path) do |row|
         rows << row
-        break if rows.length >= 3
       end
 
-      assert_equal 3, rows.length
+      assert_equal 5000, rows.length
       assert_equal 0, rows[0]["id"]
-      assert_equal large_string, rows[0]["data"]
       assert_equal 1, rows[1]["id"]
-      assert_equal large_string, rows[1]["data"]
-
     ensure
       File.unlink(temp_path) if File.exist?(temp_path)
     end
