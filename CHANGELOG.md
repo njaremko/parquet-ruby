@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.9
+
+- Added `sample_size` option to `write_rows` for customizing row size estimation:
+  - Controls how many rows are sampled to estimate optimal batch sizes
+  - Defaults to 100 rows if not specified
+  - Example: `Parquet.write_rows(data, schema: schema, write_to: path, sample_size: 200)`
+
 ## 0.2.8
 
 - Added support for writing Parquet files with compression:

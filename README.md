@@ -124,6 +124,13 @@ Parquet.write_rows(rows,
   write_to: "data.parquet",
   flush_threshold: 32 * 1024 * 1024  # 32MB
 )
+
+# Optionally specify sample size for row size estimation (default is 100)
+Parquet.write_rows(rows,
+  schema: schema,
+  write_to: "data.parquet",
+  sample_size: 200  # Sample 200 rows for size estimation
+)
 ```
 
 ### Writing Column-wise Data

@@ -68,6 +68,7 @@ module Parquet
   #   - `flush_threshold`: Optional memory threshold in bytes before flushing (defaults to 64MB)
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  #   - `sample_size`: Optional number of rows to sample for size estimation (defaults to 100)
   sig do
     params(
       read_from: T::Enumerator[T::Array[T.untyped]],
@@ -75,10 +76,11 @@ module Parquet
       write_to: T.any(String, IO),
       batch_size: T.nilable(Integer),
       flush_threshold: T.nilable(Integer),
-      compression: T.nilable(String)
+      compression: T.nilable(String),
+      sample_size: T.nilable(Integer)
     ).void
   end
-  def self.write_rows(read_from, schema:, write_to:, batch_size: nil, flush_threshold: nil, compression: nil)
+  def self.write_rows(read_from, schema:, write_to:, batch_size: nil, flush_threshold: nil, compression: nil, sample_size: nil)
   end
 
   # Options:

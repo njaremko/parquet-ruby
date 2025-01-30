@@ -26,6 +26,7 @@ pub struct ParquetWriteArgs<'a> {
     pub batch_size: Option<usize>,
     pub flush_threshold: Option<usize>,
     pub compression: Option<String>,
+    pub sample_size: Option<usize>,
 }
 
 pub trait SendableWrite: Send + Write {}

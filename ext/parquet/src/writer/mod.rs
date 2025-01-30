@@ -46,12 +46,18 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
             Option<Option<usize>>,
             Option<Option<usize>>,
             Option<Option<String>>,
+            Option<Option<usize>>,
         ),
         (),
     >(
         parsed_args.keywords,
         &["schema", "write_to"],
-        &["batch_size", "flush_threshold", "compression"],
+        &[
+            "batch_size",
+            "flush_threshold",
+            "compression",
+            "sample_size",
+        ],
     )?;
 
     let schema_array = RArray::from_value(kwargs.required.0).ok_or_else(|| {
@@ -127,6 +133,7 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
         batch_size: kwargs.optional.0.flatten(),
         flush_threshold: kwargs.optional.1.flatten(),
         compression: kwargs.optional.2.flatten(),
+        sample_size: kwargs.optional.3.flatten(),
     })
 }
 
@@ -188,6 +195,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         batch_size: user_batch_size,
         compression,
         flush_threshold,
+        sample_size: user_sample_size,
     } = parse_parquet_write_args(args)?;
 
     let flush_threshold = flush_threshold.unwrap_or(DEFAULT_MEMORY_THRESHOLD);
@@ -245,7 +253,8 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
         let mut rows_in_batch = 0;
         let mut total_rows = 0;
         let mut rng = rand::rng();
-        let mut size_samples = Vec::with_capacity(SAMPLE_SIZE);
+        let sample_size = user_sample_size.unwrap_or(SAMPLE_SIZE);
+        let mut size_samples = Vec::with_capacity(sample_size);
         let mut current_batch_size = user_batch_size.unwrap_or(INITIAL_BATCH_SIZE);
 
         loop {
@@ -269,10 +278,10 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                     }
 
                     // Sample row sizes using reservoir sampling
-                    if size_samples.len() < SAMPLE_SIZE {
+                    if size_samples.len() < sample_size {
                         size_samples.push(estimate_single_row_size(&row_array, &schema)?);
-                    } else if rng.random_range(0..=total_rows) < SAMPLE_SIZE {
-                        let idx = rng.random_range(0..SAMPLE_SIZE);
+                    } else if rng.random_range(0..=total_rows) < sample_size {
+                        let idx = rng.random_range(0..sample_size);
                         size_samples[idx] = estimate_single_row_size(&row_array, &schema)?;
                     }
 
@@ -285,7 +294,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                     total_rows += 1;
 
                     // Recalculate batch size if we have enough samples and no user-specified size
-                    if size_samples.len() >= SAMPLE_SIZE && user_batch_size.is_none() {
+                    if size_samples.len() >= sample_size && user_batch_size.is_none() {
                         let avg_row_size = size_samples.iter().sum::<usize>() / size_samples.len();
                         current_batch_size = calculate_batch_size(avg_row_size, flush_threshold);
                     }
@@ -335,6 +344,7 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
         batch_size: _,
         compression,
         flush_threshold,
+        sample_size: _,
     } = parse_parquet_write_args(args)?;
 
     let flush_threshold = flush_threshold.unwrap_or(DEFAULT_MEMORY_THRESHOLD);
