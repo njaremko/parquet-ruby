@@ -48,7 +48,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download and Install DuckDB
-        if: matrix.build_type == 'native'
         run: |
           echo "Downloading DuckDB from ${{ matrix.duckdb_url }}"
           if [[ "${{ matrix.os }}" == ubuntu* ]]; then
@@ -84,7 +83,7 @@ jobs:
           RUBY_PLATFORM: ${{ matrix.platform_name }}
         run: |
           echo "Building native gem for ${{ matrix.platform_name }}"
-          gem build parquet.gemspec --platform=${{ matrix.platform_name }}
+          gem build parquet.gemspec --platform=${{ matrix.platform_name }} --output=parquet-${{ matrix.platform_name }}.gem
 
       - name: Set remote URL
         run: |
@@ -107,7 +106,6 @@ jobs:
           if [[ "${{ matrix.build_type }}" == "normal" ]]; then
             gem push --key rubygems parquet-*.gem
           else
-            ls -al
             gem push --key rubygems parquet-*-${{ matrix.platform_name }}.gem
           fi
       - name: Wait for release to propagate
