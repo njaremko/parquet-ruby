@@ -102,7 +102,7 @@ jobs:
       - name: Run release rake task
         shell: bash
         env:
-          RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.action_path, env.RUBYOPT) || env.RUBYOPT }}"
+          RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.workspace, env.RUBYOPT) || env.RUBYOPT }}"
         run: |
           if [[ "${{ matrix.build_type }}" == "normal" ]]; then
             gem push --key rubygems parquet-*.gem
