@@ -24,6 +24,7 @@ Gem::Specification.new do |spec|
 
   spec.files =
     Dir[
+      "lib/parquet/parquet.bundle",
       "lib/**/*.rb",
       "lib/**/*.rbi",
       "ext/**/*",
