@@ -15,6 +15,7 @@ jobs:
   build:
     name: Build + Publish
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -85,6 +86,26 @@ jobs:
           echo "Building native gem for ${{ matrix.platform_name }}"
           gem build parquet.gemspec --platform=${{ matrix.platform_name }}
 
-      - name: Publish Gem
-        uses: rubygems/release-gem@v1
+      - name: Set remote URL
+        run: |
+          # Attribute commits to the last committer on HEAD
+          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+          git config --global user.name "$(git log -1 --pretty=format:'%an')"
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY"
+        shell: bash
+      - name: Configure trusted publishing credentials
+        uses: rubygems/configure-rubygems-credentials@v1.0.0
+      - name: Run release rake task
+        shell: bash
+        env:
+          RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.action_path, env.RUBYOPT) || env.RUBYOPT }}"
+        run: |
+          if [[ "${{ matrix.build_type }}" == "normal" ]]; then
+            gem push --key rubygems parquet-*.gem
+          else
+            gem push --key rubygems parquet-*-${{ matrix.platform_name }}.gem
+          fi
+      - name: Wait for release to propagate
+        run: gem exec rubygems-await pkg/*.gem
+        shell: bash
 
