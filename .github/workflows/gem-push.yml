@@ -102,7 +102,12 @@ jobs:
         shell: bash
         env:
           RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.workspace, env.RUBYOPT) || env.RUBYOPT }}"
-        run: gem push --key rubygems parquet-*.gem
+        run: |
+          if [[ "${{ matrix.build_type }}" == "normal" ]]; then
+            gem push --key rubygems parquet-*.gem
+          else
+            gem push --key rubygems parquet-${{ matrix.platform_name }}.gem
+          fi
       - name: Wait for release to propagate
         run: gem exec rubygems-await pkg/*.gem
         shell: bash
