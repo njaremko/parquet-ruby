@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.12
+## 0.2.13
 
 - Improvements to error handling throughout the library
 - Improvements to the header cache used when reading in `:hash` mode
