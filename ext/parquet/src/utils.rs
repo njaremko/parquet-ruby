@@ -32,6 +32,7 @@ pub struct ParquetRowsArgs {
     pub to_read: Value,
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
+    pub strict: bool,
 }
 
 /// Parse common arguments for CSV parsing
@@ -39,10 +40,19 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
 
-    let kwargs = get_kwargs::<_, (), (Option<Option<Value>>, Option<Option<Vec<String>>>), ()>(
+    let kwargs = get_kwargs::<
+        _,
+        (),
+        (
+            Option<Option<Value>>,
+            Option<Option<Vec<String>>>,
+            Option<Option<bool>>,
+        ),
+        (),
+    >(
         parsed_args.keywords,
         &[],
-        &["result_type", "columns"],
+        &["result_type", "columns", "strict"],
     )?;
 
     let result_type: ParserResultType = match kwargs
@@ -73,10 +83,13 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
         None => ParserResultType::Hash,
     };
 
+    let strict = kwargs.optional.2.flatten().unwrap_or(false);
+
     Ok(ParquetRowsArgs {
         to_read,
         result_type,
         columns: kwargs.optional.1.flatten(),
+        strict,
     })
 }
 
@@ -86,6 +99,7 @@ pub struct ParquetColumnsArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
+    pub strict: bool,
 }
 
 /// Parse common arguments for CSV parsing
@@ -103,12 +117,13 @@ pub fn parse_parquet_columns_args(
             Option<Option<Value>>,
             Option<Option<Vec<String>>>,
             Option<Option<usize>>,
+            Option<Option<bool>>,
         ),
         (),
     >(
         parsed_args.keywords,
         &[],
-        &["result_type", "columns", "batch_size"],
+        &["result_type", "columns", "batch_size", "strict"],
     )?;
 
     let result_type: ParserResultType = match kwargs
@@ -144,5 +159,6 @@ pub fn parse_parquet_columns_args(
         result_type,
         columns: kwargs.optional.1.flatten(),
         batch_size: kwargs.optional.2.flatten(),
+        strict: kwargs.optional.3.flatten().unwrap_or(false),
     })
 }

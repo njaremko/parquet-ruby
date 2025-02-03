@@ -419,7 +419,7 @@ macro_rules! impl_timestamp_to_arrow_conversion {
 macro_rules! impl_timestamp_array_conversion {
     ($column:expr, $array_type:ty, $variant:ident, $tz:expr) => {{
         let array = downcast_array::<$array_type>($column);
-        if array.is_nullable() {
+        Ok(ParquetValueVec(if array.is_nullable() {
             array
                 .values()
                 .iter()
@@ -438,7 +438,7 @@ macro_rules! impl_timestamp_array_conversion {
                 .iter()
                 .map(|x| ParquetValue::$variant(*x, $tz.clone().map(|s| s.into())))
                 .collect()
-        }
+        }))
     }};
 }
 

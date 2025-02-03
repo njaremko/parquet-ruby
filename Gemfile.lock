@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    parquet (0.2.11)
+    parquet (0.2.12)
       rb_sys (~> 0.9.39)
 
 GEM

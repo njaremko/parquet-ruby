@@ -24,6 +24,12 @@ pub enum ReaderError {
     Ruby(String),
     #[error("Parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
+    #[error("Arrow error: {0}")]
+    Arrow(#[from] arrow_schema::ArrowError),
+    #[error("UTF-8 error: {0}")]
+    Utf8Error(#[from] simdutf8::basic::Utf8Error),
+    #[error("Jiff error: {0}")]
+    Jiff(#[from] jiff::Error),
 }
 
 impl From<MagnusError> for ReaderError {

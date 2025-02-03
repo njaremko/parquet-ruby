@@ -1,4 +1,5 @@
-use crate::header_cache::{CacheError, HeaderCacheCleanupIter, StringCache};
+use crate::header_cache::StringCache;
+use crate::types::{ArrayWrapper, TryIntoValue};
 use crate::{
     create_column_enumerator, utils::*, ColumnEnumeratorArgs, ColumnRecord, ForgottenFileHandle,
     ParquetValueVec, ParserResultType, SeekableRubyValue,
@@ -6,23 +7,20 @@ use crate::{
 use ahash::RandomState;
 use magnus::rb_sys::AsRawValue;
 use magnus::value::{Opaque, ReprValue};
-use magnus::{block::Yield, Error as MagnusError, Ruby, Value};
+use magnus::IntoValue;
+use magnus::{Error as MagnusError, Ruby, Value};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ProjectionMask;
-use parquet::errors::ParquetError;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
 use std::mem::ManuallyDrop;
 use std::os::fd::FromRawFd;
 use std::sync::OnceLock;
-use thiserror::Error;
+
+use super::ReaderError;
 
 #[inline]
-pub fn parse_parquet_columns<'a>(
-    rb_self: Value,
-    args: &[Value],
-) -> Result<Yield<Box<dyn Iterator<Item = ColumnRecord<RandomState>>>>, MagnusError> {
+pub fn parse_parquet_columns<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
 
     let ParquetColumnsArgs {
@@ -30,6 +28,7 @@ pub fn parse_parquet_columns<'a>(
         result_type,
         columns,
         batch_size,
+        strict,
     } = parse_parquet_columns_args(&ruby, args)?;
 
     if !ruby.block_given() {
@@ -39,7 +38,9 @@ pub fn parse_parquet_columns<'a>(
             result_type,
             columns,
             batch_size,
-        });
+            strict,
+        })
+        .map(|yield_enum| yield_enum.into_value_with(&ruby));
     }
 
     let (batch_reader, schema, num_rows) = if to_read.is_kind_of(ruby.class_string()) {
@@ -68,7 +69,7 @@ pub fn parse_parquet_columns<'a>(
             builder = builder.with_batch_size(batch_size);
         }
 
-        let reader = builder.build().unwrap();
+        let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
 
         (reader, schema, num_rows)
     } else if to_read.is_kind_of(ruby.class_io()) {
@@ -85,13 +86,10 @@ pub fn parse_parquet_columns<'a>(
         let file = unsafe { File::from_raw_fd(fd) };
         let file = ForgottenFileHandle(ManuallyDrop::new(file));
 
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut builder =
+            ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| ReaderError::Parquet(e))?;
         let schema = builder.schema().clone();
         let num_rows = builder.metadata().file_metadata().num_rows();
-
-        if let Some(batch_size) = batch_size {
-            builder = builder.with_batch_size(batch_size);
-        }
 
         // If columns are specified, project only those columns
         if let Some(cols) = &columns {
@@ -105,19 +103,20 @@ pub fn parse_parquet_columns<'a>(
             builder = builder.with_projection(projection);
         }
 
-        let reader = builder.build().unwrap();
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+
+        let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
 
         (reader, schema, num_rows)
     } else {
         let readable = SeekableRubyValue(Opaque::from(to_read));
 
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(readable).unwrap();
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(readable)
+            .map_err(|e| ReaderError::Parquet(e))?;
         let schema = builder.schema().clone();
         let num_rows = builder.metadata().file_metadata().num_rows();
-
-        if let Some(batch_size) = batch_size {
-            builder = builder.with_batch_size(batch_size);
-        }
 
         // If columns are specified, project only those columns
         if let Some(cols) = &columns {
@@ -131,7 +130,11 @@ pub fn parse_parquet_columns<'a>(
             builder = builder.with_projection(projection);
         }
 
-        let reader = builder.build().unwrap();
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+
+        let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
 
         (reader, schema, num_rows)
     };
@@ -139,100 +142,92 @@ pub fn parse_parquet_columns<'a>(
     if num_rows == 0 {
         let mut map =
             HashMap::with_capacity_and_hasher(schema.fields().len(), RandomState::default());
-        for field in schema.fields() {
-            map.insert(
-                StringCache::intern(field.name().to_string()).unwrap(),
-                vec![],
-            );
+        let headers: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().to_string())
+            .collect();
+        let interned_headers =
+            StringCache::intern_many(&headers).map_err(|e| ReaderError::HeaderIntern(e))?;
+        for field in interned_headers.iter() {
+            map.insert(*field, vec![]);
         }
-        let column_record = vec![ColumnRecord::Map(map)];
-        return Ok(Yield::Iter(Box::new(column_record.into_iter())));
+        let record = ColumnRecord::Map(map);
+        let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+        return Ok(ruby.qnil().into_value_with(&ruby));
     }
 
-    let iter: Box<dyn Iterator<Item = ColumnRecord<RandomState>>> = match result_type {
+    match result_type {
         ParserResultType::Hash => {
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
-            let iter = batch_reader
-                .filter_map(move |batch| {
-                    batch.ok().map(|batch| {
-                        let headers = headers_clone.get_or_init(|| {
+            let iter = batch_reader.map(move |batch| {
+                batch.map_err(ReaderError::Arrow).and_then(|batch| {
+                    let local_headers = headers_clone
+                        .get_or_init(|| {
                             let schema = batch.schema();
                             let fields = schema.fields();
                             let mut header_string = Vec::with_capacity(fields.len());
                             for field in fields {
                                 header_string.push(field.name().to_owned());
                             }
-                            StringCache::intern_many(&header_string).unwrap()
-                        });
+                            StringCache::intern_many(&header_string)
+                        })
+                        .as_ref()
+                        .map_err(|e| ReaderError::HeaderIntern(e.clone()))?;
 
-                        let mut map =
-                            HashMap::with_capacity_and_hasher(headers.len(), Default::default());
+                    let mut map = HashMap::with_capacity_and_hasher(
+                        local_headers.len(),
+                        RandomState::default(),
+                    );
 
-                        batch.columns().iter().enumerate().for_each(|(i, column)| {
-                            let header = headers[i];
-                            let values = ParquetValueVec::try_from(column.clone()).unwrap();
+                    batch
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        .try_for_each(|(i, column)| {
+                            let header = local_headers[i];
+                            let values = ParquetValueVec::try_from(ArrayWrapper {
+                                array: &*column,
+                                strict: strict,
+                            })?;
                             map.insert(header, values.into_inner());
-                        });
+                            Ok::<_, ReaderError>(())
+                        })?;
 
-                        map
-                    })
+                    Ok(ColumnRecord::Map::<RandomState>(map))
                 })
-                .map(ColumnRecord::Map);
+            });
 
-            Box::new(HeaderCacheCleanupIter {
-                inner: iter,
-                headers,
-            })
+            for result in iter {
+                let record = result?;
+                let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+            }
         }
-        ParserResultType::Array => Box::new(
-            batch_reader
-                .filter_map(|batch| {
-                    batch.ok().map(|batch| {
-                        batch
-                            .columns()
-                            .into_iter()
-                            .map(|column| {
-                                let values = ParquetValueVec::try_from(column.clone()).unwrap();
-                                values.into_inner()
-                            })
-                            .collect()
-                    })
+        ParserResultType::Array => {
+            let iter = batch_reader.map(|batch| {
+                batch.map_err(ReaderError::Arrow).and_then(|batch| {
+                    let vec = batch
+                        .columns()
+                        .into_iter()
+                        .map(|column| {
+                            let values = ParquetValueVec::try_from(ArrayWrapper {
+                                array: &*column,
+                                strict: strict,
+                            })?;
+                            Ok::<_, ReaderError>(values.into_inner())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ColumnRecord::Vec::<RandomState>(vec))
                 })
-                .map(ColumnRecord::Vec),
-        ),
-    };
+            });
 
-    Ok(Yield::Iter(iter))
-}
-
-#[derive(Error, Debug)]
-pub enum ReaderError {
-    #[error("Failed to get file descriptor: {0}")]
-    FileDescriptor(String),
-    #[error("Invalid file descriptor")]
-    InvalidFileDescriptor,
-    #[error("Failed to open file: {0}")]
-    FileOpen(#[from] io::Error),
-    #[error("Failed to intern headers: {0}")]
-    HeaderIntern(#[from] CacheError),
-    #[error("Ruby error: {0}")]
-    Ruby(String),
-    #[error("Parquet error: {0}")]
-    Parquet(#[from] ParquetError),
-}
-
-impl From<MagnusError> for ReaderError {
-    fn from(err: MagnusError) -> Self {
-        Self::Ruby(err.to_string())
+            for result in iter {
+                let record = result?;
+                let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+            }
+        }
     }
-}
 
-impl From<ReaderError> for MagnusError {
-    fn from(err: ReaderError) -> Self {
-        MagnusError::new(
-            Ruby::get().unwrap().exception_runtime_error(),
-            err.to_string(),
-        )
-    }
+    Ok(ruby.qnil().into_value_with(&ruby))
 }
