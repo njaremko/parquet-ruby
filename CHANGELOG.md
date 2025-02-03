@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.12
+
+- Improvements to error handling throughout the library
+- Improvements to the header cache used when reading in `:hash` mode
+- Optional UTF-8 validation when reading strings with `strict: true`
+
 ## 0.2.9
 
 - Added `sample_size` option to `write_rows` for customizing row size estimation:

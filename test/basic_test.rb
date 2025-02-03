@@ -4,6 +4,7 @@ require "parquet"
 require "minitest/autorun"
 
 require "duckdb"
+require "csv"
 
 class BasicTest < Minitest::Test
   def setup

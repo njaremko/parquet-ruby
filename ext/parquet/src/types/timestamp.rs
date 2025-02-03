@@ -64,10 +64,9 @@ macro_rules! impl_timestamp_conversion {
             ParquetValue::$unit(ts, tz) => {
                 let ts = parse_zoned_timestamp(&ParquetValue::$unit(ts, tz));
                 let time_class = $handle.class_time();
-                time_class
-                    .funcall::<_, _, Value>("parse", (ts.to_string(),))
-                    .unwrap()
-                    .into_value_with($handle)
+                Ok(time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))?
+                    .into_value_with($handle))
             }
             _ => panic!("Invalid timestamp type"),
         }
@@ -80,6 +79,6 @@ macro_rules! impl_date_conversion {
     ($value:expr, $handle:expr) => {{
         let ts = jiff::Timestamp::from_second(($value as i64) * 86400).unwrap();
         let formatted = ts.strftime("%Y-%m-%d").to_string();
-        formatted.into_value_with($handle)
+        Ok(formatted.into_value_with($handle))
     }};
 }

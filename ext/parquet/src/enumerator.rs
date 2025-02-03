@@ -1,21 +1,16 @@
-use ahash::RandomState;
-use magnus::{
-    block::Yield, value::ReprValue, Error as MagnusError, KwArgs, RArray, RHash, Symbol, Value,
-};
-
-use crate::{ColumnRecord, ParserResultType, RowRecord};
+use crate::ParserResultType;
+use magnus::{value::ReprValue, Error as MagnusError, KwArgs, RArray, RHash, Symbol, Value};
 
 pub struct RowEnumeratorArgs {
     pub rb_self: Value,
     pub to_read: Value,
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
+    pub strict: bool,
 }
 
-#[inline]
-pub fn create_row_enumerator(
-    args: RowEnumeratorArgs,
-) -> Result<Yield<Box<dyn Iterator<Item = RowRecord<RandomState>>>>, MagnusError> {
+/// Creates an enumerator for lazy Parquet row parsing
+pub fn create_row_enumerator(args: RowEnumeratorArgs) -> Result<magnus::Enumerator, MagnusError> {
     let kwargs = RHash::new();
     kwargs.aset(
         Symbol::new("result_type"),
@@ -24,10 +19,12 @@ pub fn create_row_enumerator(
     if let Some(columns) = args.columns {
         kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
     }
-    let enumerator = args
+    if args.strict {
+        kwargs.aset(Symbol::new("strict"), true)?;
+    }
+    Ok(args
         .rb_self
-        .enumeratorize("each_row", (args.to_read, KwArgs(kwargs)));
-    Ok(Yield::Enumerator(enumerator))
+        .enumeratorize("each_row", (args.to_read, KwArgs(kwargs))))
 }
 
 pub struct ColumnEnumeratorArgs {
@@ -36,12 +33,13 @@ pub struct ColumnEnumeratorArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
+    pub strict: bool,
 }
 
 #[inline]
 pub fn create_column_enumerator(
     args: ColumnEnumeratorArgs,
-) -> Result<Yield<Box<dyn Iterator<Item = ColumnRecord<RandomState>>>>, MagnusError> {
+) -> Result<magnus::Enumerator, MagnusError> {
     let kwargs = RHash::new();
     kwargs.aset(
         Symbol::new("result_type"),
@@ -53,8 +51,10 @@ pub fn create_column_enumerator(
     if let Some(batch_size) = args.batch_size {
         kwargs.aset(Symbol::new("batch_size"), batch_size)?;
     }
-    let enumerator = args
+    if args.strict {
+        kwargs.aset(Symbol::new("strict"), true)?;
+    }
+    Ok(args
         .rb_self
-        .enumeratorize("each_column", (args.to_read, KwArgs(kwargs)));
-    Ok(Yield::Enumerator(enumerator))
+        .enumeratorize("each_column", (args.to_read, KwArgs(kwargs))))
 }

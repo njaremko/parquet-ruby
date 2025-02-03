@@ -1,4 +1,5 @@
-use crate::header_cache::{HeaderCacheCleanupIter, StringCache};
+use crate::header_cache::StringCache;
+use crate::types::TryIntoValue;
 use crate::{
     create_row_enumerator, utils::*, ForgottenFileHandle, ParquetField, ParserResultType,
     ReaderError, RowEnumeratorArgs, RowRecord, SeekableRubyValue,
@@ -6,7 +7,8 @@ use crate::{
 use ahash::RandomState;
 use magnus::rb_sys::AsRawValue;
 use magnus::value::{Opaque, ReprValue};
-use magnus::{block::Yield, Error as MagnusError, Ruby, Value};
+use magnus::IntoValue;
+use magnus::{Error as MagnusError, Ruby, Value};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter as ParquetRowIter;
 use parquet::schema::types::{Type as SchemaType, TypePtr};
@@ -17,16 +19,14 @@ use std::os::fd::FromRawFd;
 use std::sync::OnceLock;
 
 #[inline]
-pub fn parse_parquet_rows<'a>(
-    rb_self: Value,
-    args: &[Value],
-) -> Result<Yield<Box<dyn Iterator<Item = RowRecord<RandomState>>>>, MagnusError> {
+pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
 
     let ParquetRowsArgs {
         to_read,
         result_type,
         columns,
+        strict,
     } = parse_parquet_rows_args(&ruby, args)?;
 
     if !ruby.block_given() {
@@ -35,7 +35,9 @@ pub fn parse_parquet_rows<'a>(
             to_read,
             result_type,
             columns,
-        });
+            strict,
+        })
+        .map(|yield_enum| yield_enum.into_value_with(&ruby));
     }
 
     let (schema, mut iter) = if to_read.is_kind_of(ruby.class_string()) {
@@ -81,56 +83,62 @@ pub fn parse_parquet_rows<'a>(
         })?;
     }
 
-    let iter: Box<dyn Iterator<Item = RowRecord<RandomState>>> = match result_type {
+    match result_type {
         ParserResultType::Hash => {
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
-            let iter = iter
-                .filter_map(move |row| {
-                    row.ok().map(|row| {
-                        let headers = headers_clone.get_or_init(|| {
-                            let column_count = row.get_column_iter().count();
+            let iter = iter.map(move |row| {
+                row.and_then(|row| {
+                    let headers = headers_clone.get_or_init(|| {
+                        let column_count = row.get_column_iter().count();
 
-                            let mut header_string = Vec::with_capacity(column_count);
-                            for (k, _) in row.get_column_iter() {
-                                header_string.push(k.to_owned());
-                            }
+                        let mut header_string = Vec::with_capacity(column_count);
+                        for (k, _) in row.get_column_iter() {
+                            header_string.push(k.to_owned());
+                        }
 
-                            let headers = StringCache::intern_many(&header_string).unwrap();
+                        let headers = StringCache::intern_many(&header_string).unwrap();
 
-                            headers
-                        });
+                        headers
+                    });
 
-                        let mut map =
-                            HashMap::with_capacity_and_hasher(headers.len(), Default::default());
-                        row.get_column_iter().enumerate().for_each(|(i, (_, v))| {
-                            map.insert(headers[i], ParquetField(v.clone()));
-                        });
-                        map
-                    })
+                    let mut map =
+                        HashMap::with_capacity_and_hasher(headers.len(), RandomState::default());
+                    row.get_column_iter().enumerate().for_each(|(i, (_, v))| {
+                        map.insert(headers[i], ParquetField(v.clone(), strict));
+                    });
+                    Ok(map)
                 })
-                .map(RowRecord::Map);
+                .and_then(|row| Ok(RowRecord::Map::<RandomState>(row)))
+                .map_err(|e| ReaderError::Parquet(e))
+            });
 
-            Box::new(HeaderCacheCleanupIter {
-                inner: iter,
-                headers,
-            })
+            for result in iter {
+                let record = result?;
+                let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+            }
         }
-        ParserResultType::Array => Box::new(
-            iter.filter_map(|row| {
-                row.ok().map(|row| {
+        ParserResultType::Array => {
+            let iter = iter.map(|row| {
+                row.and_then(|row| {
                     let column_count = row.get_column_iter().count();
                     let mut vec = Vec::with_capacity(column_count);
                     row.get_column_iter()
-                        .for_each(|(_, v)| vec.push(ParquetField(v.clone())));
-                    vec
+                        .for_each(|(_, v)| vec.push(ParquetField(v.clone(), strict)));
+                    Ok(vec)
                 })
-            })
-            .map(RowRecord::Vec),
-        ),
-    };
+                .and_then(|row| Ok(RowRecord::Vec::<RandomState>(row)))
+                .map_err(|e| ReaderError::Parquet(e))
+            });
 
-    Ok(Yield::Iter(iter))
+            for result in iter {
+                let record = result?;
+                let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+            }
+        }
+    }
+
+    Ok(ruby.qnil().into_value_with(&ruby))
 }
 
 fn create_projection_schema(schema: &SchemaType, columns: &[String]) -> SchemaType {
