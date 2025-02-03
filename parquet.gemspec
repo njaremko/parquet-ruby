@@ -24,13 +24,10 @@ Gem::Specification.new do |spec|
 
   spec.files =
     Dir[
-      "lib/**/*.rb",
-      "lib/**/*.rbi",
-      "ext/**/*",
+      "{ext,lib}/**/*",
       "LICENSE",
       "README.md",
-      "Cargo.toml",
-      "Cargo.lock",
+      "Cargo.*",
       "Gemfile",
       "Rakefile"
     ]

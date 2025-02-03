@@ -71,44 +71,55 @@ jobs:
           ruby-version: 3.2
           bundler-cache: true
 
-      - name: Build Normal Gem
-        if: matrix.build_type == 'normal'
-        run: |
-          echo "Building normal gem without native extensions"
-          gem build parquet.gemspec
+      # - name: Build Normal Gem
+      #   if: matrix.build_type == 'normal'
+      #   run: |
+      #     echo "Building normal gem without native extensions"
+      #     gem build parquet.gemspec
 
-      - name: Build Native Gem
-        if: matrix.build_type == 'native'
-        env:
-          RUBY_PLATFORM: ${{ matrix.platform_name }}
-        run: |
-          echo "Building native gem for ${{ matrix.platform_name }}"
-          gem build parquet.gemspec --platform=${{ matrix.platform_name }} --output=parquet-${{ matrix.platform_name }}.gem
+      # - name: Build Native Gem
+      #   if: matrix.build_type == 'native'
+      #   env:
+      #     RUBY_PLATFORM: ${{ matrix.platform_name }}
+      #   run: |
+      #     echo "Building native gem for ${{ matrix.platform_name }}"
+      #     gem build parquet.gemspec --platform=${{ matrix.platform_name }} --output=parquet-${{ matrix.platform_name }}.gem
 
-      - name: Set remote URL
-        run: |
-          # Attribute commits to the last committer on HEAD
-          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
-          git config --global user.name "$(git log -1 --pretty=format:'%an')"
-          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY"
-        shell: bash
-      - name: Configure trusted publishing credentials
-        uses: rubygems/configure-rubygems-credentials@v1.0.0
-      - name: Download patch
-        shell: bash
-        run: |
-          wget https://raw.githubusercontent.com/rubygems/release-gem/refs/heads/v1/rubygems-attestation-patch.rb
-      - name: Run release rake task
-        shell: bash
-        env:
-          RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.workspace, env.RUBYOPT) || env.RUBYOPT }}"
-        run: |
-          if [[ "${{ matrix.build_type }}" == "normal" ]]; then
-            gem push --key rubygems parquet-*.gem
-          else
-            gem push --key rubygems parquet-${{ matrix.platform_name }}.gem
-          fi
-      - name: Wait for release to propagate
-        run: gem exec rubygems-await pkg/*.gem
-        shell: bash
+      - uses: oxidize-rb/actions/cross-gem@v1
+        id: cross-gem
+        with:
+          platform: ${{ matrix.platform }}
+          ruby-versions: '3.2,3.3,3.4'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: ${{ steps.cross-gem.outputs.gem-path }}
+
+      # - name: Set remote URL
+      #   run: |
+      #     # Attribute commits to the last committer on HEAD
+      #     git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+      #     git config --global user.name "$(git log -1 --pretty=format:'%an')"
+      #     git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY"
+      #   shell: bash
+      # - name: Configure trusted publishing credentials
+      #   uses: rubygems/configure-rubygems-credentials@v1.0.0
+      # - name: Download patch
+      #   shell: bash
+      #   run: |
+      #     wget https://raw.githubusercontent.com/rubygems/release-gem/refs/heads/v1/rubygems-attestation-patch.rb
+      # - name: Run release rake task
+      #   shell: bash
+      #   env:
+      #     RUBYOPT: "${{ format('-r{0}/rubygems-attestation-patch.rb {1}', github.workspace, env.RUBYOPT) || env.RUBYOPT }}"
+      #   run: |
+      #     if [[ "${{ matrix.build_type }}" == "normal" ]]; then
+      #       gem push --key rubygems parquet-*.gem
+      #     else
+      #       gem push --key rubygems parquet-${{ matrix.platform_name }}.gem
+      #     fi
+      # - name: Wait for release to propagate
+      #   run: gem exec rubygems-await pkg/*.gem
+      #   shell: bash
 
