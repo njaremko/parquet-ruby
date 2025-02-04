@@ -14,8 +14,7 @@ platforms = [
   "aarch64-linux",
   "aarch64-linux-musl",
   "x86_64-darwin",
-  "arm64-darwin",
-  "x64-mingw-ucrt"
+  "arm64-darwin"
 ]
 
 RbSys::ExtensionTask.new("parquet", GEMSPEC) do |ext|
