@@ -6,12 +6,14 @@ gem "rake"
 # Use local version of parquet
 gemspec
 
-group :development do
-  gem "benchmark-ips", "~> 2.12"
-  gem "polars-df"
-  gem "duckdb"
-end
+unless ENV["RELEASE"]
+  group :development do
+    gem "benchmark-ips", "~> 2.12"
+    gem "polars-df"
+    gem "duckdb"
+  end
 
-group :test do
-  gem "minitest", "~> 5.0"
+  group :test do
+    gem "minitest", "~> 5.0"
+  end
 end

@@ -1,14 +1,6 @@
 name: Ruby Gem
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "lib/parquet/version.rb"
-  pull_request:
-    branches: ["main"]
-    paths:
-      - "lib/parquet/version.rb"
   workflow_dispatch:
 
 jobs:
@@ -36,33 +28,19 @@ jobs:
             target: x86_64-apple-darwin
           - platform: arm64-darwin
             target: aarch64-apple-darwin
-          - platform: x64-mingw-ucrt
-            target: x86_64-pc-windows-gnu
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download and Install DuckDB
-        run: |
-          wget https://github.com/duckdb/duckdb/releases/download/v1.1.3/libduckdb-linux-amd64.zip
-          unzip libduckdb-linux-amd64.zip
-          sudo cp libduckdb.so /usr/local/lib/
-          sudo cp duckdb.h duckdb.hpp /usr/local/include/
-          sudo ldconfig
 
       - name: Set up Ruby 3.2
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.2
 
+      # For some reason, I need to manually install this, even though it's seemingly automated below...
       - name: rb-sys
         run: |
           gem install rb_sys
-          gem list rb_sys
-          gem contents rb_sys | grep rb-sys-dock
-          which rb-sys-dock || echo "rb-sys-dock not in PATH"
-          echo "GEM PATH: $GEM_PATH"
-          echo "PATH: $PATH"
 
       - uses: oxidize-rb/actions/cross-gem@v1
         id: cross-gem
