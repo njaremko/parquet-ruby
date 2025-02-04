@@ -3,30 +3,9 @@
 require "parquet"
 require "minitest/autorun"
 
-require "duckdb"
 require "csv"
 
 class BasicTest < Minitest::Test
-  def setup
-    # Create test data using DuckDB
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE test_data AS
-          SELECT
-            range::INTEGER as id,
-            'name_' || range::VARCHAR as name
-          FROM range(1, 4)
-        SQL
-        con.query("COPY test_data TO 'test/data.parquet' (FORMAT 'parquet')")
-      end
-    end
-  end
-
-  def teardown
-    File.delete("test/data.parquet") if File.exist?("test/data.parquet")
-  end
-
   def test_each_row
     rows = []
     Parquet.each_row("test/data.parquet") { |row| rows << row }
@@ -106,8 +85,6 @@ class BasicTest < Minitest::Test
         { "id" => "int64" },
         { "data" => "string" }
       ]
-
-
 
       # Write 100k rows using an enumerator to avoid memory allocation
       Parquet.write_rows(
@@ -245,22 +222,6 @@ class BasicTest < Minitest::Test
   end
 
   def test_complex_types
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE complex_data AS
-          SELECT
-            1 as id,
-            [1, 2, 3] as int_array,
-            {'key': 'value'} as map_col,
-            {'nested': {'field': 42}} as struct_col,
-            NULL as nullable_col
-          FROM range(1)
-        SQL
-        con.query("COPY complex_data TO 'test/complex.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     # Test hash result type
     rows = []
     Parquet.each_row("test/complex.parquet") { |row| rows << row }
@@ -300,31 +261,9 @@ class BasicTest < Minitest::Test
     assert_equal [{ "key" => "value" }], array_columns.first[2] # map_col
     assert_equal [{ "nested" => { "field" => 42 } }], array_columns.first[3] # struct_col
     assert_equal [nil], array_columns.first[4] # nullable_col
-  ensure
-    File.delete("test/complex.parquet") if File.exist?("test/complex.parquet")
   end
 
   def test_numeric_types
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE numeric_data AS
-          SELECT
-            CAST(1 AS TINYINT) as int8_col,
-            CAST(1000 AS SMALLINT) as int16_col,
-            CAST(1000000 AS INTEGER) as int32_col,
-            CAST(1000000000000 AS BIGINT) as int64_col,
-            CAST(3.14 AS FLOAT) as float32_col,
-            CAST(3.14159265359 AS DOUBLE) as float64_col,
-            CAST('2023-01-01' AS DATE) as date_col,
-            CAST('2023-01-01 12:00:00' AS TIMESTAMP) as timestamp_col,
-            CAST('2023-01-01 12:00:00+09:00' AS TIMESTAMP WITH TIME ZONE) as timestamptz_col
-          FROM range(1)
-        SQL
-        con.query("COPY numeric_data TO 'test/numeric.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     rows = []
     Parquet.each_row("test/numeric.parquet") { |row| rows << row }
 
@@ -338,31 +277,9 @@ class BasicTest < Minitest::Test
     assert_equal "2023-01-01", row["date_col"].to_s
     assert_equal "2023-01-01 12:00:00 UTC", row["timestamp_col"].to_s
     assert_equal "2023-01-01 03:00:00 UTC", row["timestamptz_col"].to_s
-  ensure
-    File.delete("test/numeric.parquet") if File.exist?("test/numeric.parquet")
   end
 
   def test_numeric_types_column
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE numeric_data AS
-          SELECT
-            CAST(1 AS TINYINT) as int8_col,
-            CAST(1000 AS SMALLINT) as int16_col,
-            CAST(1000000 AS INTEGER) as int32_col,
-            CAST(1000000000000 AS BIGINT) as int64_col,
-            CAST(3.14 AS FLOAT) as float32_col,
-            CAST(3.14159265359 AS DOUBLE) as float64_col,
-            CAST('2023-01-01' AS DATE) as date_col,
-            CAST('2023-01-01T12:00:00Z' AS TIMESTAMP) as timestamp_col,
-            CAST('2023-01-01 12:00:00+09:00' AS TIMESTAMP WITH TIME ZONE) as timestamptz_col
-          FROM range(1)
-        SQL
-        con.query("COPY numeric_data TO 'test/numeric.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     columns = []
     Parquet.each_column("test/numeric.parquet", result_type: :hash) { |col| columns << col }
     assert_equal [1], columns.first["int8_col"]
@@ -374,24 +291,23 @@ class BasicTest < Minitest::Test
     assert_equal ["2023-01-01"], columns.first["date_col"].map(&:to_s)
     assert_equal ["2023-01-01 12:00:00 UTC"], columns.first["timestamp_col"].map(&:to_s)
     assert_equal ["2023-01-01 03:00:00 UTC"], columns.first["timestamptz_col"].map(&:to_s)
-  ensure
-    File.delete("test/numeric.parquet") if File.exist?("test/numeric.parquet")
   end
 
   def test_large_file_handling
     row_count = 100_000
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE large_data AS
-          SELECT
-            range as id,
-            'name_' || range::VARCHAR as name
-          FROM range(#{row_count})
-        SQL
-        con.query("COPY large_data TO 'test/large.parquet' (FORMAT 'parquet')")
-      end
-    end
+
+    Parquet.write_rows(
+      Enumerator.new do |yielder|
+        row_count.times do |i|
+          yielder << [i, "name_#{i}"]
+        end
+      end,
+      schema: [
+        { "id" => "int64" },
+        { "name" => "string" }
+      ],
+      write_to: "test/large.parquet"
+    )
 
     count = 0
     Parquet.each_row("test/large.parquet") do |row|
@@ -405,13 +321,6 @@ class BasicTest < Minitest::Test
   end
 
   def test_empty_table
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query("CREATE TABLE empty_data (id INTEGER, name VARCHAR)")
-        con.query("COPY empty_data TO 'test/empty_table.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     rows = []
     Parquet.each_row("test/empty_table.parquet") { |row| rows << row }
     assert_empty rows
@@ -421,19 +330,18 @@ class BasicTest < Minitest::Test
     refute_empty columns # Should still return schema info
     assert_empty columns.first["id"]
     assert_empty columns.first["name"]
-  ensure
-    File.delete("test/empty_table.parquet") if File.exist?("test/empty_table.parquet")
   end
 
   def test_wide_table
     column_count = 1000
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        values = (0...column_count).map { |i| "#{i} as col#{i}" }.join(", ")
-        con.query("CREATE TABLE wide_data AS SELECT #{values} FROM range(1)")
-        con.query("COPY wide_data TO 'test/wide.parquet' (FORMAT 'parquet')")
-      end
-    end
+    schema = (0...column_count).map { |i| { "col#{i}" => "int64" } }
+    Parquet.write_rows(
+      Enumerator.new do |yielder|
+        yielder << (0...column_count).to_a
+      end,
+      schema: schema,
+      write_to: "test/wide.parquet"
+    )
 
     rows = []
     Parquet.each_row("test/wide.parquet") { |row| rows << row }
@@ -451,45 +359,26 @@ class BasicTest < Minitest::Test
   end
 
   def test_repeated_column_names
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE repeated_cols AS
-          SELECT
-            1 as id,
-            'first' as name,
-            'second' as name
-          FROM range(1)
-        SQL
-        con.query("COPY repeated_cols TO 'test/repeated_cols.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     # The behavior with repeated column names should be consistent
     rows = []
     Parquet.each_row("test/repeated_cols.parquet") { |row| rows << row }
     assert_equal 1, rows.first["id"]
     assert_includes %w[first second], rows.first["name"]
-  ensure
-    File.delete("test/repeated_cols.parquet") if File.exist?("test/repeated_cols.parquet")
   end
 
   def test_special_character_column_names
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE special_chars AS
-          SELECT
-            1 as "id",
-            2 as "column with spaces",
-            3 as "special!@#$%^&*()_+",
-            4 as "日本語",
-            5 as "col.with.dots"
-          FROM range(1)
-        SQL
-        con.query("COPY special_chars TO 'test/special_chars.parquet' (FORMAT 'parquet')")
-      end
-    end
+    schema = [
+      { "id" => "int64" },
+      { "column with spaces" => "int64" },
+      { "special!@#$%^&*()_+" => "int64" },
+      { "日本語" => "int64" },
+      { "col.with.dots" => "int64" }
+    ]
+    Parquet.write_rows(
+      [[1, 2, 3, 4, 5]].each,
+      schema: schema,
+      write_to: "test/special_chars.parquet"
+    )
 
     rows = []
     Parquet.each_row("test/special_chars.parquet") { |row| rows << row }
@@ -509,67 +398,31 @@ class BasicTest < Minitest::Test
   end
 
   def test_binary_data
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        temp = '\'\x00\x01\x02\x03\x04\'::BLOB'
-        con.query(<<~SQL)
-          CREATE TABLE binary_data AS
-          SELECT
-            1 as id,
-            #{temp} as binary_col
-          FROM range(1)
-        SQL
-        con.query("COPY binary_data TO 'test/binary.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     rows = []
     Parquet.each_row("test/binary.parquet") { |row| rows << row }
     assert_equal 1, rows.first["id"]
     expected = [0x00, 0x01, 0x02, 0x03, 0x04]
     assert_equal expected, rows.first["binary_col"].bytes
-  ensure
-    File.delete("test/binary.parquet") if File.exist?("test/binary.parquet")
   end
 
   def test_decimal_types
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE decimal_data AS
-          SELECT
-            CAST(123.45 AS DECIMAL(5,2)) as decimal_5_2,
-            CAST(123456.789 AS DECIMAL(9,3)) as decimal_9_3,
-            CAST(-123.45 AS DECIMAL(5,2)) as negative_decimal
-          FROM range(1)
-        SQL
-        con.query("COPY decimal_data TO 'test/decimal.parquet' (FORMAT 'parquet')")
-      end
-    end
-
     rows = []
     Parquet.each_row("test/decimal.parquet") { |row| rows << row }
     assert_equal BigDecimal("123.45"), rows.first["decimal_5_2"]
     assert_equal BigDecimal("123456.789"), rows.first["decimal_9_3"]
     assert_equal BigDecimal("-123.45"), rows.first["negative_decimal"]
-  ensure
-    File.delete("test/decimal.parquet") if File.exist?("test/decimal.parquet")
   end
 
   def test_boolean_types
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE boolean_data AS
-          SELECT
-            true as true_col,
-            false as false_col,
-            NULL::BOOLEAN as null_bool
-          FROM range(1)
-        SQL
-        con.query("COPY boolean_data TO 'test/boolean.parquet' (FORMAT 'parquet')")
-      end
-    end
+    Parquet.write_rows(
+      [[true, false, nil]].each,
+      schema: [
+        { "true_col" => "bool" },
+        { "false_col" => "bool" },
+        { "null_bool" => "bool" }
+      ],
+      write_to: "test/boolean.parquet"
+    )
 
     rows = []
     Parquet.each_row("test/boolean.parquet") { |row| rows << row }
@@ -581,15 +434,14 @@ class BasicTest < Minitest::Test
   end
 
   def test_invalid_column_specifications
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query(<<~SQL)
-          CREATE TABLE test_data AS
-          SELECT 1 as id, 'name' as name FROM range(1)
-        SQL
-        con.query("COPY test_data TO 'test/cols.parquet' (FORMAT 'parquet')")
-      end
-    end
+    Parquet.write_rows(
+      [[1, "name"]].each,
+      schema: [
+        { "id" => "int64" },
+        { "name" => "string" }
+      ],
+      write_to: "test/cols.parquet"
+    )
 
     # Test with non-existent columns
     rows = []
@@ -630,40 +482,33 @@ class BasicTest < Minitest::Test
       write_to: "test/students.parquet"
     )
 
-    # Read and verify the data using DuckDB
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query("SELECT * FROM 'test/students.parquet' ORDER BY id") do |result|
-          rows = result.to_a
-          assert_equal 5, rows.length
+    rows = Parquet.each_row("test/students.parquet").to_a
+    assert_equal 6, rows.length
 
-          # Test numeric input
-          assert_equal 1, rows[0]["id"]
-          assert_equal "Alice", rows[0]["name"]
-          assert_in_delta 95.5, rows[0]["score"], 0.0001
+    # Test numeric input
+    assert_equal 1, rows[0]["id"]
+    assert_equal "Alice", rows[0]["name"]
+    assert_in_delta 95.5, rows[0]["score"], 0.0001
 
-          assert_equal 3, rows[1]["id"]
-          assert_equal "Bob", rows[1]["name"]
-          assert_in_delta 82.3, rows[1]["score"], 0.0001
+    assert_equal 3, rows[1]["id"]
+    assert_equal "Bob", rows[1]["name"]
+    assert_in_delta 82.3, rows[1]["score"], 0.0001
 
-          assert_equal 3, rows[2]["id"]
-          assert_equal "Charlie", rows[2]["name"]
-          assert_in_delta 88.7, rows[2]["score"], 0.0001
+    assert_equal 3, rows[2]["id"]
+    assert_equal "Charlie", rows[2]["name"]
+    assert_in_delta 88.7, rows[2]["score"], 0.0001
 
-          assert_equal 4, rows[3]["id"]
-          assert_equal "David", rows[3]["name"]
-          assert_in_delta 91.2, rows[3]["score"], 0.0001
+    assert_equal 4, rows[3]["id"]
+    assert_equal "David", rows[3]["name"]
+    assert_in_delta 91.2, rows[3]["score"], 0.0001
 
-          assert_equal 5, rows[4]["id"]
-          assert_equal "Eve", rows[4]["name"]
-          assert_in_delta 150.0, rows[4]["score"], 0.0001
+    assert_equal 5, rows[4]["id"]
+    assert_equal "Eve", rows[4]["name"]
+    assert_in_delta 150.0, rows[4]["score"], 0.0001
 
-          assert_equal 6, rows[5]["id"]
-          assert_nil rows[5]["name"]
-          assert_nil rows[5]["score"]
-        end
-      end
-    end
+    assert_equal 6, rows[5]["id"]
+    assert_nil rows[5]["name"]
+    assert_nil rows[5]["score"]
 
     # Test writing to a file
     File.open("test/students_from_io.parquet", "wb") do |file|
@@ -676,21 +521,16 @@ class BasicTest < Minitest::Test
     end
 
     # Verify the data written through IO
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query("SELECT * FROM 'test/students_from_io.parquet' ORDER BY id") do |result|
-          rows = result.to_a
-          assert_equal 5, rows.length
+    rows = Parquet.each_row("test/students_from_io.parquet").to_a
+    assert_equal 5, rows.length
 
-          assert_equal 1, rows[0]["id"]
-          assert_equal "Alice", rows[0]["name"]
-          assert_in_delta 95.5, rows[0]["score"], 0.0001
+    assert_equal 1, rows[0]["id"]
+    assert_equal "Alice", rows[0]["name"]
+    assert_in_delta 95.5, rows[0]["score"], 0.0001
 
-          assert_equal 5, rows[4]["id"]
-          assert_equal "Eve", rows[4]["name"]
-          assert_in_delta 150.0, rows[4]["score"], 0.0001
-        end
-      end
+    assert_equal 5, rows[4]["id"]
+    assert_equal "Eve", rows[4]["name"]
+    assert_in_delta 150.0, rows[4]["score"], 0.0001
     end
   ensure
     File.delete("test/students.parquet") if File.exist?("test/students.parquet")
@@ -737,43 +577,36 @@ class BasicTest < Minitest::Test
       write_to: "test/students.parquet"
     )
 
-    # Read and verify the data using DuckDB
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query("SELECT * FROM 'test/students.parquet' ORDER BY id") do |result|
-          rows = result.to_a
-          assert_equal 4, rows.length
+    rows = Parquet.each_row("test/students.parquet").to_a
+    assert_equal 4, rows.length
 
-          assert_equal 1, rows[0]["id"]
-          assert_equal "Alice", rows[0]["name"]
-          assert_in_delta 95.5, rows[0]["score"], 0.0001
-          assert_equal "2024-01-01", rows[0]["date"].to_s
-          assert_equal "2024-01-01 10:30:00", rows[0]["timestamp"].to_s
-          assert_equal true, rows[0]["data"]
+    assert_equal 1, rows[0]["id"]
+    assert_equal "Alice", rows[0]["name"]
+    assert_in_delta 95.5, rows[0]["score"], 0.0001
+    assert_equal "2024-01-01", rows[0]["date"].to_s
+    assert_equal "2024-01-01 18:30:00 UTC", rows[0]["timestamp"].to_s
+    assert_equal true, rows[0]["data"]
 
-          assert_equal 2, rows[1]["id"]
-          assert_equal "Bob", rows[1]["name"]
-          assert_in_delta 82.3, rows[1]["score"], 0.0001
-          assert_equal "2024-01-02", rows[1]["date"].to_s
-          assert_equal "2024-01-02 14:45:00", rows[1]["timestamp"].to_s
-          assert_equal false, rows[1]["data"]
+    assert_equal 2, rows[1]["id"]
+    assert_equal "Bob", rows[1]["name"]
+    assert_in_delta 82.3, rows[1]["score"], 0.0001
+    assert_equal "2024-01-02", rows[1]["date"].to_s
+    assert_equal "2024-01-02 22:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal false, rows[1]["data"]
 
-          assert_equal 3, rows[2]["id"]
-          assert_equal "Charlie", rows[2]["name"]
-          assert_in_delta 88.7, rows[2]["score"], 0.0001
-          assert_equal "2024-01-03", rows[2]["date"].to_s
-          assert_equal "2024-01-03 09:15:00", rows[2]["timestamp"].to_s
-          assert_equal true, rows[2]["data"]
+    assert_equal 3, rows[2]["id"]
+    assert_equal "Charlie", rows[2]["name"]
+    assert_in_delta 88.7, rows[2]["score"], 0.0001
+    assert_equal "2024-01-03", rows[2]["date"].to_s
+    assert_equal "2024-01-03 17:15:00 UTC", rows[2]["timestamp"].to_s
+    assert_equal true, rows[2]["data"]
 
-          assert_equal 4, rows[3]["id"]
-          assert_nil rows[3]["name"]
-          assert_nil rows[3]["score"]
-          assert_nil rows[3]["date"]
-          assert_nil rows[3]["timestamp"]
-          assert_nil rows[3]["data"]
-        end
-      end
-    end
+    assert_equal 4, rows[3]["id"]
+    assert_nil rows[3]["name"]
+    assert_nil rows[3]["score"]
+    assert_nil rows[3]["date"]
+    assert_nil rows[3]["timestamp"]
+    assert_nil rows[3]["data"]
   ensure
     File.delete("test/students.parquet") if File.exist?("test/students.parquet")
   end
@@ -812,39 +645,30 @@ class BasicTest < Minitest::Test
       write_to: "test/formatted_columns.parquet"
     )
 
-    # Read and verify the row-based data using DuckDB
-    DuckDB::Database.open do |db|
-      db.connect do |con|
-        con.query("SELECT * FROM 'test/formatted.parquet'") do |result|
-          rows = result.to_a
-          assert_equal 3, rows.length
+    rows = Parquet.each_row("test/formatted.parquet").to_a
+    assert_equal 3, rows.length
 
-          assert_equal "2024-01-01", rows[0]["date"].to_s
-          assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+    assert_equal "2024-01-01", rows[0]["date"].to_s
+    assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
 
-          assert_equal "2024-01-02", rows[1]["date"].to_s
-          assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal "2024-01-02", rows[1]["date"].to_s
+    assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
 
-          assert_equal "2024-01-03", rows[2]["date"].to_s
-          assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
-        end
+    assert_equal "2024-01-03", rows[2]["date"].to_s
+    assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
 
-        # Verify column-based data matches row-based data
-        con.query("SELECT * FROM 'test/formatted_columns.parquet'") do |result|
-          rows = result.to_a
-          assert_equal 3, rows.length
+    # Verify column-based data matches row-based data
+    rows = Parquet.each_row("test/formatted_columns.parquet").to_a
+    assert_equal 3, rows.length
 
-          assert_equal "2024-01-01", rows[0]["date"].to_s
-          assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+    assert_equal "2024-01-01", rows[0]["date"].to_s
+    assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
 
-          assert_equal "2024-01-02", rows[1]["date"].to_s
-          assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal "2024-01-02", rows[1]["date"].to_s
+    assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
 
-          assert_equal "2024-01-03", rows[2]["date"].to_s
-          assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
-        end
-      end
-    end
+    assert_equal "2024-01-03", rows[2]["date"].to_s
+    assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
   ensure
     File.delete("test/formatted.parquet") if File.exist?("test/formatted.parquet")
     File.delete("test/formatted_columns.parquet") if File.exist?("test/formatted_columns.parquet")
