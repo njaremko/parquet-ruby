@@ -194,4 +194,4 @@ The following data types are supported in the schema:
 - `date32`
 - `timestamp_millis`, `timestamp_micros`
 
-Note: List and Map types are currently not supported.
+Note: Writing of List and Map types is not currently supported.
