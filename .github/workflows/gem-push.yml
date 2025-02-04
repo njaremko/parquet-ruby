@@ -1,14 +1,6 @@
 name: Ruby Gem
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "lib/parquet/version.rb"
-  pull_request:
-    branches: ["main"]
-    paths:
-      - "lib/parquet/version.rb"
   workflow_dispatch:
 
 jobs:
@@ -20,22 +12,43 @@ jobs:
       id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
       contents: write # IMPORTANT: this permission is required for `rake release` to push the release tag
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            target: x86_64-unknown-linux-gnu
+          - platform: x86_64-linux-musl
+            target: x86_64-unknown-linux-musl
+          - platform: aarch64-linux
+            target: aarch64-unknown-linux-gnu
+          - platform: aarch64-linux-musl
+            target: aarch64-unknown-linux-musl
+          - platform: x86_64-darwin
+            target: x86_64-apple-darwin
+          - platform: arm64-darwin
+            target: aarch64-apple-darwin
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download and Install DuckDB
-        run: |
-          wget https://github.com/duckdb/duckdb/releases/download/v1.1.3/libduckdb-linux-amd64.zip
-          unzip libduckdb-linux-amd64.zip
-          sudo cp libduckdb.so /usr/local/lib/
-          sudo cp duckdb.h duckdb.hpp /usr/local/include/
-          sudo ldconfig
 
       - name: Set up Ruby 3.2
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.2
-          bundler-cache: true # runs 'bundle install' and caches installed gems automatically
 
-      # Run tests and release
-      - uses: rubygems/release-gem@v1
+      # For some reason, I need to manually install this, even though it's seemingly automated below...
+      - name: rb-sys
+        run: |
+          gem install rb_sys
+
+      - uses: oxidize-rb/actions/cross-gem@v1
+        id: cross-gem
+        with:
+          platform: ${{ matrix.platform }}
+          ruby-versions: "3.4,3.3,3.2"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: ${{ steps.cross-gem.outputs.gem-path }}
