@@ -4,6 +4,7 @@ require "parquet"
 require "minitest/autorun"
 
 require "csv"
+require "bigdecimal"
 
 class BasicTest < Minitest::Test
   def test_each_row
@@ -522,7 +523,7 @@ class BasicTest < Minitest::Test
 
     # Verify the data written through IO
     rows = Parquet.each_row("test/students_from_io.parquet").to_a
-    assert_equal 5, rows.length
+    assert_equal 6, rows.length
 
     assert_equal 1, rows[0]["id"]
     assert_equal "Alice", rows[0]["name"]
@@ -531,7 +532,6 @@ class BasicTest < Minitest::Test
     assert_equal 5, rows[4]["id"]
     assert_equal "Eve", rows[4]["name"]
     assert_in_delta 150.0, rows[4]["score"], 0.0001
-    end
   ensure
     File.delete("test/students.parquet") if File.exist?("test/students.parquet")
     File.delete("test/students_from_io.parquet") if File.exist?("test/students_from_io.parquet")

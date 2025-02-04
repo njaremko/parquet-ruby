@@ -45,7 +45,7 @@ pub fn parse_zoned_timestamp(value: &ParquetValue) -> jiff::Timestamp {
             ts.to_zoned(tz).timestamp()
         } else {
             // Try IANA timezone
-            match ts.intz(&tz) {
+            match ts.in_tz(&tz) {
                 Ok(zoned) => zoned.timestamp(),
                 Err(_) => ts, // Fall back to UTC if timezone is invalid
             }
