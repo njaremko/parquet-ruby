@@ -55,6 +55,15 @@ jobs:
         with:
           ruby-version: 3.2
 
+      - name: rb-sys
+        run: |
+          gem install rb-sys
+          gem list rb_sys
+          gem contents rb_sys | grep rb-sys-dock
+          which rb-sys-dock || echo "rb-sys-dock not in PATH"
+          echo "GEM PATH: $GEM_PATH"
+          echo "PATH: $PATH"
+
       - uses: oxidize-rb/actions/cross-gem@v1
         id: cross-gem
         with:
