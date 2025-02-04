@@ -57,7 +57,7 @@ jobs:
 
       - name: rb-sys
         run: |
-          gem install rb-sys
+          gem install rb_sys
           gem list rb_sys
           gem contents rb_sys | grep rb-sys-dock
           which rb-sys-dock || echo "rb-sys-dock not in PATH"
