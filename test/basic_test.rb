@@ -545,8 +545,8 @@ class BasicTest < Minitest::Test
         [1, 2], # id column
         %w[Alice Bob], # name column
         [95.5, 82.3], # score column
-        [Time.new(2024, 1, 1), Time.new(2024, 1, 2)], # date column
-        [Time.new(2024, 1, 1, 10, 30), Time.new(2024, 1, 2, 14, 45)], # timestamp column
+        [Time.new(2024, 1, 1, 0, 0, 0, 'UTC'), Time.new(2024, 1, 2, 0, 0, 0, 'UTC')], # date column
+        [Time.new(2024, 1, 1, 10, 30, 0, 'UTC'), Time.new(2024, 1, 2, 14, 45, 0, 'UTC')], # timestamp column
         [true, false]
       ],
       # Second batch
@@ -554,8 +554,8 @@ class BasicTest < Minitest::Test
         [3, 4], # id column
         ["Charlie", nil], # name column
         [88.7, nil], # score column
-        [Time.new(2024, 1, 3), nil], # date column
-        [Time.new(2024, 1, 3, 9, 15), nil], # timestamp column
+        [Time.new(2024, 1, 3, 0, 0, 0, 'UTC'), nil], # date column
+        [Time.new(2024, 1, 3, 9, 15, 0, 'UTC'), nil], # timestamp column
         [true, nil]
       ]
     ]
@@ -584,21 +584,21 @@ class BasicTest < Minitest::Test
     assert_equal "Alice", rows[0]["name"]
     assert_in_delta 95.5, rows[0]["score"], 0.0001
     assert_equal "2024-01-01", rows[0]["date"].to_s
-    assert_equal "2024-01-01 18:30:00 UTC", rows[0]["timestamp"].to_s
+    assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
     assert_equal true, rows[0]["data"]
 
     assert_equal 2, rows[1]["id"]
     assert_equal "Bob", rows[1]["name"]
     assert_in_delta 82.3, rows[1]["score"], 0.0001
     assert_equal "2024-01-02", rows[1]["date"].to_s
-    assert_equal "2024-01-02 22:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
     assert_equal false, rows[1]["data"]
 
     assert_equal 3, rows[2]["id"]
     assert_equal "Charlie", rows[2]["name"]
     assert_in_delta 88.7, rows[2]["score"], 0.0001
     assert_equal "2024-01-03", rows[2]["date"].to_s
-    assert_equal "2024-01-03 17:15:00 UTC", rows[2]["timestamp"].to_s
+    assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
     assert_equal true, rows[2]["data"]
 
     assert_equal 4, rows[3]["id"]
