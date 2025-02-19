@@ -1,12 +1,12 @@
 use crate::header_cache::StringCache;
+use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
 use crate::types::TryIntoValue;
 use crate::{
-    create_row_enumerator, utils::*, ForgottenFileHandle, ParquetField, ParserResultType,
-    ReaderError, RowEnumeratorArgs, RowRecord, SeekableRubyValue,
+    create_row_enumerator, utils::*, ParquetField, ParserResultType, ReaderError,
+    RowEnumeratorArgs, RowRecord,
 };
 use ahash::RandomState;
-use magnus::rb_sys::AsRawValue;
-use magnus::value::{Opaque, ReprValue};
+use magnus::value::ReprValue;
 use magnus::IntoValue;
 use magnus::{Error as MagnusError, Ruby, Value};
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -14,8 +14,6 @@ use parquet::record::reader::RowIter as ParquetRowIter;
 use parquet::schema::types::{Type as SchemaType, TypePtr};
 use std::collections::HashMap;
 use std::fs::File;
-use std::mem::ManuallyDrop;
-use std::os::fd::FromRawFd;
 use std::sync::OnceLock;
 
 #[inline]
@@ -40,39 +38,17 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
         .map(|yield_enum| yield_enum.into_value_with(&ruby));
     }
 
-    let (schema, mut iter) = if to_read.is_kind_of(ruby.class_string()) {
+    let reader: Box<dyn FileReader> = if to_read.is_kind_of(ruby.class_string()) {
         let path_string = to_read.to_r_string()?;
         let file_path = unsafe { path_string.as_str()? };
-        let file = File::open(file_path).unwrap();
-        let reader = SerializedFileReader::new(file).unwrap();
-        let schema = reader.metadata().file_metadata().schema().clone();
-
-        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
-    } else if to_read.is_kind_of(ruby.class_io()) {
-        let raw_value = to_read.as_raw();
-        let fd = std::panic::catch_unwind(|| unsafe { rb_sys::rb_io_descriptor(raw_value) })
-            .map_err(|_| {
-                ReaderError::FileDescriptor("Failed to get file descriptor".to_string())
-            })?;
-
-        if fd < 0 {
-            return Err(ReaderError::InvalidFileDescriptor.into());
-        }
-
-        let file = unsafe { File::from_raw_fd(fd) };
-        let file = ForgottenFileHandle(ManuallyDrop::new(file));
-        let reader = SerializedFileReader::new(file).unwrap();
-        let schema = reader.metadata().file_metadata().schema().clone();
-
-        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
+        let file = File::open(file_path).map_err(ReaderError::from)?;
+        Box::new(SerializedFileReader::new(file).map_err(ReaderError::from)?)
     } else {
-        let readable = SeekableRubyValue(Opaque::from(to_read));
-        let reader = SerializedFileReader::new(readable).unwrap();
-        let schema = reader.metadata().file_metadata().schema().clone();
-
-        (schema, ParquetRowIter::from_file_into(Box::new(reader)))
+        let readable = ThreadSafeRubyReader::new(RubyReader::try_from(to_read)?);
+        Box::new(SerializedFileReader::new(readable).map_err(ReaderError::from)?)
     };
-
+    let schema = reader.metadata().file_metadata().schema().clone();
+    let mut iter = ParquetRowIter::from_file_into(reader);
     if let Some(cols) = columns {
         let projection = create_projection_schema(&schema, &cols);
         iter = iter.project(Some(projection.to_owned())).map_err(|e| {
@@ -97,7 +73,8 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
                             header_string.push(k.to_owned());
                         }
 
-                        let headers = StringCache::intern_many(&header_string).unwrap();
+                        let headers = StringCache::intern_many(&header_string)
+                            .expect("Failed to intern headers");
 
                         headers
                     });
@@ -110,7 +87,7 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
                     Ok(map)
                 })
                 .and_then(|row| Ok(RowRecord::Map::<RandomState>(row)))
-                .map_err(|e| ReaderError::Parquet(e))
+                .map_err(|e| ReaderError::from(e))
             });
 
             for result in iter {
@@ -128,7 +105,7 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
                     Ok(vec)
                 })
                 .and_then(|row| Ok(RowRecord::Vec::<RandomState>(row)))
-                .map_err(|e| ReaderError::Parquet(e))
+                .map_err(|e| ReaderError::from(e))
             });
 
             for result in iter {

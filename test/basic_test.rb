@@ -36,7 +36,7 @@ class BasicTest < Minitest::Test
 
   def test_each_row_with_file_open
     rows = []
-    File.open("test/data.parquet", "rb") { |file| Parquet.each_row(file) { |row| rows << row } }
+    File.open("test/data.parquet") { |file| Parquet.each_row(file) { |row| rows << row } }
     refute_empty rows
     assert_kind_of Hash, rows.first
     assert_equal rows.first.keys.sort, %w[id name].sort # Verify expected columns
@@ -82,21 +82,18 @@ class BasicTest < Minitest::Test
     temp_path = "test/large_data.parquet"
     begin
       # Generate schema for id and large string column
-      schema = [
-        { "id" => "int64" },
-        { "data" => "string" }
-      ]
+      schema = [{ "id" => "int64" }, { "data" => "string" }]
 
       # Write 100k rows using an enumerator to avoid memory allocation
       Parquet.write_rows(
         Enumerator.new do |yielder|
           5000.times do |i|
-            large_string = ('a'..'z').to_a[rand(26)] * 1_000_000
+            large_string = ("a".."z").to_a[rand(26)] * 1_000_000
             yielder << [i, large_string]
           end
         end,
         schema: schema,
-        write_to: temp_path,
+        write_to: temp_path
       )
 
       # Verify file exists and has content
@@ -105,9 +102,7 @@ class BasicTest < Minitest::Test
 
       # Read back first few rows to verify structure
       rows = []
-      Parquet.each_row(temp_path) do |row|
-        rows << row
-      end
+      Parquet.each_row(temp_path) { |row| rows << row }
 
       assert_equal 5000, rows.length
       assert_equal 0, rows[0]["id"]
@@ -298,15 +293,8 @@ class BasicTest < Minitest::Test
     row_count = 100_000
 
     Parquet.write_rows(
-      Enumerator.new do |yielder|
-        row_count.times do |i|
-          yielder << [i, "name_#{i}"]
-        end
-      end,
-      schema: [
-        { "id" => "int64" },
-        { "name" => "string" }
-      ],
+      Enumerator.new { |yielder| row_count.times { |i| yielder << [i, "name_#{i}"] } },
+      schema: [{ "id" => "int64" }, { "name" => "string" }],
       write_to: "test/large.parquet"
     )
 
@@ -337,9 +325,7 @@ class BasicTest < Minitest::Test
     column_count = 1000
     schema = (0...column_count).map { |i| { "col#{i}" => "int64" } }
     Parquet.write_rows(
-      Enumerator.new do |yielder|
-        yielder << (0...column_count).to_a
-      end,
+      Enumerator.new { |yielder| yielder << (0...column_count).to_a },
       schema: schema,
       write_to: "test/wide.parquet"
     )
@@ -375,11 +361,7 @@ class BasicTest < Minitest::Test
       { "日本語" => "int64" },
       { "col.with.dots" => "int64" }
     ]
-    Parquet.write_rows(
-      [[1, 2, 3, 4, 5]].each,
-      schema: schema,
-      write_to: "test/special_chars.parquet"
-    )
+    Parquet.write_rows([[1, 2, 3, 4, 5]].each, schema: schema, write_to: "test/special_chars.parquet")
 
     rows = []
     Parquet.each_row("test/special_chars.parquet") { |row| rows << row }
@@ -417,11 +399,7 @@ class BasicTest < Minitest::Test
   def test_boolean_types
     Parquet.write_rows(
       [[true, false, nil]].each,
-      schema: [
-        { "true_col" => "bool" },
-        { "false_col" => "bool" },
-        { "null_bool" => "bool" }
-      ],
+      schema: [{ "true_col" => "bool" }, { "false_col" => "bool" }, { "null_bool" => "bool" }],
       write_to: "test/boolean.parquet"
     )
 
@@ -437,10 +415,7 @@ class BasicTest < Minitest::Test
   def test_invalid_column_specifications
     Parquet.write_rows(
       [[1, "name"]].each,
-      schema: [
-        { "id" => "int64" },
-        { "name" => "string" }
-      ],
+      schema: [{ "id" => "int64" }, { "name" => "string" }],
       write_to: "test/cols.parquet"
     )
 
@@ -545,8 +520,8 @@ class BasicTest < Minitest::Test
         [1, 2], # id column
         %w[Alice Bob], # name column
         [95.5, 82.3], # score column
-        [Time.new(2024, 1, 1, 0, 0, 0, 'UTC'), Time.new(2024, 1, 2, 0, 0, 0, 'UTC')], # date column
-        [Time.new(2024, 1, 1, 10, 30, 0, 'UTC'), Time.new(2024, 1, 2, 14, 45, 0, 'UTC')], # timestamp column
+        [Time.new(2024, 1, 1, 0, 0, 0, "UTC"), Time.new(2024, 1, 2, 0, 0, 0, "UTC")], # date column
+        [Time.new(2024, 1, 1, 10, 30, 0, "UTC"), Time.new(2024, 1, 2, 14, 45, 0, "UTC")], # timestamp column
         [true, false]
       ],
       # Second batch
@@ -554,8 +529,8 @@ class BasicTest < Minitest::Test
         [3, 4], # id column
         ["Charlie", nil], # name column
         [88.7, nil], # score column
-        [Time.new(2024, 1, 3, 0, 0, 0, 'UTC'), nil], # date column
-        [Time.new(2024, 1, 3, 9, 15, 0, 'UTC'), nil], # timestamp column
+        [Time.new(2024, 1, 3, 0, 0, 0, "UTC"), nil], # date column
+        [Time.new(2024, 1, 3, 9, 15, 0, "UTC"), nil], # timestamp column
         [true, nil]
       ]
     ]

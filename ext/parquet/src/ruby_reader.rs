@@ -1,171 +1,294 @@
+use bytes::Bytes;
 use magnus::{
     value::{Opaque, ReprValue},
     RClass, RString, Ruby, Value,
 };
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::sync::OnceLock;
+use parquet::{
+    errors::ParquetError,
+    file::reader::{ChunkReader, Length},
+};
+use std::{
+    fs::File,
+    sync::{Mutex, OnceLock},
+};
+use std::{
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
+    sync::Arc,
+};
 
 static STRING_IO_CLASS: OnceLock<Opaque<RClass>> = OnceLock::new();
 
 /// A reader that can handle various Ruby input types (String, StringIO, IO-like objects)
 /// and provide a standard Read implementation for them.
-pub struct RubyReader<T> {
-    inner: T,
-    offset: usize,
+pub enum RubyReader {
+    String {
+        inner: Opaque<RString>,
+        offset: usize,
+    },
+    RubyIoLike {
+        inner: Opaque<Value>,
+    },
+    NativeProxyIoLike {
+        proxy_file: File,
+    },
 }
 
-pub trait SeekableRead: Read + Seek {}
-impl<T: Read + Seek> SeekableRead for T {}
-
-pub fn build_ruby_reader(
-    ruby: &Ruby,
-    input: Value,
-) -> Result<Box<dyn SeekableRead>, magnus::Error> {
-    if RubyReader::is_string_io(ruby, &input) {
-        RubyReader::from_string_io(ruby, input)
-    } else if RubyReader::is_io_like(&input) {
-        RubyReader::from_io(input)
-    } else {
-        RubyReader::from_string_like(input)
-    }
-}
-
-impl Seek for RubyReader<Value> {
-    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        let (whence, offset) = match pos {
-            SeekFrom::Start(i) => (0, i as i64),
-            SeekFrom::Current(i) => (1, i),
-            SeekFrom::End(i) => (2, i),
-        };
-
-        let new_position = self
-            .inner
-            .funcall("seek", (offset, whence))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(new_position)
-    }
-}
-
-impl Write for RubyReader<Value> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
-        let ruby_bytes = RString::from_slice(buf);
-
-        let bytes_written = self
-            .inner
-            .funcall::<_, _, usize>("write", (ruby_bytes,))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(bytes_written)
-    }
-
-    fn flush(&mut self) -> Result<(), io::Error> {
-        self.inner
-            .funcall::<_, _, Value>("flush", ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(())
-    }
-}
-
-impl Seek for RubyReader<RString> {
-    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        match pos {
-            io::SeekFrom::Start(offset) => self.offset = offset as usize,
-            io::SeekFrom::Current(offset) => self.offset = (self.offset as i64 + offset) as usize,
-            io::SeekFrom::End(offset) => self.offset = self.inner.len() - offset as usize,
-        }
-        Ok(self.offset as u64)
-    }
-}
-
-impl RubyReader<Value> {
-    fn from_io(input: Value) -> Result<Box<dyn SeekableRead>, magnus::Error> {
-        if Self::is_io_like(&input) {
-            Ok(Box::new(Self::from_io_like(input)))
-        } else {
-            Err(magnus::Error::new(
-                magnus::exception::type_error(),
-                "Input is not an IO-like object",
-            ))
-        }
-    }
-
-    fn is_io_like(input: &Value) -> bool {
-        input.respond_to("read", false).unwrap_or(false)
-    }
-
-    fn from_io_like(input: Value) -> Self {
-        Self {
-            inner: input,
-            offset: 0,
-        }
-    }
-}
-
-impl RubyReader<RString> {
-    pub fn from_string_io(
-        ruby: &Ruby,
-        input: Value,
-    ) -> Result<Box<dyn SeekableRead>, magnus::Error> {
-        if !Self::is_string_io(ruby, &input) {
-            return Err(magnus::Error::new(
-                magnus::exception::type_error(),
-                "Input is not a StringIO",
-            ));
-        }
-
-        let string_content = input.funcall::<_, _, RString>("string", ()).unwrap();
-        Ok(Box::new(Self {
-            inner: string_content,
-            offset: 0,
-        }))
-    }
-
-    fn is_string_io(ruby: &Ruby, input: &Value) -> bool {
+impl RubyReader {
+    fn is_string_io(ruby: &Ruby, value: &Value) -> bool {
         let string_io_class = STRING_IO_CLASS.get_or_init(|| {
-            let class = RClass::from_value(ruby.eval("StringIO").unwrap()).unwrap();
+            let class = RClass::from_value(ruby.eval("StringIO").expect("Failed to find StringIO"))
+                .expect("Failed to get StringIO class");
             Opaque::from(class)
         });
-        input.is_kind_of(ruby.get_inner(*string_io_class))
+        value.is_kind_of(ruby.get_inner(*string_io_class))
     }
 
-    fn from_string_like(input: Value) -> Result<Box<dyn SeekableRead>, magnus::Error> {
-        // Try calling `to_str`, and if that fails, try `to_s`
-        let string_content = input
-            .funcall::<_, _, RString>("to_str", ())
-            .or_else(|_| input.funcall::<_, _, RString>("to_s", ()))?;
-        Ok(Box::new(Self {
-            inner: string_content,
-            offset: 0,
-        }))
+    fn is_io_like(value: &Value) -> bool {
+        value.respond_to("read", false).unwrap_or(false)
     }
-}
 
-impl Read for RubyReader<Value> {
-    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
-        let bytes = self
-            .inner
-            .funcall::<_, _, RString>("read", (buf.len(),))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        buf.write_all(unsafe { bytes.as_slice() })?;
-
-        Ok(bytes.len())
+    // For now, don't use this. Having to use seek in length is scary.
+    fn is_seekable_io_like(_value: &Value) -> bool {
+        // Self::is_io_like(value) && value.respond_to("seek", false).unwrap_or(false)
+        false
     }
 }
 
-impl Read for RubyReader<RString> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let string_buffer = unsafe { self.inner.as_slice() };
-        if self.offset >= string_buffer.len() {
-            return Ok(0); // EOF
+impl TryFrom<Value> for RubyReader {
+    type Error = magnus::Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let ruby = unsafe { Ruby::get_unchecked() };
+        if RubyReader::is_string_io(&ruby, &value) {
+            let string_content = value.funcall::<_, _, RString>("string", ())?;
+            Ok(RubyReader::String {
+                inner: Opaque::from(string_content),
+                offset: 0,
+            })
+        } else if RubyReader::is_seekable_io_like(&value) {
+            Ok(RubyReader::RubyIoLike {
+                inner: Opaque::from(value),
+            })
+        } else if RubyReader::is_io_like(&value) {
+            let mut temp_file = tempfile::tempfile()
+                .map_err(|e| magnus::Error::new(ruby.exception_runtime_error(), e.to_string()))?;
+
+            // This is safe, because we won't call seek
+            let inner_readable = RubyReader::RubyIoLike {
+                inner: Opaque::from(value),
+            };
+            let mut reader = BufReader::new(inner_readable);
+            io::copy(&mut reader, &mut temp_file)
+                .map_err(|e| magnus::Error::new(ruby.exception_runtime_error(), e.to_string()))?;
+            temp_file
+                .seek(SeekFrom::Start(0))
+                .map_err(|e| magnus::Error::new(ruby.exception_runtime_error(), e.to_string()))?;
+
+            Ok(RubyReader::NativeProxyIoLike {
+                proxy_file: temp_file,
+            })
+        } else {
+            // Try calling `to_str`, and if that fails, try `to_s`
+            let string_content = value
+                .funcall::<_, _, RString>("to_str", ())
+                .or_else(|_| value.funcall::<_, _, RString>("to_s", ()))?;
+            Ok(RubyReader::String {
+                inner: Opaque::from(string_content),
+                offset: 0,
+            })
         }
+    }
+}
 
-        let remaining = string_buffer.len() - self.offset;
-        let copy_size = remaining.min(buf.len());
-        buf[..copy_size].copy_from_slice(&string_buffer[self.offset..self.offset + copy_size]);
-        self.offset += copy_size;
-        Ok(copy_size)
+impl Seek for RubyReader {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let ruby = unsafe { Ruby::get_unchecked() };
+        match self {
+            RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.seek(pos),
+            RubyReader::String {
+                inner,
+                offset: original_offset,
+            } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+
+                let new_offset = match pos {
+                    io::SeekFrom::Start(offset) => offset as usize,
+                    io::SeekFrom::Current(offset) => (*original_offset as i64 + offset) as usize,
+                    io::SeekFrom::End(offset) => {
+                        unwrapped_inner.len().saturating_sub(offset as usize)
+                    }
+                };
+
+                *original_offset = new_offset.min(unwrapped_inner.len());
+                Ok(*original_offset as u64)
+            }
+            RubyReader::RubyIoLike { inner } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+
+                let (whence, ruby_offset) = match pos {
+                    SeekFrom::Start(i) => (0, i as i64),
+                    SeekFrom::Current(i) => (1, i),
+                    SeekFrom::End(i) => (2, i),
+                };
+
+                let new_position = unwrapped_inner
+                    .funcall("seek", (ruby_offset, whence))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+                Ok(new_position)
+            }
+        }
+    }
+}
+
+impl Read for RubyReader {
+    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+        let ruby = unsafe { Ruby::get_unchecked() };
+        match self {
+            RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.read(buf),
+            RubyReader::String { inner, offset } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+
+                let string_buffer = unsafe { unwrapped_inner.as_slice() };
+                if *offset >= string_buffer.len() {
+                    return Ok(0); // EOF
+                }
+
+                let remaining = string_buffer.len() - *offset;
+                let copy_size = remaining.min(buf.len());
+                buf[..copy_size].copy_from_slice(&string_buffer[*offset..*offset + copy_size]);
+
+                *offset += copy_size;
+
+                Ok(copy_size)
+            }
+            RubyReader::RubyIoLike { inner } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+
+                let bytes = unwrapped_inner
+                    .funcall::<_, _, Option<RString>>("read", (buf.len(),))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+                match bytes {
+                    Some(bytes) => {
+                        let string_buffer = unsafe { bytes.as_slice() };
+                        buf.write_all(string_buffer)?;
+                        Ok(string_buffer.len())
+                    }
+                    None => {
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Length for RubyReader {
+    fn len(&self) -> u64 {
+        let ruby = unsafe { Ruby::get_unchecked() };
+        match self {
+            RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.len(),
+            RubyReader::String { inner, offset: _ } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+                unwrapped_inner.len() as u64
+            }
+            RubyReader::RubyIoLike { inner } => {
+                let unwrapped_inner = ruby.get_inner(*inner);
+                let current_pos = unwrapped_inner.funcall::<_, _, u64>("seek", (0, 1));
+
+                if let Err(e) = current_pos {
+                    eprintln!("Error seeking: {}", e);
+                    return 0;
+                }
+
+                if let Err(e) = unwrapped_inner.funcall::<_, _, u64>("seek", (0, 2)) {
+                    eprintln!("Error seeking: {}", e);
+                    return 0;
+                }
+
+                let size = unwrapped_inner.funcall::<_, _, u64>("pos", ());
+
+                match size {
+                    Ok(size) => {
+                        // Restore original position
+                        if let Err(e) = unwrapped_inner.funcall::<_, _, u64>(
+                            "seek",
+                            (current_pos.expect("Current position is not set!"), 0),
+                        ) {
+                            eprintln!("Error seeking: {}", e);
+                            return 0;
+                        }
+                        size
+                    }
+                    Err(e) => {
+                        eprintln!("Error seeking: {}", e);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+const READ_BUFFER_SIZE: usize = 16 * 1024;
+
+#[derive(Clone)]
+pub struct ThreadSafeRubyReader(Arc<Mutex<RubyReader>>);
+
+impl ThreadSafeRubyReader {
+    pub fn new(reader: RubyReader) -> Self {
+        Self(Arc::new(Mutex::new(reader)))
+    }
+}
+
+impl Length for ThreadSafeRubyReader {
+    fn len(&self) -> u64 {
+        self.0.lock().expect("Failed to lock mutex").len()
+    }
+}
+
+impl Seek for ThreadSafeRubyReader {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let mut reader = self
+            .0
+            .lock()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        reader.seek(pos)
+    }
+}
+
+impl Read for ThreadSafeRubyReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut reader = self
+            .0
+            .lock()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        reader.read(buf)
+    }
+}
+
+impl ChunkReader for ThreadSafeRubyReader {
+    type T = BufReader<ThreadSafeRubyReader>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let mut reader = self.clone();
+        reader.seek(SeekFrom::Start(start))?;
+        Ok(BufReader::with_capacity(READ_BUFFER_SIZE, reader))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let mut buffer = Vec::with_capacity(length);
+        let mut reader = self.clone();
+        reader.seek(SeekFrom::Start(start))?;
+        let read = reader.take(length as _).read_to_end(&mut buffer)?;
+
+        if read != length {
+            return Err(ParquetError::EOF(format!(
+                "Expected to read {} bytes, read only {}",
+                length, read
+            )));
+        }
+        Ok(buffer.into())
     }
 }
