@@ -34,9 +34,8 @@ impl RubyReader {
     }
 
     // For now, don't use this. Having to use seek in length is scary.
-    fn is_seekable_io_like(_value: &Value) -> bool {
-        // Self::is_io_like(value) && value.respond_to("seek", false).unwrap_or(false)
-        false
+    fn is_seekable_io_like(value: &Value) -> bool {
+        Self::is_io_like(value) && value.respond_to("seek", false).unwrap_or(false)
     }
 }
 
@@ -92,10 +91,14 @@ impl Seek for RubyReader {
                 let unwrapped_inner = ruby.get_inner(*inner);
 
                 let new_offset = match pos {
-                    io::SeekFrom::Start(offset) => offset as usize,
-                    io::SeekFrom::Current(offset) => (*original_offset as i64 + offset) as usize,
-                    io::SeekFrom::End(offset) => {
-                        unwrapped_inner.len().saturating_sub(offset as usize)
+                    SeekFrom::Start(off) => off as usize,
+                    SeekFrom::Current(off) => {
+                        let signed = *original_offset as i64 + off;
+                        signed.max(0) as usize
+                    }
+                    SeekFrom::End(off) => {
+                        let signed = unwrapped_inner.len() as i64 + off;
+                        signed.max(0) as usize
                     }
                 };
 
@@ -111,8 +114,12 @@ impl Seek for RubyReader {
                     SeekFrom::End(i) => (2, i),
                 };
 
+                unwrapped_inner
+                    .funcall::<_, _, u64>("seek", (ruby_offset, whence))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
                 let new_position = unwrapped_inner
-                    .funcall("seek", (ruby_offset, whence))
+                    .funcall::<_, _, u64>("pos", ())
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
                 Ok(new_position)

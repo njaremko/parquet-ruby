@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Re-add seek-able IO optimizations.
+
 ## 0.3.2
 
 - Determining whether we've received a StringIO is difficult to do safely, so just treat it like an IO.
