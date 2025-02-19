@@ -35,7 +35,9 @@ impl RubyReader {
 
     // For now, don't use this. Having to use seek in length is scary.
     fn is_seekable_io_like(value: &Value) -> bool {
-        Self::is_io_like(value) && value.respond_to("seek", false).unwrap_or(false)
+        Self::is_io_like(value)
+            && value.respond_to("seek", false).unwrap_or(false)
+            && value.respond_to("pos", false).unwrap_or(false)
     }
 }
 
