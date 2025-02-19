@@ -28,7 +28,7 @@ use crate::{
 
 const MIN_SAMPLES_FOR_ESTIMATE: usize = 10; // Minimum samples needed for estimation
 const SAMPLE_SIZE: usize = 100; // Number of rows to sample for size estimation
-const MIN_BATCH_SIZE: usize = 100; // Minimum batch size to maintain efficiency
+const MIN_BATCH_SIZE: usize = 10; // Minimum batch size to maintain efficiency
 const INITIAL_BATCH_SIZE: usize = 100; // Initial batch size while sampling
 
 // Maximum memory usage per batch (64MB by default)
@@ -179,12 +179,6 @@ fn estimate_single_row_size(row: &RArray, schema: &[SchemaField]) -> Result<usiz
     Ok(row_size)
 }
 
-/// Calculate optimal batch size based on memory threshold and estimated row size
-fn calculate_batch_size(row_size: usize, memory_threshold: usize) -> usize {
-    let batch_size = memory_threshold / row_size;
-    batch_size.max(MIN_BATCH_SIZE)
-}
-
 #[inline]
 pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
@@ -296,11 +290,13 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
 
                     // Calculate batch size progressively once we have minimum samples
                     if size_samples.len() >= MIN_SAMPLES_FOR_ESTIMATE && user_batch_size.is_none() {
-                        let effective_samples =
-                            &size_samples[..size_samples.len().min(sample_size)];
-                        let avg_row_size =
-                            effective_samples.iter().sum::<usize>() / effective_samples.len();
-                        current_batch_size = calculate_batch_size(avg_row_size, flush_threshold);
+                        let total_size = size_samples.iter().sum::<usize>();
+                        // Safe because we know we have at least MIN_SAMPLES_FOR_ESTIMATE samples
+                        let avg_row_size = total_size as f64 / size_samples.len() as f64;
+                        let avg_row_size = avg_row_size.max(1.0); // Ensure we don't divide by zero
+                        let suggested_batch_size =
+                            (flush_threshold as f64 / avg_row_size).floor() as usize;
+                        current_batch_size = suggested_batch_size.max(MIN_BATCH_SIZE);
                     }
 
                     // When we reach batch size, write the batch
