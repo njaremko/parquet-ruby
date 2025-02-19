@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Determining whether we've received a StringIO is difficult to do safely, so just treat it like an IO.
+
 ## 0.3.1
 
 - Start estimating batch size before we have filled the sampling buffer to prevent OOMs on huge rows.
