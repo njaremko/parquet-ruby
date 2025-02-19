@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+Got rid of surprising behaviour that bypassed ruby if the provided IO had a file descriptor. It led to confusing bugs where people would write a custom read method that was ignored because we read the file descriptor directly.
+
 ## 0.2.13
 
 - Improvements to error handling throughout the library
