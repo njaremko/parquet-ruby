@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Start estimating batch size before we have filled the sampling buffer to prevent OOMs on huge rows.
+
 ## 0.3.0
 
 Got rid of surprising behaviour that bypassed ruby if the provided IO had a file descriptor. It led to confusing bugs where people would write a custom read method that was ignored because we read the file descriptor directly.

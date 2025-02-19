@@ -26,6 +26,7 @@ use crate::{
     IoLikeValue, ParquetSchemaType, ParquetWriteArgs, SchemaField, SendableWrite,
 };
 
+const MIN_SAMPLES_FOR_ESTIMATE: usize = 10; // Minimum samples needed for estimation
 const SAMPLE_SIZE: usize = 100; // Number of rows to sample for size estimation
 const MIN_BATCH_SIZE: usize = 100; // Minimum batch size to maintain efficiency
 const INITIAL_BATCH_SIZE: usize = 100; // Initial batch size while sampling
@@ -293,9 +294,12 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
                     rows_in_batch += 1;
                     total_rows += 1;
 
-                    // Recalculate batch size if we have enough samples and no user-specified size
-                    if size_samples.len() >= sample_size && user_batch_size.is_none() {
-                        let avg_row_size = size_samples.iter().sum::<usize>() / size_samples.len();
+                    // Calculate batch size progressively once we have minimum samples
+                    if size_samples.len() >= MIN_SAMPLES_FOR_ESTIMATE && user_batch_size.is_none() {
+                        let effective_samples =
+                            &size_samples[..size_samples.len().min(sample_size)];
+                        let avg_row_size =
+                            effective_samples.iter().sum::<usize>() / effective_samples.len();
                         current_batch_size = calculate_batch_size(avg_row_size, flush_threshold);
                     }
 
