@@ -83,7 +83,7 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
         None => ParserResultType::Hash,
     };
 
-    let strict = kwargs.optional.2.flatten().unwrap_or(false);
+    let strict = kwargs.optional.2.flatten().unwrap_or(true);
 
     Ok(ParquetRowsArgs {
         to_read,
@@ -159,6 +159,6 @@ pub fn parse_parquet_columns_args(
         result_type,
         columns: kwargs.optional.1.flatten(),
         batch_size: kwargs.optional.2.flatten(),
-        strict: kwargs.optional.3.flatten().unwrap_or(false),
+        strict: kwargs.optional.3.flatten().unwrap_or(true),
     })
 }

@@ -11,7 +11,8 @@ module Parquet
     params(
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
-      columns: T.nilable(T::Array[String])
+      columns: T.nilable(T::Array[String]),
+      strict: T.nilable(T::Boolean)
     ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
   end
   sig do
@@ -19,10 +20,11 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
+      strict: T.nilable(T::Boolean),
       blk: T.nilable(T.proc.params(row: T.any(T::Hash[String, T.untyped], T::Array[T.untyped])).void)
     ).returns(NilClass)
   end
-  def self.each_row(input, result_type: nil, columns: nil, &blk)
+  def self.each_row(input, result_type: nil, columns: nil, strict: nil, &blk)
   end
 
   # Options:
@@ -36,7 +38,8 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
-      batch_size: T.nilable(Integer)
+      batch_size: T.nilable(Integer),
+      strict: T.nilable(T::Boolean)
     ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
   end
   sig do
@@ -45,11 +48,12 @@ module Parquet
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
       batch_size: T.nilable(Integer),
+      strict: T.nilable(T::Boolean),
       blk:
         T.nilable(T.proc.params(batch: T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])).void)
     ).returns(NilClass)
   end
-  def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, &blk)
+  def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, strict: nil, &blk)
   end
 
   # Options:
@@ -80,7 +84,15 @@ module Parquet
       sample_size: T.nilable(Integer)
     ).void
   end
-  def self.write_rows(read_from, schema:, write_to:, batch_size: nil, flush_threshold: nil, compression: nil, sample_size: nil)
+  def self.write_rows(
+    read_from,
+    schema:,
+    write_to:,
+    batch_size: nil,
+    flush_threshold: nil,
+    compression: nil,
+    sample_size: nil
+  )
   end
 
   # Options:

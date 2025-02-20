@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Default to strict parsing of strings
+- Instead of returning strings from the reader in `ASCII-8BIT` format when `strict: false` (the default prior to this change), we now return the string encoded as lossy UTF-8.
+
 ## 0.3.3
 
 - Re-add seek-able IO optimizations.

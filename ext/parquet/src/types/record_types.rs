@@ -136,7 +136,8 @@ impl TryIntoValue for ParquetField {
                         .map_err(|e| ReaderError::Utf8Error(e))
                         .and_then(|s| Ok(s.into_value_with(handle)))?)
                 } else {
-                    Ok(handle.str_from_slice(s.as_bytes()).as_value())
+                    let s = String::from_utf8_lossy(s.as_bytes());
+                    Ok(s.into_value_with(handle))
                 }
             }
             Field::Byte(b) => Ok(b.into_value_with(handle)),
