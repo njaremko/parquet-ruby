@@ -184,37 +184,53 @@ impl Length for RubyReader {
             }
             RubyReader::RubyIoLike { inner } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
-                let current_pos = unwrapped_inner.funcall::<_, _, u64>("seek", (0, 1));
 
-                if let Err(e) = current_pos {
-                    eprintln!("Error seeking: {}", e);
-                    return 0;
-                }
+                // Get current position
+                let current_pos = match unwrapped_inner.funcall::<_, _, u64>("pos", ()) {
+                    Ok(pos) => pos,
+                    Err(e) => {
+                        eprintln!("Error seeking: {}", e);
+                        return 0;
+                    }
+                };
 
+                // Seek to end
                 if let Err(e) = unwrapped_inner.funcall::<_, _, u64>("seek", (0, 2)) {
                     eprintln!("Error seeking: {}", e);
                     return 0;
                 }
 
-                let size = unwrapped_inner.funcall::<_, _, u64>("pos", ());
-
-                match size {
-                    Ok(size) => {
-                        // Restore original position
-                        if let Err(e) = unwrapped_inner.funcall::<_, _, u64>(
-                            "seek",
-                            (current_pos.expect("Current position is not set!"), 0),
-                        ) {
-                            eprintln!("Error seeking: {}", e);
-                            return 0;
-                        }
-                        size
-                    }
+                // Offset at the end of the file is the length of the file
+                let size = match unwrapped_inner.funcall::<_, _, u64>("pos", ()) {
+                    Ok(pos) => pos,
                     Err(e) => {
                         eprintln!("Error seeking: {}", e);
                         return 0;
                     }
+                };
+
+                // Restore original position
+                if let Err(e) = unwrapped_inner.funcall::<_, _, u64>("seek", (current_pos, 0)) {
+                    eprintln!("Error seeking: {}", e);
+                    return 0;
                 }
+
+                let final_pos = match unwrapped_inner.funcall::<_, _, u64>("pos", ()) {
+                    Ok(pos) => pos,
+                    Err(e) => {
+                        eprintln!("Error seeking: {}", e);
+                        return 0;
+                    }
+                };
+
+                assert_eq!(
+                    current_pos, final_pos,
+                    "Failed to restore original position in seekable IO object. Started at position {}, but ended at {}",
+                    current_pos,
+                    final_pos
+                );
+
+                size
             }
         }
     }

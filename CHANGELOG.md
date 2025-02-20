@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Add validations that seekable IO objects are actually seekable.
+
 ## 0.4.0
 
 - Default to strict parsing of strings
