@@ -77,6 +77,51 @@ class BasicTest < Minitest::Test
     assert_equal [1, 2, 3], rows.map { |r| r["id"] }
   end
 
+  def test_write_rows_without_schema
+    temp_path = "test/no_schema.parquet"
+    begin
+      # Write data without providing a schema
+      data = [[1, "hello"], [2, "world"]].each
+      Parquet.write_rows(data, schema: [], write_to: temp_path)
+
+      # Read back and verify default column names were used
+      rows = []
+      Parquet.each_row(temp_path) { |row| rows << row }
+
+      assert_equal 2, rows.length
+      assert_equal %w[f0 f1], rows.first.keys.sort
+      assert_equal "1", rows[0]["f0"]
+      assert_equal "hello", rows[0]["f1"]
+      assert_equal "2", rows[1]["f0"]
+      assert_equal "world", rows[1]["f1"]
+    ensure
+      File.unlink(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_write_columns_without_schema
+    temp_path = "test/no_schema_columns.parquet"
+    begin
+      # Write column data without providing a schema
+      # Wrap the data in an additional array to represent a single batch
+      data = [[[1, 2], %w[hello world]]].each
+      Parquet.write_columns(data, schema: [], write_to: temp_path)
+
+      # Read back and verify default column names were used
+      rows = []
+      Parquet.each_row(temp_path) { |row| rows << row }
+
+      assert_equal 2, rows.length
+      assert_equal %w[f0 f1], rows.first.keys.sort
+      assert_equal "1", rows[0]["f0"]
+      assert_equal "hello", rows[0]["f1"]
+      assert_equal "2", rows[1]["f0"]
+      assert_equal "world", rows[1]["f1"]
+    ensure
+      File.unlink(temp_path) if File.exist?(temp_path)
+    end
+  end
+
   def test_write_large_file
     # Create a temporary file path
     temp_path = "test/large_data.parquet"

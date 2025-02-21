@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- When no schema is provided. Default to `f0`, `f1`, `f2`, etc.
+- Improve string conversion when writing parquet.
+- Improve error message when writing columns with a bad payload.
+
 ## 0.4.1
 
 - Add validations that seekable IO objects are actually seekable.

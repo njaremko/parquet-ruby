@@ -3,7 +3,7 @@ use std::str::FromStr;
 use super::*;
 use arrow_array::builder::*;
 use jiff::tz::{Offset, TimeZone};
-use magnus::{RArray, TryConvert};
+use magnus::{RArray, RString, TryConvert};
 
 pub struct NumericConverter<T> {
     _phantom: std::marker::PhantomData<T>,
@@ -192,6 +192,21 @@ pub fn convert_to_boolean(value: Value) -> Result<bool, MagnusError> {
     } else {
         bool::try_convert(value)
     }
+}
+
+pub fn convert_to_string(value: Value) -> Result<String, MagnusError> {
+    String::try_convert(value).or_else(|_| {
+        if value.respond_to("to_s", false)? {
+            value.funcall::<_, _, RString>("to_s", ())?.to_string()
+        } else if value.respond_to("to_str", false)? {
+            value.funcall::<_, _, RString>("to_str", ())?.to_string()
+        } else {
+            Err(MagnusError::new(
+                magnus::exception::type_error(),
+                format!("Not able to convert {:?} to String", value),
+            ))
+        }
+    })
 }
 
 pub fn convert_to_list(

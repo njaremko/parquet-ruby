@@ -9,7 +9,7 @@ use magnus::{value::ReprValue, Error as MagnusError, RString, Ruby, Symbol, TryC
 use parquet::{arrow::ArrowWriter, errors::ParquetError};
 use tempfile::NamedTempFile;
 
-use crate::types::{ListField, MapField, ParquetSchemaType};
+use crate::types::{convert_to_string, ListField, MapField, ParquetSchemaType};
 
 #[derive(Debug)]
 pub struct SchemaField<'a> {
@@ -240,7 +240,7 @@ impl<'a> ColumnCollector<'a> {
                 ParquetValue::Float64(v)
             }
             ParquetSchemaType::String => {
-                let v = String::try_convert(value)?;
+                let v = convert_to_string(value)?;
                 ParquetValue::String(v)
             }
             ParquetSchemaType::Binary => {

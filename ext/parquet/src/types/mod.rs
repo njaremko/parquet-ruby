@@ -22,7 +22,7 @@ use arrow_array::{
     TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_schema::{DataType, TimeUnit};
-use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, TryConvert, Value};
+use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, Value};
 use parquet::data_type::Decimal;
 use parquet::record::Field;
 use std::{collections::HashMap, hash::BuildHasher, sync::Arc};

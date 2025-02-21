@@ -208,7 +208,7 @@ impl ParquetValue {
                 Ok(ParquetValue::Float64(v))
             }
             ParquetSchemaType::String => {
-                let v = String::try_convert(value)?;
+                let v = convert_to_string(value)?;
                 Ok(ParquetValue::String(v))
             }
             ParquetSchemaType::Binary => {

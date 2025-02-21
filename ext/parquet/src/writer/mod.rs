@@ -42,7 +42,7 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
 
     let kwargs = get_kwargs::<
         _,
-        (Value, Value),
+        (Option<RArray>, Value),
         (
             Option<Option<usize>>,
             Option<Option<usize>>,
@@ -61,71 +61,88 @@ pub fn parse_parquet_write_args(args: &[Value]) -> Result<ParquetWriteArgs, Magn
         ],
     )?;
 
-    let schema_array = RArray::from_value(kwargs.required.0).ok_or_else(|| {
-        MagnusError::new(
-            magnus::exception::type_error(),
-            "schema must be an array of hashes",
-        )
-    })?;
-
-    let mut schema = Vec::with_capacity(schema_array.len());
-
-    for (idx, field_hash) in schema_array.into_iter().enumerate() {
-        if !field_hash.is_kind_of(ruby.class_hash()) {
-            return Err(MagnusError::new(
+    let schema = if kwargs.required.0.is_none() || kwargs.required.0.unwrap().is_empty() {
+        // If schema is nil, we need to peek at the first value to determine column count
+        let first_value = read_from.funcall::<_, _, Value>("peek", ())?;
+        let array = RArray::from_value(first_value).ok_or_else(|| {
+            MagnusError::new(
                 magnus::exception::type_error(),
-                format!("schema[{}] must be a hash", idx),
-            ));
-        }
+                "First value must be an array when schema is not provided",
+            )
+        })?;
 
-        let entries: Vec<(Value, Value)> = field_hash.funcall("to_a", ())?;
-        if entries.len() != 1 {
-            return Err(MagnusError::new(
-                magnus::exception::type_error(),
-                format!("schema[{}] must contain exactly one key-value pair", idx),
-            ));
-        }
+        // Generate field names f0, f1, f2, etc.
+        (0..array.len())
+            .map(|i| SchemaField {
+                name: format!("f{}", i),
+                type_: ParquetSchemaType::String,
+                format: None,
+            })
+            .collect()
+    } else {
+        let schema_array = kwargs.required.0.unwrap();
 
-        let (name, type_value) = &entries[0];
-        let name = String::try_convert(name.clone())?;
+        let mut schema = Vec::with_capacity(schema_array.len());
 
-        let (type_, format) = if type_value.is_kind_of(ruby.class_hash()) {
-            let type_hash: Vec<(Value, Value)> = type_value.funcall("to_a", ())?;
-            let mut type_str = None;
-            let mut format_str = None;
-
-            for (key, value) in type_hash {
-                let key = String::try_convert(key)?;
-                match key.as_str() {
-                    "type" => type_str = Some(value),
-                    "format" => format_str = Some(String::try_convert(value)?),
-                    _ => {
-                        return Err(MagnusError::new(
-                            magnus::exception::type_error(),
-                            format!("Unknown key '{}' in type definition", key),
-                        ))
-                    }
-                }
+        for (idx, field_hash) in schema_array.into_iter().enumerate() {
+            if !field_hash.is_kind_of(ruby.class_hash()) {
+                return Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("schema[{}] must be a hash", idx),
+                ));
             }
 
-            let type_str = type_str.ok_or_else(|| {
-                MagnusError::new(
+            let entries: Vec<(Value, Value)> = field_hash.funcall("to_a", ())?;
+            if entries.len() != 1 {
+                return Err(MagnusError::new(
                     magnus::exception::type_error(),
-                    "Missing 'type' in type definition",
-                )
-            })?;
+                    format!("schema[{}] must contain exactly one key-value pair", idx),
+                ));
+            }
 
-            (ParquetSchemaType::try_convert(type_str)?, format_str)
-        } else {
-            (ParquetSchemaType::try_convert(type_value.clone())?, None)
-        };
+            let (name, type_value) = &entries[0];
+            let name = String::try_convert(name.clone())?;
 
-        schema.push(SchemaField {
-            name,
-            type_,
-            format,
-        });
-    }
+            let (type_, format) = if type_value.is_kind_of(ruby.class_hash()) {
+                let type_hash: Vec<(Value, Value)> = type_value.funcall("to_a", ())?;
+                let mut type_str = None;
+                let mut format_str = None;
+
+                for (key, value) in type_hash {
+                    let key = String::try_convert(key)?;
+                    match key.as_str() {
+                        "type" => type_str = Some(value),
+                        "format" => format_str = Some(String::try_convert(value)?),
+                        _ => {
+                            return Err(MagnusError::new(
+                                magnus::exception::type_error(),
+                                format!("Unknown key '{}' in type definition", key),
+                            ))
+                        }
+                    }
+                }
+
+                let type_str = type_str.ok_or_else(|| {
+                    MagnusError::new(
+                        magnus::exception::type_error(),
+                        "Missing 'type' in type definition",
+                    )
+                })?;
+
+                (ParquetSchemaType::try_convert(type_str)?, format_str)
+            } else {
+                (ParquetSchemaType::try_convert(type_value.clone())?, None)
+            };
+
+            schema.push(SchemaField {
+                name,
+                type_,
+                format,
+            });
+        }
+
+        schema
+    };
 
     Ok(ParquetWriteArgs {
         read_from,
@@ -394,6 +411,14 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
                 Ok(batch) => {
                     let batch_array = RArray::from_value(batch).ok_or_else(|| {
                         MagnusError::new(ruby.exception_type_error(), "Batch must be an array")
+                    })?;
+
+                    // Batch array must be an array of arrays. Check that the first value in `batch_array` is an array.
+                    batch_array.entry::<RArray>(0).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "When writing columns, data must be formatted as batches of columns: [[batch1_col1, batch1_col2], [batch2_col1, batch2_col2]].",
+                        )
                     })?;
 
                     // Validate batch length matches schema
