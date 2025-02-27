@@ -194,4 +194,108 @@ The following data types are supported in the schema:
 - `date32`
 - `timestamp_millis`, `timestamp_micros`
 
-Note: Writing of List and Map types is not currently supported.
+### Schema DSL for Complex Data Types
+
+In addition to the hash-based schema definition shown above, this library provides a more expressive DSL for defining complex schemas with nested structures:
+
+```ruby
+require "parquet"
+
+# Define a complex schema using the Schema DSL
+schema = Parquet::Schema.define do
+  field :id, :int64, nullable: false  # Required field
+  field :name, :string                # Optional field (nullable: true is default)
+
+  # Nested struct
+  field :address, :struct do
+    field :street, :string
+    field :city, :string
+    field :zip, :string
+    field :coordinates, :struct do
+      field :latitude, :double
+      field :longitude, :double
+    end
+  end
+
+  # List of primitives
+  field :scores, :list, item: :float
+
+  # List of structs
+  field :contacts, :list, item: :struct do
+    field :name, :string
+    field :phone, :string
+    field :primary, :boolean
+  end
+
+  # Map with string values
+  field :metadata, :map, key: :string, value: :string
+
+  # Map with struct values
+  field :properties, :map, key: :string, value: :struct do
+    field :count, :int32
+    field :description, :string
+  end
+
+  # Nested lists
+  field :nested_lists, :list, item: :list do
+    field :item, :string  # For nested lists, inner item must be named 'item'
+  end
+
+  # Map of lists
+  field :map_of_lists, :map, key: :string, value: :list do
+    field :item, :int32  # For list items in maps, item must be named 'item'
+  end
+end
+
+# Sample data with nested structures
+data = [
+  [
+    1,                            # id
+    "John Doe",                   # name
+    {                             # address (struct)
+      "street" => "123 Main St",
+      "city" => "Springfield",
+      "zip" => "12345",
+      "coordinates" => {
+        "latitude" => 37.7749,
+        "longitude" => -122.4194
+      }
+    },
+    [85.5, 92.0, 78.5],          # scores (list of floats)
+    [                             # contacts (list of structs)
+      { "name" => "Contact 1", "phone" => "555-1234", "primary" => true },
+      { "name" => "Contact 2", "phone" => "555-5678", "primary" => false }
+    ],
+    { "created" => "2023-01-01", "status" => "active" },  # metadata (map)
+    {                             # properties (map of structs)
+      "feature1" => { "count" => 5, "description" => "Main feature" },
+      "feature2" => { "count" => 3, "description" => "Secondary feature" }
+    },
+    [["a", "b"], ["c", "d", "e"]],  # nested_lists
+    {                                # map_of_lists
+      "group1" => [1, 2, 3],
+      "group2" => [4, 5, 6]
+    }
+  ]
+]
+
+# Write to a parquet file using the schema
+Parquet.write_rows(data.each, schema: schema, write_to: "complex_data.parquet")
+
+# Read back the data
+Parquet.each_row("complex_data.parquet") do |row|
+  puts row.inspect
+end
+```
+
+The Schema DSL supports:
+
+- **Primitive types**: All standard Parquet types (`int32`, `string`, etc.)
+- **Complex types**: Structs, lists, and maps with arbitrary nesting
+- **Nullability control**: Specify which fields can contain null values with `nullable: false/true`
+- **List item nullability**: Control whether list items can be null with `item_nullable: false/true`
+- **Map key/value nullability**: Control whether map keys or values can be null with `key_nullable: false/true` and `value_nullable: false/true`
+
+Note: When using List and Map types, you need to provide at least:
+- For lists: The `item:` parameter specifying the item type
+- For maps: Both `key:` and `value:` parameters specifying key and value types
