@@ -43,16 +43,24 @@ impl std::fmt::Display for ParserResultType {
 pub struct ListField<'a> {
     pub item_type: ParquetSchemaType<'a>,
     pub format: Option<&'a str>,
+    pub nullable: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct MapField<'a> {
     pub key_type: ParquetSchemaType<'a>,
     pub value_type: ParquetSchemaType<'a>,
-    pub format: Option<&'a str>,
+    pub key_format: Option<&'a str>,
+    pub value_format: Option<&'a str>,
+    pub value_nullable: bool,
 }
 
 #[derive(Debug, Clone)]
+pub struct StructField<'a> {
+    pub fields: Vec<super::writer_types::SchemaField<'a>>,
+}
+
+#[derive(Clone, Debug)]
 pub enum ParquetSchemaType<'a> {
     Int8,
     Int16,
@@ -72,4 +80,52 @@ pub enum ParquetSchemaType<'a> {
     TimestampMicros,
     List(Box<ListField<'a>>),
     Map(Box<MapField<'a>>),
+    Struct(Box<StructField<'a>>),
+}
+
+// New schema representation for the DSL-based approach
+#[derive(Debug, Clone)]
+pub enum SchemaNode {
+    Struct {
+        name: String,
+        nullable: bool,
+        fields: Vec<SchemaNode>,
+    },
+    List {
+        name: String,
+        nullable: bool,
+        item: Box<SchemaNode>,
+    },
+    Map {
+        name: String,
+        nullable: bool,
+        key: Box<SchemaNode>,
+        value: Box<SchemaNode>,
+    },
+    Primitive {
+        name: String,
+        parquet_type: PrimitiveType,
+        nullable: bool,
+        format: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum PrimitiveType {
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64,
+    Boolean,
+    String,
+    Binary,
+    Date32,
+    TimestampMillis,
+    TimestampMicros,
 }

@@ -2,13 +2,20 @@
 mod core_types;
 mod parquet_value;
 mod record_types;
+pub mod schema_converter;
+pub mod schema_node;
 mod timestamp;
-mod type_conversion;
+pub mod type_conversion;
 mod writer_types;
 
 pub use core_types::*;
 pub use parquet_value::*;
 pub use record_types::*;
+// Explicitly export schema-related items
+pub use schema_converter::{
+    infer_schema_from_first_row, legacy_schema_to_dsl, parse_legacy_schema,
+};
+pub use schema_node::parse_schema_node;
 pub use timestamp::*;
 pub use type_conversion::*;
 pub use writer_types::*;

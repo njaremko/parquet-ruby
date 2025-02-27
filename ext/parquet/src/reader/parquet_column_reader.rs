@@ -1,24 +1,32 @@
 use crate::header_cache::StringCache;
-use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
+use crate::logger::RubyLogger;
 use crate::types::{ArrayWrapper, TryIntoValue};
 use crate::{
     create_column_enumerator, utils::*, ColumnEnumeratorArgs, ColumnRecord, ParquetValueVec,
     ParserResultType,
 };
 use ahash::RandomState;
-use magnus::value::ReprValue;
+use either::Either;
 use magnus::IntoValue;
 use magnus::{Error as MagnusError, Ruby, Value};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ProjectionMask;
 use std::collections::HashMap;
-use std::fs::File;
 use std::sync::OnceLock;
 
+use super::common::{
+    create_batch_reader, handle_block_or_enum, handle_empty_file, open_parquet_source,
+};
 use super::ReaderError;
 
 #[inline]
 pub fn parse_parquet_columns<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
+    Ok(parse_parquet_columns_impl(rb_self, args).map_err(|e| {
+        let z: MagnusError = e.into();
+        z
+    })?)
+}
+
+#[inline]
+fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, ReaderError> {
     let ruby = unsafe { Ruby::get_unchecked() };
 
     let ParquetColumnsArgs {
@@ -27,93 +35,45 @@ pub fn parse_parquet_columns<'a>(rb_self: Value, args: &[Value]) -> Result<Value
         columns,
         batch_size,
         strict,
+        logger,
     } = parse_parquet_columns_args(&ruby, args)?;
 
-    if !ruby.block_given() {
-        return create_column_enumerator(ColumnEnumeratorArgs {
+    // Initialize the logger if provided
+    let ruby_logger = RubyLogger::new(&ruby, logger)?;
+    if let Some(ref bs) = batch_size {
+        ruby_logger.debug(|| format!("Using batch size: {}", bs))?;
+    }
+
+    // Clone values for the closure to avoid move issues
+    let columns_clone = columns.clone();
+
+    // Handle block or create enumerator
+    if let Some(enum_value) = handle_block_or_enum(&ruby, ruby.block_given(), || {
+        create_column_enumerator(ColumnEnumeratorArgs {
             rb_self,
             to_read,
             result_type,
-            columns,
+            columns: columns_clone,
             batch_size,
             strict,
+            logger: logger.as_ref().map(|_| to_read),
         })
-        .map(|yield_enum| yield_enum.into_value_with(&ruby));
+        .map(|yield_enum| yield_enum.into_value_with(&ruby))
+    })? {
+        return Ok(enum_value);
     }
 
-    let (batch_reader, schema, num_rows) = if to_read.is_kind_of(ruby.class_string()) {
-        let path_string = to_read.to_r_string()?;
-        let file_path = unsafe { path_string.as_str()? };
-        let file = File::open(file_path).map_err(|e| ReaderError::FileOpen(e))?;
+    let source = open_parquet_source(to_read)?;
 
-        let mut builder =
-            ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| ReaderError::Parquet(e))?;
-        let schema = builder.schema().clone();
-        let num_rows = builder.metadata().file_metadata().num_rows();
+    // Use the common function to create the batch reader
 
-        // If columns are specified, project only those columns
-        if let Some(cols) = &columns {
-            // Get the parquet schema
-            let parquet_schema = builder.parquet_schema();
-
-            // Create a projection mask from column names
-            let projection =
-                ProjectionMask::columns(parquet_schema, cols.iter().map(|s| s.as_str()));
-
-            builder = builder.with_projection(projection);
-        }
-
-        if let Some(batch_size) = batch_size {
-            builder = builder.with_batch_size(batch_size);
-        }
-
-        let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
-
-        (reader, schema, num_rows)
-    } else {
-        let readable = ThreadSafeRubyReader::new(RubyReader::try_from(to_read)?);
-
-        let mut builder =
-            ParquetRecordBatchReaderBuilder::try_new(readable).map_err(ReaderError::from)?;
-        let schema = builder.schema().clone();
-        let num_rows = builder.metadata().file_metadata().num_rows();
-
-        // If columns are specified, project only those columns
-        if let Some(cols) = &columns {
-            // Get the parquet schema
-            let parquet_schema = builder.parquet_schema();
-
-            // Create a projection mask from column names
-            let projection =
-                ProjectionMask::columns(parquet_schema, cols.iter().map(|s| s.as_str()));
-
-            builder = builder.with_projection(projection);
-        }
-
-        if let Some(batch_size) = batch_size {
-            builder = builder.with_batch_size(batch_size);
-        }
-
-        let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
-
-        (reader, schema, num_rows)
+    let (batch_reader, schema, num_rows) = match source {
+        Either::Left(file) => create_batch_reader(file, &columns, batch_size)?,
+        Either::Right(readable) => create_batch_reader(readable, &columns, batch_size)?,
     };
 
-    if num_rows == 0 {
-        let mut map =
-            HashMap::with_capacity_and_hasher(schema.fields().len(), RandomState::default());
-        let headers: Vec<String> = schema
-            .fields()
-            .iter()
-            .map(|field| field.name().to_string())
-            .collect();
-        let interned_headers =
-            StringCache::intern_many(&headers).map_err(|e| ReaderError::HeaderIntern(e))?;
-        for field in interned_headers.iter() {
-            map.insert(*field, vec![]);
-        }
-        let record = ColumnRecord::Map(map);
-        let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+    // Handle empty file case
+    if handle_empty_file(&ruby, &schema, num_rows)? {
         return Ok(ruby.qnil().into_value_with(&ruby));
     }
 

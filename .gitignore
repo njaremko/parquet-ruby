@@ -10,3 +10,8 @@ pkg/
 profile.json
 **/*.parquet
 !test/*.parquet
+
+*.py
+*.txt
+.cursorrules
+CLAUDE.md

@@ -7,6 +7,7 @@ pub struct RowEnumeratorArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub strict: bool,
+    pub logger: Option<Value>,
 }
 
 /// Creates an enumerator for lazy Parquet row parsing
@@ -22,6 +23,9 @@ pub fn create_row_enumerator(args: RowEnumeratorArgs) -> Result<magnus::Enumerat
     if args.strict {
         kwargs.aset(Symbol::new("strict"), true)?;
     }
+    if let Some(logger) = args.logger {
+        kwargs.aset(Symbol::new("logger"), logger)?;
+    }
     Ok(args
         .rb_self
         .enumeratorize("each_row", (args.to_read, KwArgs(kwargs))))
@@ -34,6 +38,7 @@ pub struct ColumnEnumeratorArgs {
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
     pub strict: bool,
+    pub logger: Option<Value>,
 }
 
 #[inline]
@@ -53,6 +58,9 @@ pub fn create_column_enumerator(
     }
     if args.strict {
         kwargs.aset(Symbol::new("strict"), true)?;
+    }
+    if let Some(logger) = args.logger {
+        kwargs.aset(Symbol::new("logger"), logger)?;
     }
     Ok(args
         .rb_self

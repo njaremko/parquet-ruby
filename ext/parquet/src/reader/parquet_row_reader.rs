@@ -1,23 +1,32 @@
 use crate::header_cache::StringCache;
-use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
+use crate::logger::RubyLogger;
 use crate::types::TryIntoValue;
 use crate::{
     create_row_enumerator, utils::*, ParquetField, ParserResultType, ReaderError,
     RowEnumeratorArgs, RowRecord,
 };
 use ahash::RandomState;
-use magnus::value::ReprValue;
+use either::Either;
 use magnus::IntoValue;
 use magnus::{Error as MagnusError, Ruby, Value};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter as ParquetRowIter;
 use parquet::schema::types::{Type as SchemaType, TypePtr};
 use std::collections::HashMap;
-use std::fs::File;
 use std::sync::OnceLock;
+
+use super::common::{handle_block_or_enum, open_parquet_source};
 
 #[inline]
 pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
+    Ok(parse_parquet_rows_impl(rb_self, args).map_err(|e| {
+        let z: MagnusError = e.into();
+        z
+    })?)
+}
+
+#[inline]
+fn parse_parquet_rows_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, ReaderError> {
     let ruby = unsafe { Ruby::get_unchecked() };
 
     let ParquetRowsArgs {
@@ -25,31 +34,44 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
         result_type,
         columns,
         strict,
+        logger,
     } = parse_parquet_rows_args(&ruby, args)?;
 
-    if !ruby.block_given() {
-        return create_row_enumerator(RowEnumeratorArgs {
+    // Initialize the logger if provided
+    let ruby_logger = RubyLogger::new(&ruby, logger)?;
+
+    // Clone values for the closure to avoid move issues
+    let columns_clone = columns.clone();
+
+    // Handle block or create enumerator
+    if let Some(enum_value) = handle_block_or_enum(&ruby, ruby.block_given(), || {
+        create_row_enumerator(RowEnumeratorArgs {
             rb_self,
             to_read,
             result_type,
-            columns,
+            columns: columns_clone,
             strict,
+            logger,
         })
-        .map(|yield_enum| yield_enum.into_value_with(&ruby));
+        .map(|yield_enum| yield_enum.into_value_with(&ruby))
+    })? {
+        return Ok(enum_value);
     }
 
-    let reader: Box<dyn FileReader> = if to_read.is_kind_of(ruby.class_string()) {
-        let path_string = to_read.to_r_string()?;
-        let file_path = unsafe { path_string.as_str()? };
-        let file = File::open(file_path).map_err(ReaderError::from)?;
-        Box::new(SerializedFileReader::new(file).map_err(ReaderError::from)?)
-    } else {
-        let readable = ThreadSafeRubyReader::new(RubyReader::try_from(to_read)?);
-        Box::new(SerializedFileReader::new(readable).map_err(ReaderError::from)?)
+    let source = open_parquet_source(to_read)?;
+    let reader: Box<dyn FileReader> = match source {
+        Either::Left(file) => Box::new(SerializedFileReader::new(file).map_err(ReaderError::from)?),
+        Either::Right(readable) => {
+            Box::new(SerializedFileReader::new(readable).map_err(ReaderError::from)?)
+        }
     };
+
     let schema = reader.metadata().file_metadata().schema().clone();
+    ruby_logger.debug(|| format!("Schema loaded: {:?}", schema))?;
+
     let mut iter = ParquetRowIter::from_file_into(reader);
     if let Some(cols) = columns {
+        ruby_logger.debug(|| format!("Projecting columns: {:?}", cols))?;
         let projection = create_projection_schema(&schema, &cols);
         iter = iter.project(Some(projection.to_owned())).map_err(|e| {
             MagnusError::new(
@@ -81,9 +103,9 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
 
                     let mut map =
                         HashMap::with_capacity_and_hasher(headers.len(), RandomState::default());
-                    row.get_column_iter().enumerate().for_each(|(i, (_, v))| {
+                    for (i, (_, v)) in row.get_column_iter().enumerate() {
                         map.insert(headers[i], ParquetField(v.clone(), strict));
-                    });
+                    }
                     Ok(map)
                 })
                 .and_then(|row| Ok(RowRecord::Map::<RandomState>(row)))
@@ -100,8 +122,9 @@ pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, M
                 row.and_then(|row| {
                     let column_count = row.get_column_iter().count();
                     let mut vec = Vec::with_capacity(column_count);
-                    row.get_column_iter()
-                        .for_each(|(_, v)| vec.push(ParquetField(v.clone(), strict)));
+                    for (_, v) in row.get_column_iter() {
+                        vec.push(ParquetField(v.clone(), strict));
+                    }
                     Ok(vec)
                 })
                 .and_then(|row| Ok(RowRecord::Vec::<RandomState>(row)))
