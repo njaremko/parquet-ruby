@@ -62,22 +62,7 @@ pub struct StructField<'a> {
 
 #[derive(Clone, Debug)]
 pub enum ParquetSchemaType<'a> {
-    Int8,
-    Int16,
-    Int32,
-    Int64,
-    UInt8,
-    UInt16,
-    UInt32,
-    UInt64,
-    Float,
-    Double,
-    String,
-    Binary,
-    Boolean,
-    Date32,
-    TimestampMillis,
-    TimestampMicros,
+    Primitive(PrimitiveType),
     List(Box<ListField<'a>>),
     Map(Box<MapField<'a>>),
     Struct(Box<StructField<'a>>),
@@ -110,7 +95,7 @@ pub enum SchemaNode {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PrimitiveType {
     Int8,
     Int16,

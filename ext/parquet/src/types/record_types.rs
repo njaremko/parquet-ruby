@@ -1,7 +1,5 @@
 use itertools::Itertools;
 
-use crate::reader::ReaderError;
-
 use super::*;
 
 #[derive(Debug)]
@@ -20,13 +18,13 @@ pub enum ColumnRecord<S: BuildHasher + Default> {
 pub struct ParquetField(pub Field, pub bool);
 
 impl<S: BuildHasher + Default> TryIntoValue for RowRecord<S> {
-    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ReaderError> {
+    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
         match self {
             RowRecord::Vec(vec) => {
                 let ary = handle.ary_new_capa(vec.len());
                 vec.into_iter().try_for_each(|v| {
                     ary.push(v.try_into_value_with(handle)?)?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(handle.into_value(ary))
             }
@@ -64,7 +62,7 @@ impl<S: BuildHasher + Default> TryIntoValue for RowRecord<S> {
 }
 
 impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
-    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ReaderError> {
+    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
         match self {
             ColumnRecord::Vec(vec) => {
                 let ary = handle.ary_new_capa(vec.len());
@@ -72,10 +70,10 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
                     let nested_ary = handle.ary_new_capa(v.len());
                     v.into_iter().try_for_each(|v| {
                         nested_ary.push(v.try_into_value_with(handle)?)?;
-                        Ok::<_, ReaderError>(())
+                        Ok::<_, ParquetGemError>(())
                     })?;
                     ary.push(nested_ary.into_value_with(handle))?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(ary.into_value_with(handle))
             }
@@ -98,7 +96,7 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
                         let ary = handle.ary_new_capa(v.len());
                         v.into_iter().try_for_each(|v| {
                             ary.push(v.try_into_value_with(handle)?)?;
-                            Ok::<_, ReaderError>(())
+                            Ok::<_, ParquetGemError>(())
                         })?;
                         values[i + 1] = handle.into_value(ary);
                         i += 2;
@@ -118,11 +116,11 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
 }
 
 pub trait TryIntoValue {
-    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ReaderError>;
+    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError>;
 }
 
 impl TryIntoValue for ParquetField {
-    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ReaderError> {
+    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
         match self.0 {
             Field::Null => Ok(handle.qnil().as_value()),
             Field::Bool(b) => Ok(b.into_value_with(handle)),
@@ -139,7 +137,7 @@ impl TryIntoValue for ParquetField {
             Field::Str(s) => {
                 if self.1 {
                     Ok(simdutf8::basic::from_utf8(s.as_bytes())
-                        .map_err(|e| ReaderError::Utf8Error(e))
+                        .map_err(|e| ParquetGemError::Utf8Error(e))
                         .and_then(|s| Ok(s.into_value_with(handle)))?)
                 } else {
                     let s = String::from_utf8_lossy(s.as_bytes());
@@ -172,7 +170,7 @@ impl TryIntoValue for ParquetField {
                 let ary = handle.ary_new_capa(elements.len());
                 elements.iter().try_for_each(|e| {
                     ary.push(ParquetField(e.clone(), self.1).try_into_value_with(handle)?)?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(ary.into_value_with(handle))
             }
@@ -184,7 +182,7 @@ impl TryIntoValue for ParquetField {
                         ParquetField(k.clone(), self.1).try_into_value_with(handle)?,
                         ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
                     )?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }
@@ -213,7 +211,7 @@ impl TryIntoValue for ParquetField {
                         k.clone().into_value_with(handle),
                         ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
                     )?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }

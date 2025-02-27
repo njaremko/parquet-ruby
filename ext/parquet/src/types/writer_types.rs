@@ -1,10 +1,10 @@
-use super::core_types::SchemaNode;
+use super::{core_types::SchemaNode, ParquetGemError, PrimitiveType};
 use crate::{
-    reader::ReaderError,
     types::{ListField, MapField, ParquetSchemaType},
+    utils::parse_string_or_symbol,
 };
 use arrow_array::{Array, RecordBatch};
-use magnus::{value::ReprValue, Error as MagnusError, RString, Ruby, Symbol, TryConvert, Value};
+use magnus::{value::ReprValue, Error as MagnusError, RString, Ruby, TryConvert, Value};
 use parquet::{arrow::ArrowWriter, errors::ParquetError};
 use std::{
     io::{self, Write},
@@ -100,33 +100,26 @@ impl<'a> FromStr for ParquetSchemaType<'a> {
 
         // Handle primitive types
         match s {
-            "int8" => Ok(ParquetSchemaType::Int8),
-            "int16" => Ok(ParquetSchemaType::Int16),
-            "int32" => Ok(ParquetSchemaType::Int32),
-            "int64" => Ok(ParquetSchemaType::Int64),
-            "uint8" => Ok(ParquetSchemaType::UInt8),
-            "uint16" => Ok(ParquetSchemaType::UInt16),
-            "uint32" => Ok(ParquetSchemaType::UInt32),
-            "uint64" => Ok(ParquetSchemaType::UInt64),
-            "float" | "float32" => Ok(ParquetSchemaType::Float),
-            "double" | "float64" => Ok(ParquetSchemaType::Double),
-            "string" | "utf8" => Ok(ParquetSchemaType::String),
-            "binary" => Ok(ParquetSchemaType::Binary),
-            "boolean" | "bool" => Ok(ParquetSchemaType::Boolean),
-            "date32" => Ok(ParquetSchemaType::Date32),
-            "timestamp_millis" => Ok(ParquetSchemaType::TimestampMillis),
-            "timestamp_micros" => Ok(ParquetSchemaType::TimestampMicros),
+            "int8" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int8)),
+            "int16" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int16)),
+            "int32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int32)),
+            "int64" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int64)),
+            "uint8" => Ok(ParquetSchemaType::Primitive(PrimitiveType::UInt8)),
+            "uint16" => Ok(ParquetSchemaType::Primitive(PrimitiveType::UInt16)),
+            "uint32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::UInt32)),
+            "uint64" => Ok(ParquetSchemaType::Primitive(PrimitiveType::UInt64)),
+            "float" | "float32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Float32)),
+            "double" | "float64" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Float64)),
+            "string" | "utf8" => Ok(ParquetSchemaType::Primitive(PrimitiveType::String)),
+            "binary" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Binary)),
+            "boolean" | "bool" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Boolean)),
+            "date32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Date32)),
+            "timestamp_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis)),
+            "timestamp_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros)),
             "list" => Ok(ParquetSchemaType::List(Box::new(ListField {
-                item_type: ParquetSchemaType::String,
+                item_type: ParquetSchemaType::Primitive(PrimitiveType::String),
                 format: None,
                 nullable: true,
-            }))),
-            "map" => Ok(ParquetSchemaType::Map(Box::new(MapField {
-                key_type: ParquetSchemaType::String,
-                value_type: ParquetSchemaType::String,
-                key_format: None,
-                value_format: None,
-                value_nullable: true,
             }))),
             _ => Err(MagnusError::new(
                 magnus::exception::runtime_error(),
@@ -152,31 +145,6 @@ impl<'a> TryConvert for ParquetSchemaType<'a> {
 // We know this type is safe to move between threads because it's just an enum
 // with simple primitive types and strings
 unsafe impl<'a> Send for ParquetSchemaType<'a> {}
-
-fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, MagnusError> {
-    if value.is_nil() {
-        Ok(None)
-    } else if value.is_kind_of(ruby.class_string()) {
-        RString::from_value(value)
-            .ok_or_else(|| {
-                MagnusError::new(magnus::exception::type_error(), "Invalid string value")
-            })?
-            .to_string()
-            .map(|s| Some(s))
-    } else if value.is_kind_of(ruby.class_symbol()) {
-        Symbol::from_value(value)
-            .ok_or_else(|| {
-                MagnusError::new(magnus::exception::type_error(), "Invalid symbol value")
-            })?
-            .funcall("to_s", ())
-            .map(|s| Some(s))
-    } else {
-        Err(MagnusError::new(
-            magnus::exception::type_error(),
-            "Value must be a String or Symbol",
-        ))
-    }
-}
 
 pub enum WriterOutput {
     File(ArrowWriter<Box<dyn SendableWrite>>),
@@ -205,6 +173,7 @@ impl WriterOutput {
 }
 
 pub struct ColumnCollector<'a> {
+    pub ruby: &'a Ruby,
     pub name: String,
     pub type_: ParquetSchemaType<'a>,
     pub format: Option<String>,
@@ -214,12 +183,14 @@ pub struct ColumnCollector<'a> {
 
 impl<'a> ColumnCollector<'a> {
     pub fn new(
+        ruby: &'a Ruby,
         name: String,
         type_: ParquetSchemaType<'a>,
         format: Option<String>,
         nullable: bool,
     ) -> Self {
         Self {
+            ruby,
             name,
             type_,
             format,
@@ -242,12 +213,13 @@ impl<'a> ColumnCollector<'a> {
         }
 
         // For all other types, proceed as normal
-        let parquet_value = ParquetValue::from_value(value, &self.type_, self.format.as_deref())?;
+        let parquet_value =
+            ParquetValue::from_value(self.ruby, value, &self.type_, self.format.as_deref())?;
         self.values.push(parquet_value);
         Ok(())
     }
 
-    pub fn take_array(&mut self) -> Result<Arc<dyn Array>, ReaderError> {
+    pub fn take_array(&mut self) -> Result<Arc<dyn Array>, ParquetGemError> {
         let values = std::mem::take(&mut self.values);
         crate::convert_parquet_values_to_arrow(values, &self.type_)
     }

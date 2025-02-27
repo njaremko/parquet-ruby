@@ -1,7 +1,4 @@
-use crate::{
-    impl_date_conversion, impl_timestamp_array_conversion, impl_timestamp_conversion,
-    reader::{MagnusErrorWrapper, ReaderError},
-};
+use crate::{impl_date_conversion, impl_timestamp_array_conversion, impl_timestamp_conversion};
 
 use super::*;
 use arrow_array::MapArray;
@@ -115,7 +112,7 @@ impl std::hash::Hash for ParquetValue {
 }
 
 impl TryIntoValue for ParquetValue {
-    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ReaderError> {
+    fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
         match self {
             ParquetValue::Int8(i) => Ok(i.into_value_with(handle)),
             ParquetValue::Int16(i) => Ok(i.into_value_with(handle)),
@@ -153,7 +150,7 @@ impl TryIntoValue for ParquetValue {
                 let ary = handle.ary_new_capa(l.len());
                 l.into_iter().try_for_each(|v| {
                     ary.push(v.try_into_value_with(handle)?)?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
 
                 // The complex_types test expects double_list to be nil when empty,
@@ -169,7 +166,7 @@ impl TryIntoValue for ParquetValue {
                         k.try_into_value_with(handle)?,
                         v.try_into_value_with(handle)?,
                     )?;
-                    Ok::<_, ReaderError>(())
+                    Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }
@@ -180,6 +177,7 @@ impl TryIntoValue for ParquetValue {
 
 impl ParquetValue {
     pub fn from_value(
+        ruby: &Ruby,
         value: Value,
         type_: &ParquetSchemaType,
         format: Option<&str>,
@@ -189,70 +187,72 @@ impl ParquetValue {
         }
 
         match type_ {
-            ParquetSchemaType::Int8 => {
-                let v = NumericConverter::<i8>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Int8(v))
-            }
-            ParquetSchemaType::Int16 => {
-                let v = NumericConverter::<i16>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Int16(v))
-            }
-            ParquetSchemaType::Int32 => {
-                let v = NumericConverter::<i32>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Int32(v))
-            }
-            ParquetSchemaType::Int64 => {
-                let v = NumericConverter::<i64>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Int64(v))
-            }
-            ParquetSchemaType::UInt8 => {
-                let v = NumericConverter::<u8>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::UInt8(v))
-            }
-            ParquetSchemaType::UInt16 => {
-                let v = NumericConverter::<u16>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::UInt16(v))
-            }
-            ParquetSchemaType::UInt32 => {
-                let v = NumericConverter::<u32>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::UInt32(v))
-            }
-            ParquetSchemaType::UInt64 => {
-                let v = NumericConverter::<u64>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::UInt64(v))
-            }
-            ParquetSchemaType::Float => {
-                let v = NumericConverter::<f32>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Float32(v))
-            }
-            ParquetSchemaType::Double => {
-                let v = NumericConverter::<f64>::convert_with_string_fallback(value)?;
-                Ok(ParquetValue::Float64(v))
-            }
-            ParquetSchemaType::String => {
-                let v = convert_to_string(value)?;
-                Ok(ParquetValue::String(v))
-            }
-            ParquetSchemaType::Binary => {
-                let v = convert_to_binary(value)?;
-                Ok(ParquetValue::Bytes(v))
-            }
-            ParquetSchemaType::Boolean => {
-                let v = convert_to_boolean(value)?;
-                Ok(ParquetValue::Boolean(v))
-            }
-            ParquetSchemaType::Date32 => {
-                let v = convert_to_date32(value, format)?;
-                Ok(ParquetValue::Date32(v))
-            }
-            ParquetSchemaType::TimestampMillis => {
-                let v = convert_to_timestamp_millis(value, format)?;
-                Ok(ParquetValue::TimestampMillis(v, None))
-            }
-            ParquetSchemaType::TimestampMicros => {
-                let v = convert_to_timestamp_micros(value, format)?;
-                Ok(ParquetValue::TimestampMicros(v, None))
-            }
+            ParquetSchemaType::Primitive(primative) => match primative {
+                PrimitiveType::Int8 => {
+                    let v = NumericConverter::<i8>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Int8(v))
+                }
+                PrimitiveType::Int16 => {
+                    let v = NumericConverter::<i16>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Int16(v))
+                }
+                PrimitiveType::Int32 => {
+                    let v = NumericConverter::<i32>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Int32(v))
+                }
+                PrimitiveType::Int64 => {
+                    let v = NumericConverter::<i64>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Int64(v))
+                }
+                PrimitiveType::UInt8 => {
+                    let v = NumericConverter::<u8>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::UInt8(v))
+                }
+                PrimitiveType::UInt16 => {
+                    let v = NumericConverter::<u16>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::UInt16(v))
+                }
+                PrimitiveType::UInt32 => {
+                    let v = NumericConverter::<u32>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::UInt32(v))
+                }
+                PrimitiveType::UInt64 => {
+                    let v = NumericConverter::<u64>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::UInt64(v))
+                }
+                PrimitiveType::Float32 => {
+                    let v = NumericConverter::<f32>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Float32(v))
+                }
+                PrimitiveType::Float64 => {
+                    let v = NumericConverter::<f64>::convert_with_string_fallback(ruby, value)?;
+                    Ok(ParquetValue::Float64(v))
+                }
+                PrimitiveType::String => {
+                    let v = convert_to_string(value)?;
+                    Ok(ParquetValue::String(v))
+                }
+                PrimitiveType::Binary => {
+                    let v = convert_to_binary(value)?;
+                    Ok(ParquetValue::Bytes(v))
+                }
+                PrimitiveType::Boolean => {
+                    let v = convert_to_boolean(ruby, value)?;
+                    Ok(ParquetValue::Boolean(v))
+                }
+                PrimitiveType::Date32 => {
+                    let v = convert_to_date32(ruby, value, format)?;
+                    Ok(ParquetValue::Date32(v))
+                }
+                PrimitiveType::TimestampMillis => {
+                    let v = convert_to_timestamp_millis(ruby, value, format)?;
+                    Ok(ParquetValue::TimestampMillis(v, None))
+                }
+                PrimitiveType::TimestampMicros => {
+                    let v = convert_to_timestamp_micros(ruby, value, format)?;
+                    Ok(ParquetValue::TimestampMicros(v, None))
+                }
+            },
             ParquetSchemaType::List(list_field) => {
                 // We expect the Ruby object to be an Array, each item converting
                 // to the item_type. We gather them into ParquetValue::List(...)
@@ -271,6 +271,7 @@ impl ParquetValue {
                 let mut items = Vec::with_capacity(array.len());
                 for (index, item_val) in array.into_iter().enumerate() {
                     match ParquetValue::from_value(
+                        ruby,
                         item_val,
                         &list_field.item_type,
                         list_field.format,
@@ -292,10 +293,18 @@ impl ParquetValue {
                 let hash_pairs: Vec<(Value, Value)> = value.funcall("to_a", ())?;
                 let mut result = HashMap::with_capacity(hash_pairs.len());
                 for (k, v) in hash_pairs {
-                    let key_val =
-                        ParquetValue::from_value(k, &map_field.key_type, map_field.key_format)?;
-                    let val_val =
-                        ParquetValue::from_value(v, &map_field.value_type, map_field.value_format)?;
+                    let key_val = ParquetValue::from_value(
+                        ruby,
+                        k,
+                        &map_field.key_type,
+                        map_field.key_format,
+                    )?;
+                    let val_val = ParquetValue::from_value(
+                        ruby,
+                        v,
+                        &map_field.value_type,
+                        map_field.value_format,
+                    )?;
                     result.insert(key_val, val_val);
                 }
                 Ok(ParquetValue::Map(result))
@@ -316,9 +325,7 @@ impl ParquetValue {
                 // For each field in the struct definition, try to find a matching key in the hash
                 for field in &struct_field.fields {
                     let field_name = ParquetValue::String(field.name.clone());
-                    let ruby_field_name = unsafe { Ruby::get_unchecked() }
-                        .str_new(&field.name)
-                        .as_value();
+                    let ruby_field_name = ruby.str_new(&field.name).as_value();
 
                     // Try to get the field value using Ruby's [] method
                     let field_value_obj =
@@ -328,6 +335,7 @@ impl ParquetValue {
                         ParquetValue::Null // Field not provided or nil, treat as null
                     } else {
                         ParquetValue::from_value(
+                            ruby,
                             field_value_obj,
                             &field.type_,
                             field.format.as_deref(),
@@ -427,7 +435,7 @@ pub struct ArrayWrapper<'a> {
 }
 
 impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
-    type Error = ReaderError;
+    type Error = ParquetGemError;
 
     fn try_from(column: ArrayWrapper<'a>) -> Result<Self, Self::Error> {
         match column.array.data_type() {
@@ -515,11 +523,11 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
                 let iter = array.iter().map(|opt_x| match opt_x {
                     Some(x) => {
                         if column.strict {
-                            Ok::<_, ReaderError>(ParquetValue::String(
+                            Ok::<_, ParquetGemError>(ParquetValue::String(
                                 simdutf8::basic::from_utf8(x.as_bytes())?.to_string(),
                             ))
                         } else {
-                            Ok::<_, ReaderError>(ParquetValue::String(x.to_string()))
+                            Ok::<_, ParquetGemError>(ParquetValue::String(x.to_string()))
                         }
                     }
                     None => Ok(ParquetValue::Null),
@@ -551,10 +559,10 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
                             strict: column.strict,
                         }) {
                             Ok(vec) => Ok(ParquetValue::List(vec.into_inner())),
-                            Err(e) => Err(ReaderError::Ruby(MagnusErrorWrapper(MagnusError::new(
+                            Err(e) => Err(MagnusError::new(
                                 magnus::exception::type_error(),
                                 format!("Error converting list array to ParquetValueVec: {}", e),
-                            )))),
+                            ))?,
                         },
                         None => Ok(ParquetValue::Null),
                     })
@@ -579,24 +587,22 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
                         }) {
                             Ok(vec) => vec.into_inner(),
                             Err(e) => {
-                                return Err(ReaderError::Ruby(MagnusErrorWrapper(
-                                    MagnusError::new(
-                                        magnus::exception::type_error(),
-                                        format!(
-                                            "Error converting struct field to ParquetValueVec: {}",
-                                            e
-                                        ),
+                                return Err(MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!(
+                                        "Error converting struct field to ParquetValueVec: {}",
+                                        e
                                     ),
-                                )));
+                                ))?;
                             }
                         };
                         map.insert(
                             ParquetValue::String(field.name().to_string()),
                             field_values.into_iter().next().ok_or_else(|| {
-                                ReaderError::Ruby(MagnusErrorWrapper(MagnusError::new(
+                                MagnusError::new(
                                     magnus::exception::type_error(),
                                     "Expected a single value for struct field".to_string(),
-                                )))
+                                )
                             })?,
                         );
                     }
@@ -667,10 +673,10 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
                 Ok(ParquetValueVec(vec![ParquetValue::Null; x.len()]))
             }
             _ => {
-                return Err(ReaderError::Ruby(MagnusErrorWrapper(MagnusError::new(
+                return Err(MagnusError::new(
                     magnus::exception::type_error(),
                     format!("Unsupported data type: {:?}", column.array.data_type()),
-                ))));
+                ))?;
             }
         }
     }

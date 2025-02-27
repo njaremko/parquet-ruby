@@ -1345,4 +1345,142 @@ class BasicTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_write_columns_mismatched_lengths
+    schema = [{ "id" => "int64" }, { "name" => "string" }]
+
+    # First "batch" has 3 values for "id" but only 2 for "name"
+    batches = [
+      [
+        [1, 2, 3],
+        %w[Alice Bob] # Mismatch: only 2 entries here
+      ]
+    ]
+
+    begin
+      enumerator = batches.each
+      temp_path = "test_mismatched_columns.parquet"
+
+      error = assert_raises(RuntimeError) { Parquet.write_columns(enumerator, schema: schema, write_to: temp_path) }
+      assert_match(/Failed to create record batch|mismatched.*length/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_schema_dsl_empty_top_level_struct
+    # This attempts to define a completely empty struct, which the code disallows
+    schema = { type: :struct, fields: [] }
+    data = [[]].each # No columns at all
+
+    temp_path = "test_empty_top_level_struct.parquet"
+    begin
+      error = assert_raises(ArgumentError) { Parquet.write_rows(data, schema: schema, write_to: temp_path) }
+      assert_match(/Cannot create a struct with zero fields|Top-level schema must be a Struct/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_schema_dsl_list_missing_item
+    error =
+      assert_raises(ArgumentError) do
+        schema =
+          Parquet::Schema.define do
+            field :id, :int32
+            # Invalid: a list type is declared but no `item:` argument
+            field :bad_list, :list
+          end
+      end
+    assert_match(/list field.*requires `item:` type/, error.message)
+  end
+
+  def test_schema_dsl_unsupported_timestamp_nanos
+    schema_hash = {
+      type: :struct,
+      fields: [
+        { name: "id", type: :int64, nullable: true },
+        { name: "created_at", type: :timestamp_nanos, nullable: true }
+      ]
+    }
+
+    # We skip the normal `Parquet::Schema.define` DSL to show a direct hash approach
+    data = [[1, Time.now]].each
+
+    temp_path = "test_unsupported_nanos.parquet"
+    begin
+      error =
+        assert_raises(ArgumentError, RuntimeError) do
+          Parquet.write_rows(data, schema: schema_hash, write_to: temp_path)
+        end
+      # In arrow_data_type_to_parquet_schema_type, we raise about TimestampNanos
+      assert_match(/TimestampNanos not supported|Unknown type/, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_schema_dsl_bogus_type
+    schema = {
+      type: :struct,
+      fields: [{ name: "id", type: :int32, nullable: true }, { name: "bogus", type: :some_bogus_type, nullable: true }]
+    }
+
+    data = [[1, "value"]].each
+    temp_path = "test_bogus_type.parquet"
+
+    begin
+      error = assert_raises(ArgumentError) { Parquet.write_rows(data, schema: schema, write_to: temp_path) }
+      assert_match(/Unknown type.*some_bogus_type/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_incorrect_coercion_int8_too_large
+    schema = [{ "small_col" => "int8" }]
+    data = [
+      [9999] # too large for int8
+    ]
+
+    temp_path = "test_int8_too_large.parquet"
+    begin
+      error =
+        assert_raises(RuntimeError, RangeError) { Parquet.write_rows(data.each, schema: schema, write_to: temp_path) }
+      # depending on environment, might say "fixnum too big to convert" or "out of range"
+      assert_match(/fixnum too big to convert into/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_write_rows_nested_list_of_lists_empty_sublist
+    schema = [
+      { "id" => "int32" },
+      # This is a list<list<string>>
+      { "nested_list" => "list<list<string>>" }
+    ]
+
+    data = [
+      [1, [%w[a b], [], ["c"]]], # second sub-list is empty
+      [2, []] # entire top-level list empty
+    ]
+
+    path = "test_nested_list_of_lists.parquet"
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: path)
+
+      # Read them back
+      rows = Parquet.each_row(path).to_a
+      assert_equal 2, rows.size
+
+      assert_equal 1, rows[0]["id"]
+      assert_equal [%w[a b], [], ["c"]], rows[0]["nested_list"]
+
+      assert_equal 2, rows[1]["id"]
+      assert_equal [], rows[1]["nested_list"]
+    ensure
+      File.delete(path) if File.exist?(path)
+    end
+  end
 end

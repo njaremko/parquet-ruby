@@ -8,14 +8,12 @@ use std::fs::File;
 use std::sync::Arc;
 
 use magnus::value::ReprValue;
-use magnus::{Error as MagnusError, Value};
+use magnus::{Error as MagnusError, Ruby, Value};
 
 use crate::header_cache::StringCache;
 use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
-use crate::types::TryIntoValue;
+use crate::types::{ParquetGemError, TryIntoValue};
 use crate::ColumnRecord;
-
-use super::ReaderError;
 
 /// Opens a parquet file or IO-like object for reading
 ///
@@ -23,17 +21,16 @@ use super::ReaderError;
 /// returning either a File or a ThreadSafeRubyReader that can be used with
 /// parquet readers.
 pub fn open_parquet_source(
+    ruby: Arc<Ruby>,
     to_read: Value,
-) -> Result<Either<File, ThreadSafeRubyReader>, ReaderError> {
-    let ruby = unsafe { magnus::Ruby::get_unchecked() };
-
+) -> Result<Either<File, ThreadSafeRubyReader>, ParquetGemError> {
     if to_read.is_kind_of(ruby.class_string()) {
         let path_string = to_read.to_r_string()?;
         let file_path = unsafe { path_string.as_str()? };
-        let file = File::open(file_path).map_err(ReaderError::from)?;
+        let file = File::open(file_path).map_err(ParquetGemError::from)?;
         Ok(Either::Left(file))
     } else {
-        let readable = ThreadSafeRubyReader::new(RubyReader::try_from(to_read)?);
+        let readable = ThreadSafeRubyReader::new(RubyReader::new(ruby, to_read)?);
         Ok(Either::Right(readable))
     }
 }
@@ -60,9 +57,9 @@ pub fn create_batch_reader<T: parquet::file::reader::ChunkReader + 'static>(
     reader: T,
     columns: &Option<Vec<String>>,
     batch_size: Option<usize>,
-) -> Result<(ParquetRecordBatchReader, std::sync::Arc<Schema>, i64), ReaderError> {
-    let mut builder =
-        ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|e| ReaderError::Parquet(e))?;
+) -> Result<(ParquetRecordBatchReader, std::sync::Arc<Schema>, i64), ParquetGemError> {
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
+        .map_err(|e| ParquetGemError::Parquet(e))?;
 
     let schema = builder.schema().clone();
     let num_rows = builder.metadata().file_metadata().num_rows();
@@ -81,7 +78,7 @@ pub fn create_batch_reader<T: parquet::file::reader::ChunkReader + 'static>(
         builder = builder.with_batch_size(batch_size);
     }
 
-    let reader = builder.build().map_err(|e| ReaderError::Parquet(e))?;
+    let reader = builder.build().map_err(|e| ParquetGemError::Parquet(e))?;
     Ok((reader, schema, num_rows))
 }
 
@@ -91,7 +88,7 @@ pub fn handle_empty_file(
     ruby: &magnus::Ruby,
     schema: &Arc<Schema>,
     num_rows: i64,
-) -> Result<bool, ReaderError> {
+) -> Result<bool, ParquetGemError> {
     if num_rows == 0 {
         let mut map =
             HashMap::with_capacity_and_hasher(schema.fields().len(), RandomState::default());
@@ -101,7 +98,7 @@ pub fn handle_empty_file(
             .map(|field| field.name().to_string())
             .collect();
         let interned_headers =
-            StringCache::intern_many(&headers).map_err(|e| ReaderError::HeaderIntern(e))?;
+            StringCache::intern_many(&headers).map_err(|e| ParquetGemError::HeaderIntern(e))?;
         for field in interned_headers.iter() {
             map.insert(*field, vec![]);
         }

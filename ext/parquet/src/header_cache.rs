@@ -6,10 +6,7 @@
 /// so this optimization could be removed if any issues arise.
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        LazyLock, Mutex,
-    },
+    sync::{LazyLock, Mutex},
 };
 
 use magnus::{IntoValue, RString, Ruby, Value};
@@ -24,7 +21,7 @@ pub enum CacheError {
     RStringConversion(String),
 }
 
-static STRING_CACHE: LazyLock<Mutex<HashMap<&'static str, (StringCacheKey, AtomicU32)>>> =
+static STRING_CACHE: LazyLock<Mutex<HashMap<&'static str, StringCacheKey>>> =
     LazyLock::new(|| Mutex::new(HashMap::with_capacity(100)));
 
 pub struct StringCache;
@@ -84,18 +81,16 @@ impl StringCache {
     pub fn intern_many<AsStr: AsRef<str>>(
         strings: &[AsStr],
     ) -> Result<Vec<StringCacheKey>, CacheError> {
-        let mut cache = STRING_CACHE
+        let cache = STRING_CACHE
             .lock()
             .map_err(|e| CacheError::LockError(e.to_string()))?;
 
         let mut result: Vec<StringCacheKey> = Vec::with_capacity(strings.len());
         for string in strings {
-            if let Some((_, (interned_string, counter))) = cache.get_key_value(string.as_ref()) {
-                counter.fetch_add(1, Ordering::Relaxed);
+            if let Some((_, interned_string)) = cache.get_key_value(string.as_ref()) {
                 result.push(*interned_string);
             } else {
                 let interned = StringCacheKey::new(string.as_ref())?;
-                cache.insert(interned.0, (interned, AtomicU32::new(1)));
                 result.push(interned);
             }
         }

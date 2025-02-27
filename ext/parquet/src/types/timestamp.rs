@@ -1,8 +1,6 @@
-use crate::reader::ReaderError;
-
 use super::*;
 
-pub fn parse_zoned_timestamp(value: &ParquetValue) -> Result<jiff::Timestamp, ReaderError> {
+pub fn parse_zoned_timestamp(value: &ParquetValue) -> Result<jiff::Timestamp, ParquetGemError> {
     let (ts, tz) = match value {
         ParquetValue::TimestampSecond(ts, tz) => (jiff::Timestamp::from_second(*ts).unwrap(), tz),
         ParquetValue::TimestampMillis(ts, tz) => {
@@ -75,10 +73,10 @@ macro_rules! impl_timestamp_conversion {
                     .funcall::<_, _, Value>("parse", (ts.to_string(),))?
                     .into_value_with($handle))
             }
-            _ => Err(ReaderError::Ruby(MagnusErrorWrapper(MagnusError::new(
+            _ => Err(MagnusError::new(
                 magnus::exception::type_error(),
                 "Invalid timestamp type".to_string(),
-            )))),
+            ))?,
         }
     }};
 }

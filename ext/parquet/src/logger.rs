@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use magnus::{exception::runtime_error, value::ReprValue, Error as MagnusError, Ruby, Value};
 
-use crate::{reader::ReaderError, utils::parse_string_or_symbol};
+use crate::{types::ParquetGemError, utils::parse_string_or_symbol};
 
 /// Severity levels that match Ruby's Logger levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,7 +45,7 @@ pub struct RubyLogger {
 
 #[allow(dead_code)]
 impl RubyLogger {
-    pub fn new(ruby: &Ruby, logger_value: Option<Value>) -> Result<Self, ReaderError> {
+    pub fn new(ruby: &Ruby, logger_value: Option<Value>) -> Result<Self, ParquetGemError> {
         let environment_level = std::env::var("PARQUET_GEM_LOG_LEVEL")
             .unwrap_or_else(|_| "warn".to_string())
             .parse::<LogLevel>()

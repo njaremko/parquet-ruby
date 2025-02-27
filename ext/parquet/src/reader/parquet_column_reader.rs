@@ -1,6 +1,6 @@
 use crate::header_cache::StringCache;
 use crate::logger::RubyLogger;
-use crate::types::{ArrayWrapper, TryIntoValue};
+use crate::types::{ArrayWrapper, ParquetGemError, TryIntoValue};
 use crate::{
     create_column_enumerator, utils::*, ColumnEnumeratorArgs, ColumnRecord, ParquetValueVec,
     ParserResultType,
@@ -10,25 +10,29 @@ use either::Either;
 use magnus::IntoValue;
 use magnus::{Error as MagnusError, Ruby, Value};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::common::{
     create_batch_reader, handle_block_or_enum, handle_empty_file, open_parquet_source,
 };
-use super::ReaderError;
 
 #[inline]
 pub fn parse_parquet_columns<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
-    Ok(parse_parquet_columns_impl(rb_self, args).map_err(|e| {
-        let z: MagnusError = e.into();
-        z
-    })?)
+    let ruby = unsafe { Ruby::get_unchecked() };
+    Ok(
+        parse_parquet_columns_impl(Arc::new(ruby), rb_self, args).map_err(|e| {
+            let z: MagnusError = e.into();
+            z
+        })?,
+    )
 }
 
 #[inline]
-fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, ReaderError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
-
+fn parse_parquet_columns_impl<'a>(
+    ruby: Arc<Ruby>,
+    rb_self: Value,
+    args: &[Value],
+) -> Result<Value, ParquetGemError> {
     let ParquetColumnsArgs {
         to_read,
         result_type,
@@ -63,7 +67,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
         return Ok(enum_value);
     }
 
-    let source = open_parquet_source(to_read)?;
+    let source = open_parquet_source(ruby.clone(), to_read)?;
 
     // Use the common function to create the batch reader
 
@@ -82,7 +86,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
             let iter = batch_reader.map(move |batch| {
-                batch.map_err(ReaderError::Arrow).and_then(|batch| {
+                batch.map_err(ParquetGemError::Arrow).and_then(|batch| {
                     let local_headers = headers_clone
                         .get_or_init(|| {
                             let schema = batch.schema();
@@ -94,7 +98,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
                             StringCache::intern_many(&header_string)
                         })
                         .as_ref()
-                        .map_err(|e| ReaderError::HeaderIntern(e.clone()))?;
+                        .map_err(|e| ParquetGemError::HeaderIntern(e.clone()))?;
 
                     let mut map = HashMap::with_capacity_and_hasher(
                         local_headers.len(),
@@ -112,7 +116,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
                                 strict: strict,
                             })?;
                             map.insert(header, values.into_inner());
-                            Ok::<_, ReaderError>(())
+                            Ok::<_, ParquetGemError>(())
                         })?;
 
                     Ok(ColumnRecord::Map::<RandomState>(map))
@@ -126,7 +130,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
         }
         ParserResultType::Array => {
             let iter = batch_reader.map(|batch| {
-                batch.map_err(ReaderError::Arrow).and_then(|batch| {
+                batch.map_err(ParquetGemError::Arrow).and_then(|batch| {
                     let vec = batch
                         .columns()
                         .into_iter()
@@ -135,7 +139,7 @@ fn parse_parquet_columns_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Valu
                                 array: &*column,
                                 strict: strict,
                             })?;
-                            Ok::<_, ReaderError>(values.into_inner())
+                            Ok::<_, ParquetGemError>(values.into_inner())
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(ColumnRecord::Vec::<RandomState>(vec))

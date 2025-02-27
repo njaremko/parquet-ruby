@@ -7,122 +7,17 @@ use crate::utils::parse_string_or_symbol;
 /// Recursively converts a SchemaField to a SchemaNode for any level of nesting
 fn convert_schema_field_to_node(field: &SchemaField) -> SchemaNode {
     match &field.type_ {
-        PST::Int8 => SchemaNode::Primitive {
+        PST::Primitive(primative) => SchemaNode::Primitive {
             name: field.name.clone(),
             nullable: field.nullable,
-            parquet_type: PrimitiveType::Int8,
-            format: field.format.clone(),
-        },
-        PST::Int16 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Int16,
-            format: field.format.clone(),
-        },
-        PST::Int32 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Int32,
-            format: field.format.clone(),
-        },
-        PST::Int64 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Int64,
-            format: field.format.clone(),
-        },
-        PST::UInt8 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::UInt8,
-            format: field.format.clone(),
-        },
-        PST::UInt16 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::UInt16,
-            format: field.format.clone(),
-        },
-        PST::UInt32 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::UInt32,
-            format: field.format.clone(),
-        },
-        PST::UInt64 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::UInt64,
-            format: field.format.clone(),
-        },
-        PST::Float => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Float32,
-            format: field.format.clone(),
-        },
-        PST::Double => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Float64,
-            format: field.format.clone(),
-        },
-        PST::String => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::String,
-            format: field.format.clone(),
-        },
-        PST::Binary => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Binary,
-            format: field.format.clone(),
-        },
-        PST::Boolean => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Boolean,
-            format: field.format.clone(),
-        },
-        PST::Date32 => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::Date32,
-            format: field.format.clone(),
-        },
-        PST::TimestampMillis => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::TimestampMillis,
-            format: field.format.clone(),
-        },
-        PST::TimestampMicros => SchemaNode::Primitive {
-            name: field.name.clone(),
-            nullable: field.nullable,
-            parquet_type: PrimitiveType::TimestampMicros,
+            parquet_type: *primative,
             format: field.format.clone(),
         },
         PST::List(list_field) => {
             // Create item node by recursively converting the list item type to a node
             let item_node = match &list_field.item_type {
                 // For primitive types, create a primitive node with name "item"
-                PST::Int8
-                | PST::Int16
-                | PST::Int32
-                | PST::Int64
-                | PST::UInt8
-                | PST::UInt16
-                | PST::UInt32
-                | PST::UInt64
-                | PST::Float
-                | PST::Double
-                | PST::String
-                | PST::Binary
-                | PST::Boolean
-                | PST::Date32
-                | PST::TimestampMillis
-                | PST::TimestampMicros => {
+                PST::Primitive(_) => {
                     // Use a temporary SchemaField to convert item type
                     let item_field = SchemaField {
                         name: "item".to_string(),
@@ -341,7 +236,7 @@ pub fn infer_schema_from_first_row(
     Ok((0..array.len())
         .map(|i| SchemaField {
             name: format!("f{}", i),
-            type_: PST::String, // Default to String type when inferring
+            type_: PST::Primitive(PrimitiveType::String), // Default to String type when inferring
             format: None,
             nullable,
         })

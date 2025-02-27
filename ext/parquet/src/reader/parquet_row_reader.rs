@@ -2,7 +2,7 @@ use crate::header_cache::StringCache;
 use crate::logger::RubyLogger;
 use crate::types::TryIntoValue;
 use crate::{
-    create_row_enumerator, utils::*, ParquetField, ParserResultType, ReaderError,
+    create_row_enumerator, utils::*, ParquetField, ParquetGemError, ParserResultType,
     RowEnumeratorArgs, RowRecord,
 };
 use ahash::RandomState;
@@ -13,22 +13,27 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter as ParquetRowIter;
 use parquet::schema::types::{Type as SchemaType, TypePtr};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::common::{handle_block_or_enum, open_parquet_source};
 
 #[inline]
 pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
-    Ok(parse_parquet_rows_impl(rb_self, args).map_err(|e| {
-        let z: MagnusError = e.into();
-        z
-    })?)
+    let ruby = unsafe { Ruby::get_unchecked() };
+    Ok(
+        parse_parquet_rows_impl(Arc::new(ruby), rb_self, args).map_err(|e| {
+            let z: MagnusError = e.into();
+            z
+        })?,
+    )
 }
 
 #[inline]
-fn parse_parquet_rows_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, ReaderError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
-
+fn parse_parquet_rows_impl<'a>(
+    ruby: Arc<Ruby>,
+    rb_self: Value,
+    args: &[Value],
+) -> Result<Value, ParquetGemError> {
     let ParquetRowsArgs {
         to_read,
         result_type,
@@ -58,11 +63,13 @@ fn parse_parquet_rows_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, 
         return Ok(enum_value);
     }
 
-    let source = open_parquet_source(to_read)?;
+    let source = open_parquet_source(ruby.clone(), to_read)?;
     let reader: Box<dyn FileReader> = match source {
-        Either::Left(file) => Box::new(SerializedFileReader::new(file).map_err(ReaderError::from)?),
+        Either::Left(file) => {
+            Box::new(SerializedFileReader::new(file).map_err(ParquetGemError::from)?)
+        }
         Either::Right(readable) => {
-            Box::new(SerializedFileReader::new(readable).map_err(ReaderError::from)?)
+            Box::new(SerializedFileReader::new(readable).map_err(ParquetGemError::from)?)
         }
     };
 
@@ -109,7 +116,7 @@ fn parse_parquet_rows_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, 
                     Ok(map)
                 })
                 .and_then(|row| Ok(RowRecord::Map::<RandomState>(row)))
-                .map_err(|e| ReaderError::from(e))
+                .map_err(|e| ParquetGemError::from(e))
             });
 
             for result in iter {
@@ -128,7 +135,7 @@ fn parse_parquet_rows_impl<'a>(rb_self: Value, args: &[Value]) -> Result<Value, 
                     Ok(vec)
                 })
                 .and_then(|row| Ok(RowRecord::Vec::<RandomState>(row)))
-                .map_err(|e| ReaderError::from(e))
+                .map_err(|e| ParquetGemError::from(e))
             });
 
             for result in iter {

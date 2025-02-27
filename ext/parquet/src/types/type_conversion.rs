@@ -1,8 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::reader::ReaderError;
-
 use super::*;
 use arrow_array::builder::MapFieldNames;
 use arrow_array::builder::*;
@@ -19,8 +17,7 @@ where
     T: TryConvert + FromStr,
     <T as FromStr>::Err: std::fmt::Display,
 {
-    pub fn convert_with_string_fallback(value: Value) -> Result<T, MagnusError> {
-        let ruby = unsafe { Ruby::get_unchecked() };
+    pub fn convert_with_string_fallback(ruby: &Ruby, value: Value) -> Result<T, MagnusError> {
         if value.is_kind_of(ruby.class_string()) {
             let s = String::try_convert(value)?;
             s.trim().parse::<T>().map_err(|e| {
@@ -35,8 +32,11 @@ where
     }
 }
 
-pub fn convert_to_date32(value: Value, format: Option<&str>) -> Result<i32, MagnusError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
+pub fn convert_to_date32(
+    ruby: &Ruby,
+    value: Value,
+    format: Option<&str>,
+) -> Result<i32, MagnusError> {
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         // Parse string into Date using jiff
@@ -91,8 +91,11 @@ pub fn convert_to_date32(value: Value, format: Option<&str>) -> Result<i32, Magn
     }
 }
 
-pub fn convert_to_timestamp_millis(value: Value, format: Option<&str>) -> Result<i64, MagnusError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
+pub fn convert_to_timestamp_millis(
+    ruby: &Ruby,
+    value: Value,
+    format: Option<&str>,
+) -> Result<i64, MagnusError> {
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
@@ -138,8 +141,11 @@ pub fn convert_to_timestamp_millis(value: Value, format: Option<&str>) -> Result
     }
 }
 
-pub fn convert_to_timestamp_micros(value: Value, format: Option<&str>) -> Result<i64, MagnusError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
+pub fn convert_to_timestamp_micros(
+    ruby: &Ruby,
+    value: Value,
+    format: Option<&str>,
+) -> Result<i64, MagnusError> {
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
@@ -189,8 +195,7 @@ pub fn convert_to_binary(value: Value) -> Result<Vec<u8>, MagnusError> {
     Ok(unsafe { value.to_r_string()?.as_slice() }.to_vec())
 }
 
-pub fn convert_to_boolean(value: Value) -> Result<bool, MagnusError> {
-    let ruby = unsafe { Ruby::get_unchecked() };
+pub fn convert_to_boolean(ruby: &Ruby, value: Value) -> Result<bool, MagnusError> {
     if value.is_kind_of(ruby.class_string()) {
         let s = String::try_convert(value)?;
         s.trim().parse::<bool>().map_err(|e| {
@@ -226,23 +231,24 @@ pub fn parquet_schema_type_to_arrow_data_type(
     schema_type: &ParquetSchemaType,
 ) -> Result<DataType, MagnusError> {
     Ok(match schema_type {
-        ParquetSchemaType::Int8 => DataType::Int8,
-        ParquetSchemaType::Int16 => DataType::Int16,
-        ParquetSchemaType::Int32 => DataType::Int32,
-        ParquetSchemaType::Int64 => DataType::Int64,
-        ParquetSchemaType::UInt8 => DataType::UInt8,
-        ParquetSchemaType::UInt16 => DataType::UInt16,
-        ParquetSchemaType::UInt32 => DataType::UInt32,
-        ParquetSchemaType::UInt64 => DataType::UInt64,
-        ParquetSchemaType::Float => DataType::Float32,
-        ParquetSchemaType::Double => DataType::Float64,
-        ParquetSchemaType::String => DataType::Utf8,
-        ParquetSchemaType::Binary => DataType::Binary,
-        ParquetSchemaType::Boolean => DataType::Boolean,
-        ParquetSchemaType::Date32 => DataType::Date32,
-        ParquetSchemaType::TimestampMillis => DataType::Timestamp(TimeUnit::Millisecond, None),
-        ParquetSchemaType::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
-
+        ParquetSchemaType::Primitive(primative) => match primative {
+            PrimitiveType::Int8 => DataType::Int8,
+            PrimitiveType::Int16 => DataType::Int16,
+            PrimitiveType::Int32 => DataType::Int32,
+            PrimitiveType::Int64 => DataType::Int64,
+            PrimitiveType::UInt8 => DataType::UInt8,
+            PrimitiveType::UInt16 => DataType::UInt16,
+            PrimitiveType::UInt32 => DataType::UInt32,
+            PrimitiveType::UInt64 => DataType::UInt64,
+            PrimitiveType::Float32 => DataType::Float32,
+            PrimitiveType::Float64 => DataType::Float64,
+            PrimitiveType::String => DataType::Utf8,
+            PrimitiveType::Binary => DataType::Binary,
+            PrimitiveType::Boolean => DataType::Boolean,
+            PrimitiveType::Date32 => DataType::Date32,
+            PrimitiveType::TimestampMillis => DataType::Timestamp(TimeUnit::Millisecond, None),
+            PrimitiveType::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
+        },
         // For a List<T>, create a standard List in Arrow with nullable items
         ParquetSchemaType::List(list_field) => {
             let child_type = parquet_schema_type_to_arrow_data_type(&list_field.item_type)?;
@@ -325,27 +331,55 @@ macro_rules! impl_timestamp_array_conversion {
 fn create_arrow_builder_for_type(
     type_: &ParquetSchemaType,
     capacity: Option<usize>,
-) -> Result<Box<dyn ArrayBuilder>, ReaderError> {
+) -> Result<Box<dyn ArrayBuilder>, ParquetGemError> {
     let cap = capacity.unwrap_or(1); // Default to at least capacity 1 to avoid empty builders
     match type_ {
-        ParquetSchemaType::Int8 => Ok(Box::new(Int8Builder::with_capacity(cap))),
-        ParquetSchemaType::Int16 => Ok(Box::new(Int16Builder::with_capacity(cap))),
-        ParquetSchemaType::Int32 => Ok(Box::new(Int32Builder::with_capacity(cap))),
-        ParquetSchemaType::Int64 => Ok(Box::new(Int64Builder::with_capacity(cap))),
-        ParquetSchemaType::UInt8 => Ok(Box::new(UInt8Builder::with_capacity(cap))),
-        ParquetSchemaType::UInt16 => Ok(Box::new(UInt16Builder::with_capacity(cap))),
-        ParquetSchemaType::UInt32 => Ok(Box::new(UInt32Builder::with_capacity(cap))),
-        ParquetSchemaType::UInt64 => Ok(Box::new(UInt64Builder::with_capacity(cap))),
-        ParquetSchemaType::Float => Ok(Box::new(Float32Builder::with_capacity(cap))),
-        ParquetSchemaType::Double => Ok(Box::new(Float64Builder::with_capacity(cap))),
-        ParquetSchemaType::String => Ok(Box::new(StringBuilder::with_capacity(cap, cap * 32))),
-        ParquetSchemaType::Binary => Ok(Box::new(BinaryBuilder::with_capacity(cap, cap * 32))),
-        ParquetSchemaType::Boolean => Ok(Box::new(BooleanBuilder::with_capacity(cap))),
-        ParquetSchemaType::Date32 => Ok(Box::new(Date32Builder::with_capacity(cap))),
-        ParquetSchemaType::TimestampMillis => {
+        ParquetSchemaType::Primitive(PrimitiveType::Int8) => {
+            Ok(Box::new(Int8Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Int16) => {
+            Ok(Box::new(Int16Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Int32) => {
+            Ok(Box::new(Int32Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Int64) => {
+            Ok(Box::new(Int64Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::UInt8) => {
+            Ok(Box::new(UInt8Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::UInt16) => {
+            Ok(Box::new(UInt16Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::UInt32) => {
+            Ok(Box::new(UInt32Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::UInt64) => {
+            Ok(Box::new(UInt64Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Float32) => {
+            Ok(Box::new(Float32Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Float64) => {
+            Ok(Box::new(Float64Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::String) => {
+            Ok(Box::new(StringBuilder::with_capacity(cap, cap * 32)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Binary) => {
+            Ok(Box::new(BinaryBuilder::with_capacity(cap, cap * 32)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Boolean) => {
+            Ok(Box::new(BooleanBuilder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Date32) => {
+            Ok(Box::new(Date32Builder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis) => {
             Ok(Box::new(TimestampMillisecondBuilder::with_capacity(cap)))
         }
-        ParquetSchemaType::TimestampMicros => {
+        ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros) => {
             Ok(Box::new(TimestampMicrosecondBuilder::with_capacity(cap)))
         }
         ParquetSchemaType::List(list_field) => {
@@ -592,9 +626,9 @@ fn fill_builder(
         // ------------------
         // PRIMITIVE SCALARS - delegated to specialized helpers
         // ------------------
-        ParquetSchemaType::Int8 => fill_int8_builder(builder, values),
-        ParquetSchemaType::Int16 => fill_int16_builder(builder, values),
-        ParquetSchemaType::Int32 => {
+        ParquetSchemaType::Primitive(PrimitiveType::Int8) => fill_int8_builder(builder, values),
+        ParquetSchemaType::Primitive(PrimitiveType::Int16) => fill_int16_builder(builder, values),
+        ParquetSchemaType::Primitive(PrimitiveType::Int32) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<Int32Builder>()
@@ -624,7 +658,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Int64 => {
+        ParquetSchemaType::Primitive(PrimitiveType::Int64) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<Int64Builder>()
@@ -643,7 +677,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::UInt8 => {
+        ParquetSchemaType::Primitive(PrimitiveType::UInt8) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<UInt8Builder>()
@@ -672,7 +706,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::UInt16 => {
+        ParquetSchemaType::Primitive(PrimitiveType::UInt16) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<UInt16Builder>()
@@ -701,7 +735,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::UInt32 => {
+        ParquetSchemaType::Primitive(PrimitiveType::UInt32) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<UInt32Builder>()
@@ -730,7 +764,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::UInt64 => {
+        ParquetSchemaType::Primitive(PrimitiveType::UInt64) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<UInt64Builder>()
@@ -759,7 +793,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Float => {
+        ParquetSchemaType::Primitive(PrimitiveType::Float32) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<Float32Builder>()
@@ -779,7 +813,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Double => {
+        ParquetSchemaType::Primitive(PrimitiveType::Float64) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<Float64Builder>()
@@ -800,7 +834,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Boolean => {
+        ParquetSchemaType::Primitive(PrimitiveType::Boolean) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<BooleanBuilder>()
@@ -819,7 +853,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Date32 => {
+        ParquetSchemaType::Primitive(PrimitiveType::Date32) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<Date32Builder>()
@@ -838,7 +872,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::TimestampMillis => {
+        ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMillisecondBuilder>()
@@ -857,7 +891,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::TimestampMicros => {
+        ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMicrosecondBuilder>()
@@ -894,7 +928,7 @@ fn fill_builder(
         // ------------------
         // OTHER TYPES - keep as is for now
         // ------------------
-        ParquetSchemaType::String => {
+        ParquetSchemaType::Primitive(PrimitiveType::String) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
@@ -913,7 +947,7 @@ fn fill_builder(
             }
             Ok(())
         }
-        ParquetSchemaType::Binary => {
+        ParquetSchemaType::Primitive(PrimitiveType::Binary) => {
             let typed_builder = builder
                 .as_any_mut()
                 .downcast_mut::<BinaryBuilder>()
@@ -1178,7 +1212,7 @@ fn fill_builder(
                                         }
                                     }
                                     ParquetValue::Null => match struct_field.fields[i].type_ {
-                                        ParquetSchemaType::Int8 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Int8) => typed_builder
                                             .field_builder::<Int8Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1187,7 +1221,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Int16 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Int16) => typed_builder
                                             .field_builder::<Int16Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1196,7 +1230,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Int32 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Int32) => typed_builder
                                             .field_builder::<Int32Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1205,7 +1239,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Int64 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Int64) => typed_builder
                                             .field_builder::<Int64Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1214,7 +1248,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::UInt8 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::UInt8) => typed_builder
                                             .field_builder::<UInt8Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1223,7 +1257,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::UInt16 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::UInt16) => typed_builder
                                             .field_builder::<UInt16Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1232,7 +1266,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::UInt32 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::UInt32) => typed_builder
                                             .field_builder::<UInt32Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1241,7 +1275,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::UInt64 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::UInt64) => typed_builder
                                             .field_builder::<UInt64Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1250,7 +1284,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Float => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Float32) => typed_builder
                                             .field_builder::<Float32Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1259,7 +1293,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Double => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Float64) => typed_builder
                                             .field_builder::<Float64Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1268,7 +1302,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::String => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::String) => typed_builder
                                             .field_builder::<StringBuilder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1277,7 +1311,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Binary => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Binary) => typed_builder
                                             .field_builder::<BinaryBuilder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1286,7 +1320,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Boolean => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Boolean) => typed_builder
                                             .field_builder::<BooleanBuilder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1295,7 +1329,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::Date32 => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::Date32) => typed_builder
                                             .field_builder::<Date32Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1304,7 +1338,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::TimestampMillis => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis) => typed_builder
                                             .field_builder::<TimestampMillisecondBuilder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1313,7 +1347,7 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
-                                        ParquetSchemaType::TimestampMicros => typed_builder
+                                        ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros) => typed_builder
                                             .field_builder::<TimestampMicrosecondBuilder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
@@ -1389,7 +1423,7 @@ fn fill_builder(
 pub fn convert_parquet_values_to_arrow(
     values: Vec<ParquetValue>,
     type_: &ParquetSchemaType,
-) -> Result<Arc<dyn Array>, ReaderError> {
+) -> Result<Arc<dyn Array>, ParquetGemError> {
     // Make sure we always have at least capacity 1 to avoid empty builders
     let capacity = if values.is_empty() { 1 } else { values.len() };
     let mut builder = create_arrow_builder_for_type(type_, Some(capacity))?;
@@ -1403,16 +1437,17 @@ pub fn convert_parquet_values_to_arrow(
 }
 
 pub fn convert_ruby_array_to_arrow(
+    ruby: &Ruby,
     values: RArray,
     type_: &ParquetSchemaType,
-) -> Result<Arc<dyn Array>, ReaderError> {
+) -> Result<Arc<dyn Array>, ParquetGemError> {
     let mut parquet_values = Vec::with_capacity(values.len());
     for value in values {
         if value.is_nil() {
             parquet_values.push(ParquetValue::Null);
             continue;
         }
-        let parquet_value = ParquetValue::from_value(value, type_, None)?;
+        let parquet_value = ParquetValue::from_value(ruby, value, type_, None)?;
         parquet_values.push(parquet_value);
     }
     convert_parquet_values_to_arrow(parquet_values, type_)
