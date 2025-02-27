@@ -294,7 +294,7 @@ The Schema DSL supports:
 - **Complex types**: Structs, lists, and maps with arbitrary nesting
 - **Nullability control**: Specify which fields can contain null values with `nullable: false/true`
 - **List item nullability**: Control whether list items can be null with `item_nullable: false/true`
-- **Map key/value nullability**: Control whether map keys or values can be null with `key_nullable: false/true` and `value_nullable: false/true`
+- **Map key/value nullability**: Control whether map keys or values can be null with `value_nullable: false/true`
 
 Note: When using List and Map types, you need to provide at least:
 - For lists: The `item:` parameter specifying the item type
