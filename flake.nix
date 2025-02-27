@@ -38,14 +38,28 @@
       url = "github:ipetkov/crane";
     };
   };
-  outputs = inputs:
+  outputs =
+    inputs:
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
       imports = [
 
       ];
 
-      perSystem = { config, self', inputs', pkgs, system, ... }:
+      perSystem =
+        {
+          config,
+          self',
+          inputs',
+          pkgs,
+          system,
+          ...
+        }:
         let
           linuxSystem = builtins.replaceStrings [ "darwin" ] [ "linux" ] system;
         in
@@ -75,12 +89,14 @@
           };
           legacyPackages.nixpkgs = pkgs;
           devShells.default = pkgs.mkShell {
-            packages = with pkgs;[
+            packages = with pkgs; [
               ruby_3_3
               duckdb
               bundler
               rust-analyzer-unwrapped
               rust-dev-toolchain
+              jemalloc
+              pkg-config
             ];
           };
         };

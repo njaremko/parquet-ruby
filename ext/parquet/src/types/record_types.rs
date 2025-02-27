@@ -24,8 +24,10 @@ impl<S: BuildHasher + Default> TryIntoValue for RowRecord<S> {
         match self {
             RowRecord::Vec(vec) => {
                 let ary = handle.ary_new_capa(vec.len());
-                vec.into_iter()
-                    .try_for_each(|v| ary.push(v.try_into_value_with(handle)?))?;
+                vec.into_iter().try_for_each(|v| {
+                    ary.push(v.try_into_value_with(handle)?)?;
+                    Ok::<_, ReaderError>(())
+                })?;
                 Ok(handle.into_value(ary))
             }
             RowRecord::Map(map) => {
@@ -68,8 +70,10 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
                 let ary = handle.ary_new_capa(vec.len());
                 vec.into_iter().try_for_each(|v| {
                     let nested_ary = handle.ary_new_capa(v.len());
-                    v.into_iter()
-                        .try_for_each(|v| nested_ary.push(v.try_into_value_with(handle)?))?;
+                    v.into_iter().try_for_each(|v| {
+                        nested_ary.push(v.try_into_value_with(handle)?)?;
+                        Ok::<_, ReaderError>(())
+                    })?;
                     ary.push(nested_ary.into_value_with(handle))?;
                     Ok::<_, ReaderError>(())
                 })?;
@@ -92,8 +96,10 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
                         }
                         values[i] = handle.into_value(k);
                         let ary = handle.ary_new_capa(v.len());
-                        v.into_iter()
-                            .try_for_each(|v| ary.push(v.try_into_value_with(handle)?))?;
+                        v.into_iter().try_for_each(|v| {
+                            ary.push(v.try_into_value_with(handle)?)?;
+                            Ok::<_, ReaderError>(())
+                        })?;
                         values[i + 1] = handle.into_value(ary);
                         i += 2;
                     }
@@ -165,7 +171,8 @@ impl TryIntoValue for ParquetField {
                 let elements = list.elements();
                 let ary = handle.ary_new_capa(elements.len());
                 elements.iter().try_for_each(|e| {
-                    ary.push(ParquetField(e.clone(), self.1).try_into_value_with(handle)?)
+                    ary.push(ParquetField(e.clone(), self.1).try_into_value_with(handle)?)?;
+                    Ok::<_, ReaderError>(())
                 })?;
                 Ok(ary.into_value_with(handle))
             }
@@ -176,7 +183,8 @@ impl TryIntoValue for ParquetField {
                     hash.aset(
                         ParquetField(k.clone(), self.1).try_into_value_with(handle)?,
                         ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
-                    )
+                    )?;
+                    Ok::<_, ReaderError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }
@@ -204,16 +212,11 @@ impl TryIntoValue for ParquetField {
                     hash.aset(
                         k.clone().into_value_with(handle),
                         ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
-                    )
+                    )?;
+                    Ok::<_, ReaderError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }
         }
     }
 }
-
-// impl IntoValue for ParquetField {
-//     fn into_value_with(self, handle: &Ruby) -> Value {
-//         self.try_into_value_with(handle).unwrap()
-//     }
-// }

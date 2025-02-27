@@ -20,6 +20,8 @@ use thiserror::Error;
 pub enum CacheError {
     #[error("Failed to acquire lock: {0}")]
     LockError(String),
+    #[error("Failed to convert Ruby String to interned string: {0}")]
+    RStringConversion(String),
 }
 
 static STRING_CACHE: LazyLock<Mutex<HashMap<&'static str, (StringCacheKey, AtomicU32)>>> =
@@ -31,10 +33,12 @@ pub struct StringCache;
 pub struct StringCacheKey(&'static str);
 
 impl StringCacheKey {
-    pub fn new(string: &str) -> Self {
+    pub fn new(string: &str) -> Result<Self, CacheError> {
         let rstr = RString::new(string);
         let fstr = rstr.to_interned_str();
-        Self(fstr.as_str().unwrap())
+        Ok(Self(fstr.as_str().map_err(|e| {
+            CacheError::RStringConversion(e.to_string())
+        })?))
     }
 }
 
@@ -90,7 +94,7 @@ impl StringCache {
                 counter.fetch_add(1, Ordering::Relaxed);
                 result.push(*interned_string);
             } else {
-                let interned = StringCacheKey::new(string.as_ref());
+                let interned = StringCacheKey::new(string.as_ref())?;
                 cache.insert(interned.0, (interned, AtomicU32::new(1)));
                 result.push(interned);
             }

@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require "tempfile"
 
 require "parquet"
 require "minitest/autorun"
@@ -123,6 +124,8 @@ class BasicTest < Minitest::Test
   end
 
   def test_write_large_file
+    skip unless ENV["RUN_SLOW_TESTS"]
+
     # Create a temporary file path
     temp_path = "test/large_data.parquet"
     begin
@@ -242,16 +245,14 @@ class BasicTest < Minitest::Test
   end
 
   def test_each_column_with_zero_batch_size
-    batches = []
-    Parquet.each_column("test/data.parquet", batch_size: 0) { |col| batches << col }
-    assert_empty batches
+    assert_raises(ArgumentError) { Parquet.each_column("test/data.parquet", batch_size: 0) { |_| } }
   end
 
   def test_each_column_with_negative_batch_size
-    assert_raises(RangeError) { Parquet.each_column("test/data.parquet", batch_size: -1) { |_| } }
+    assert_raises(RangeError, ArgumentError) { Parquet.each_column("test/data.parquet", batch_size: -1) { |_| } }
   end
 
-  def test_each_column_with_batch_size
+  def test_each_column_batch_size_hash
     batches = []
     Parquet.each_column("test/data.parquet", batch_size: 2, result_type: :hash) { |col| batches << col }
     refute_empty batches
@@ -692,5 +693,656 @@ class BasicTest < Minitest::Test
   ensure
     File.delete("test/formatted.parquet") if File.exist?("test/formatted.parquet")
     File.delete("test/formatted_columns.parquet") if File.exist?("test/formatted_columns.parquet")
+  end
+
+  def test_complex_types_write_read
+    temp_path = "test/complex_types.parquet"
+
+    begin
+      # Test data with lists and maps
+      data = [
+        # Row 1: Various types of lists and maps
+        [
+          1,
+          %w[apple banana cherry], # list<string>
+          [10, 20, 30, 40], # list<int32>
+          [1.1, 2.2, 3.3], # list<double>
+          { "Alice" => 20, "Bob" => 30 }, # map<string,int32>
+          { 1 => "one", 2 => "two", 3 => "three" } # map<int32,string>
+        ],
+        # Row 2: Empty collections and nil values
+        [
+          2,
+          [], # empty list<string>
+          [5], # list<int32> with one item
+          [], # nil list<double>
+          {}, # empty map<string,int32>
+          { 10 => "ten" } # map<int32,string> with one item
+        ],
+        # Row 3: Mixed values
+        [
+          3,
+          ["mixed", nil, "values"], # list<string> with nil
+          [100, 200, 300], # list<int32>
+          [5.5, 6.6, 7.7], # list<double>
+          { "key1" => 1, "key2" => 2, "key3" => nil }, # map<string,int32> with nil value
+          { 5 => "five", 6 => nil } # map<int32,string> with nil value
+        ]
+      ]
+
+      # Create schema with list and map types
+      schema = [
+        { "id" => "int32" },
+        { "string_list" => "list<string>" },
+        { "int_list" => "list<int32>" },
+        { "double_list" => "list<double>" },
+        { "string_int_map" => "map<string,int32>" },
+        { "int_string_map" => "map<int32,string>" }
+      ]
+
+      # Write rows to Parquet file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify row-based data
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.length
+
+      # Verify Row 1
+      assert_equal 1, rows[0]["id"]
+      assert_equal %w[apple banana cherry], rows[0]["string_list"]
+      assert_equal [10, 20, 30, 40], rows[0]["int_list"]
+      assert_equal [1.1, 2.2, 3.3], rows[0]["double_list"].map { |v| v.round(1) }
+      assert_equal({ "Alice" => 20, "Bob" => 30 }, rows[0]["string_int_map"])
+      assert_equal({ 1 => "one", 2 => "two", 3 => "three" }, rows[0]["int_string_map"])
+
+      # Verify Row 2
+      assert_equal 2, rows[1]["id"]
+      assert_equal [], rows[1]["string_list"]
+      assert_equal [5], rows[1]["int_list"]
+      assert_equal [], rows[1]["double_list"]
+      assert_equal({}, rows[1]["string_int_map"])
+      assert_equal({ 10 => "ten" }, rows[1]["int_string_map"])
+
+      # Verify Row 3
+      assert_equal 3, rows[2]["id"]
+      assert_equal ["mixed", nil, "values"], rows[2]["string_list"]
+      assert_equal [100, 200, 300], rows[2]["int_list"]
+      assert_equal [5.5, 6.6, 7.7], rows[2]["double_list"].map { |v| v.round(1) }
+      assert_equal({ "key1" => 1, "key2" => 2, "key3" => nil }, rows[2]["string_int_map"])
+      assert_equal({ 5 => "five", 6 => nil }, rows[2]["int_string_map"])
+
+      # Test column-based writing
+      column_batches = [
+        [
+          [1, 2, 3], # id column
+          [%w[apple banana cherry], [], ["mixed", nil, "values"]], # string_list column
+          [[10, 20, 30, 40], [5], [100, 200, 300]], # int_list column
+          [[1.1, 2.2, 3.3], nil, [5.5, 6.6, 7.7]], # double_list column
+          [{ "Alice" => 20, "Bob" => 30 }, {}, { "key1" => 1, "key2" => 2, "key3" => nil }], # string_int_map column
+          [{ 1 => "one", 2 => "two", 3 => "three" }, { 10 => "ten" }, { 5 => "five", 6 => nil }] # int_string_map column
+        ]
+      ]
+
+      # Write columns to Parquet file
+      Parquet.write_columns(column_batches.each, schema: schema, write_to: "#{temp_path}_columns")
+
+      # Read back and verify column-based data
+      column_rows = Parquet.each_row("#{temp_path}_columns").to_a
+      assert_equal 3, column_rows.length
+
+      # Spot check a few values to make sure column writing worked too
+      assert_equal 1, column_rows[0]["id"]
+      assert_equal %w[apple banana cherry], column_rows[0]["string_list"]
+      assert_equal [5], column_rows[1]["int_list"]
+      assert_equal [100, 200, 300], column_rows[2]["int_list"]
+      assert_equal({ "Alice" => 20, "Bob" => 30 }, column_rows[0]["string_int_map"])
+      assert_equal({ 10 => "ten" }, column_rows[1]["int_string_map"])
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+      File.delete("#{temp_path}_columns") if File.exist?("#{temp_path}_columns")
+    end
+  end
+
+  def test_schema_dsl
+    temp_path = "test_schema_dsl.parquet"
+
+    # Define a complex nested schema using the DSL
+    schema =
+      Parquet::Schema.define do
+        field "id", :int32
+        field "name", :string
+
+        # Nested struct with fields
+        field "address", :struct do
+          field "street", :string
+          field "city", :string
+          field "zip", :int32
+          field "coordinates", :struct do
+            field "latitude", :double
+            field "longitude", :double
+          end
+        end
+
+        # List of primitives
+        field "tags", :list, item: :string
+
+        # List of structs
+        field "contacts", :list, item: :struct do
+          field "name", :string
+          field "phone", :string
+          field "primary", :boolean
+        end
+
+        # Map with primitive values
+        field "metadata", :map, key: :string, value: :string
+
+        # Map with struct values
+        field "scores", :map, key: :string, value: :struct do
+          field "value", :double
+          field "timestamp", :int64
+        end
+      end
+
+    begin
+      # Create test data with nested structures as arrays (not hashes)
+      # to match the expected input format for write_rows
+      data = [
+        [
+          1, # id
+          "Alice", # name
+          { # address struct
+            "street" => "123 Main St",
+            "city" => "Springfield",
+            "zip" => 12_345,
+            "coordinates" => {
+              "latitude" => 37.7749,
+              "longitude" => -122.4194
+            }
+          },
+          %w[developer ruby], # tags
+          [ # contacts
+            { "name" => "Bob", "phone" => "555-1234", "primary" => true },
+            { "name" => "Charlie", "phone" => "555-5678", "primary" => false }
+          ],
+          { # metadata
+            "created" => "2023-01-01",
+            "updated" => "2023-02-15"
+          },
+          { # scores
+            "math" => {
+              "value" => 95.5,
+              "timestamp" => 1_672_531_200
+            },
+            "science" => {
+              "value" => 88.0,
+              "timestamp" => 1_672_617_600
+            }
+          }
+        ],
+        [
+          2, # id
+          "Bob", # name
+          { # address struct
+            "street" => "456 Oak Ave",
+            "city" => "Rivertown",
+            "zip" => 67_890,
+            "coordinates" => {
+              "latitude" => 40.7128,
+              "longitude" => -74.0060
+            }
+          },
+          ["designer"], # tags
+          [{ "name" => "Alice", "phone" => "555-4321", "primary" => true }], # contacts
+          { # metadata
+            "created" => "2023-01-15"
+          },
+          { # scores
+            "art" => {
+              "value" => 99.0,
+              "timestamp" => 1_673_740_800
+            }
+          }
+        ]
+      ]
+
+      # Write data to Parquet file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 2, rows.length
+
+      # Verify first row's complex nested structure
+      assert_equal 1, rows[0]["id"]
+      assert_equal "Alice", rows[0]["name"]
+
+      # Verify nested struct
+      assert_equal "123 Main St", rows[0]["address"]["street"]
+      assert_equal "Springfield", rows[0]["address"]["city"]
+      assert_equal 12_345, rows[0]["address"]["zip"]
+      assert_equal 37.7749, rows[0]["address"]["coordinates"]["latitude"]
+      assert_equal(-122.4194, rows[0]["address"]["coordinates"]["longitude"])
+
+      # Verify list of primitives
+      assert_equal %w[developer ruby], rows[0]["tags"]
+
+      # Verify list of structs
+      assert_equal 2, rows[0]["contacts"].length
+      assert_equal "Bob", rows[0]["contacts"][0]["name"]
+      assert_equal "555-1234", rows[0]["contacts"][0]["phone"]
+      assert_equal true, rows[0]["contacts"][0]["primary"]
+
+      # Verify maps
+      assert_equal "2023-01-01", rows[0]["metadata"]["created"]
+      assert_equal 95.5, rows[0]["scores"]["math"]["value"]
+      assert_equal 1_672_531_200, rows[0]["scores"]["math"]["timestamp"]
+
+      # Verify second row
+      assert_equal 2, rows[1]["id"]
+      assert_equal "Bob", rows[1]["name"]
+      assert_equal "Rivertown", rows[1]["address"]["city"]
+      assert_equal ["designer"], rows[1]["tags"]
+      assert_equal 1, rows[1]["contacts"].length
+      assert_equal "Alice", rows[1]["contacts"][0]["name"]
+      assert_equal "2023-01-15", rows[1]["metadata"]["created"]
+      assert_nil rows[1]["metadata"]["updated"]
+      assert_equal 99.0, rows[1]["scores"]["art"]["value"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_strict_utf8_enforcement
+    invalid_utf8_bytes = [0xC3, 0x28].pack("C*") # Example of an invalid sequence
+
+    temp_path = "test/strict_utf8_enforcement.parquet"
+    schema = [{ "payload" => "string" }]
+
+    begin
+      error =
+        assert_raises(EncodingError) do
+          Parquet.write_rows([[invalid_utf8_bytes]].each, schema: schema, write_to: temp_path)
+        end
+
+      assert_match(/invalid utf-8 sequence/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_reading_non_parquet_file
+    non_parquet_path = "test/non_parquet.txt"
+    File.write(non_parquet_path, "Just some text data.")
+
+    error = assert_raises(RuntimeError) { Parquet.each_row(non_parquet_path).to_a }
+
+    assert_match(/Failed to open file|Invalid Parquet/, error.message)
+  ensure
+    File.delete(non_parquet_path) if File.exist?(non_parquet_path)
+  end
+
+  def test_corrupted_parquet_file
+    temp_path = "test/a_data.parquet"
+    corrupted_path = "test/corrupted_data.parquet"
+
+    begin
+      # Create a simple parquet file first
+      schema = [{ "id" => "int32" }, { "name" => "string" }]
+      Parquet.write_rows([[1, "test"]].each, schema: schema, write_to: temp_path)
+
+      original_data = File.binread(temp_path)
+      # Truncate the file halfway to simulate corruption
+      File.binwrite(corrupted_path, original_data[0, original_data.size / 2])
+
+      error = assert_raises(RuntimeError) { Parquet.each_row(corrupted_path).to_a }
+
+      assert_match(/Failed to open file|EOF|Parquet error/, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+      File.delete(corrupted_path) if File.exist?(corrupted_path)
+    end
+  end
+
+  def test_mismatched_schema_write_rows
+    temp_path = "test/mismatched_schema_rows.parquet"
+    schema = [{ "id" => "int64" }, { "name" => "string" }]
+
+    # Our data enumerator incorrectly yields an array of length 3
+    data = [
+      [1, "Alice", "ExtraColumn"] # 3 columns, but schema has only 2
+    ]
+
+    begin
+      error = assert_raises(RuntimeError) { Parquet.write_rows(data.each, schema: schema, write_to: temp_path) }
+      assert_match(/Row length|schema length|mismatch/, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_enumerator_interrupt_partial_write
+    temp_path = "test/partial_write.parquet"
+    schema = [{ "id" => "int64" }, { "name" => "string" }]
+
+    enumerator =
+      Enumerator.new do |yielder|
+        yielder << [1, "Alice"]
+        yielder << [2, "Bob"]
+        raise "Simulated stream failure"
+      end
+
+    begin
+      error = assert_raises(RuntimeError) { Parquet.write_rows(enumerator, schema: schema, write_to: temp_path) }
+      assert_equal("Simulated stream failure", error.message)
+
+      # The file may exist but might be partially written or truncated.
+      assert File.exist?(temp_path)
+
+      # Optionally: attempt to read what is there, or confirm it's not valid.
+      # We'll just check that it doesn't catastrophically break reading API:
+      assert_raises(RuntimeError) { Parquet.each_row(temp_path).to_a }
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_decimal_out_of_range
+    temp_path = "test/decimal_out_of_range.parquet"
+    schema = [{ "small_int" => "int8" }]
+
+    # Data enumerator yields a value out of int8 range
+    data = [
+      [9999] # far larger than int8's max of 127
+    ]
+
+    begin
+      error =
+        assert_raises(RangeError, RuntimeError) { Parquet.write_rows(data.each, schema: schema, write_to: temp_path) }
+      assert_match(/fixnum too big to convert into/, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_duplicate_columns_different_order
+    temp_path = "test/repeated_different_order.parquet"
+    # We'll create a file that has repeated columns or changed order.
+    # For simplicity, write a small file:
+    schema = [{ "col" => "int32" }, { "col" => "int32" }, { "another_col" => "string" }]
+
+    begin
+      error =
+        assert_raises(ArgumentError) do
+          Parquet.write_rows([[1, 2, "one-two"], [3, 4, "three-four"]].each, schema: schema, write_to: temp_path)
+        end
+
+      assert_match(/Duplicate field names in root level schema/, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_dsl_struct_missing_subfields
+    temp_path = "test/dsl_struct_missing_subfields.parquet"
+
+    schema =
+      Parquet::Schema.define do
+        field "id", :int32
+        field "info", :struct do
+          field "x", :int32
+          field "y", :int32
+          field "z", :string
+        end
+      end
+
+    # Notice row data's `info` only has x and y, missing z
+    data = [[1, { "x" => 100, "y" => 200 }]]
+
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 1, rows.size
+      assert_equal 1, rows[0]["id"]
+      assert_equal 100, rows[0]["info"]["x"]
+      assert_equal 200, rows[0]["info"]["y"]
+      assert_nil rows[0]["info"]["z"] # The missing subfield
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_dsl_schema_writer
+    temp_path = "test/dsl_schema_writer.parquet"
+
+    schema =
+      Parquet::Schema.define do
+        field "id", :int32
+        field "name", :string
+        field "active", :boolean
+        field "score", :float
+        field "created_at", :timestamp_millis
+        field "tags", :list, item: :string
+        field "metadata", :map, key: :string, value: :string
+        field "nested", :struct do
+          field "x", :int32
+          field "y", :int32
+          field "deep", :struct do
+            field "value", :string
+          end
+        end
+        field "numbers", :list, item: :int64
+        field "binary_data", :binary
+      end
+
+    data = [
+      [
+        1,
+        "John Doe",
+        true,
+        95.5,
+        Time.now,
+        %w[ruby parquet],
+        { "version" => "1.0", "env" => "test" },
+        { "x" => 10, "y" => 20, "deep" => { "value" => "nested value" } },
+        [100, 200, 300],
+        "binary\x00data".b
+      ],
+      [
+        2,
+        "Jane Smith",
+        false,
+        82.3,
+        Time.now - 86_400,
+        %w[data processing],
+        { "status" => "active" },
+        { "x" => 30, "y" => 40, "deep" => { "value" => "another nested value" } },
+        [400, 500],
+        "more\x00binary".b
+      ]
+    ]
+
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 2, rows.size
+
+      # First row
+      assert_equal 1, rows[0]["id"]
+      assert_equal "John Doe", rows[0]["name"]
+      assert_equal true, rows[0]["active"]
+      assert_in_delta 95.5, rows[0]["score"], 0.001
+      assert_instance_of Time, rows[0]["created_at"]
+      assert_equal %w[ruby parquet], rows[0]["tags"]
+      assert_equal({ "version" => "1.0", "env" => "test" }, rows[0]["metadata"])
+      assert_equal 10, rows[0]["nested"]["x"]
+      assert_equal 20, rows[0]["nested"]["y"]
+      assert_equal "nested value", rows[0]["nested"]["deep"]["value"]
+      assert_equal [100, 200, 300], rows[0]["numbers"]
+      assert_equal "binary\x00data".b, rows[0]["binary_data"]
+
+      # Second row
+      assert_equal 2, rows[1]["id"]
+      assert_equal "Jane Smith", rows[1]["name"]
+      assert_equal false, rows[1]["active"]
+      assert_in_delta 82.3, rows[1]["score"], 0.001
+      assert_instance_of Time, rows[1]["created_at"]
+      assert_equal %w[data processing], rows[1]["tags"]
+      assert_equal({ "status" => "active" }, rows[1]["metadata"])
+      assert_equal 30, rows[1]["nested"]["x"]
+      assert_equal 40, rows[1]["nested"]["y"]
+      assert_equal "another nested value", rows[1]["nested"]["deep"]["value"]
+      assert_equal [400, 500], rows[1]["numbers"]
+      assert_equal "more\x00binary".b, rows[1]["binary_data"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_schema_validation_for_non_null_fields
+    schema =
+      Parquet::Schema.define do
+        field :id, :int64, nullable: false
+        field :name, :string, nullable: false
+        field :optional_field, :string, nullable: true
+      end
+
+    # Valid data with all required fields
+    valid_data = [[1, "Test Name", "optional value"]]
+
+    # Missing required field (name)
+    invalid_data = [[2, nil, "optional value"]]
+
+    # Test valid data works
+    temp_path = "test_validation_valid.parquet"
+    begin
+      Parquet.write_rows(valid_data.each, schema: schema, write_to: temp_path)
+      assert File.exist?(temp_path), "Parquet file with valid data should be created"
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+
+    # Test invalid data raises error
+    temp_path = "test_validation_invalid.parquet"
+    begin
+      error = assert_raises { Parquet.write_rows(invalid_data.each, schema: schema, write_to: temp_path) }
+      assert_match(/Cannot write nil value for non-nullable field/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_complex_schema_with_nested_types
+    schema =
+      Parquet::Schema.define do
+        field :id, :int32, nullable: false
+        field :name, :string
+        field :age, :int16
+        field :weight, :float
+        field :active, :boolean
+        field :last_seen, :timestamp_millis, nullable: true
+        field :scores, :list, item: :int32
+        field :details, :struct do
+          field :name, :string
+          field :score, :double
+        end
+        field :tags, :list, item: :string
+        field :metadata, :map, key: :string, value: :string
+        field :properties, :map, key: :string, value: :int32
+        field :complex_map, :map, key: :string, value: :struct do
+          field :count, :int32
+          field :description, :string
+        end
+        field :nested_lists, :list, item: :list do
+          field :item, :string
+        end
+        field :map_of_lists, :map, key: :string, value: :list do
+          field :item, :int32
+        end
+      end
+
+    # Create test data with all the complex types - as an array of arrays for write_rows
+    test_data = [
+      [
+        1, # id
+        "John Doe", # name
+        30, # age
+        75.5, # weight
+        true, # active
+        Time.now, # last_seen
+        [85, 90, 95], # scores
+        { # details struct
+          "name" => "John's Details",
+          "score" => 92.7
+        },
+        %w[ruby parquet test], # tags
+        { # metadata
+          "role" => "admin",
+          "department" => "engineering"
+        },
+        { # properties
+          "priority" => 1,
+          "status" => 2
+        },
+        { # complex_map
+          "feature1" => {
+            "count" => 5,
+            "description" => "Main feature"
+          },
+          "feature2" => {
+            "count" => 3,
+            "description" => "Secondary feature"
+          }
+        },
+        [%w[a b], %w[c d e]], # nested_lists
+        { # map_of_lists
+          "group1" => [1, 2, 3],
+          "group2" => [4, 5, 6]
+        }
+      ]
+    ]
+
+    temp_path = "test_complex_schema.parquet"
+    begin
+      # Write the data using write_rows
+      Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
+
+      # Read it back and verify using each_row
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 1, rows.size
+
+      # Verify all fields
+      row = rows[0]
+      assert_equal 1, row["id"]
+      assert_equal "John Doe", row["name"]
+      assert_equal 30, row["age"]
+      assert_in_delta 75.5, row["weight"], 0.001
+      assert_equal true, row["active"]
+      assert_instance_of Time, row["last_seen"]
+      assert_equal [85, 90, 95], row["scores"]
+      assert_equal "John's Details", row["details"]["name"]
+      assert_in_delta 92.7, row["details"]["score"], 0.001
+      assert_equal %w[ruby parquet test], row["tags"]
+      assert_equal({ "role" => "admin", "department" => "engineering" }, row["metadata"])
+      assert_equal({ "priority" => 1, "status" => 2 }, row["properties"])
+
+      # Check complex map
+      assert_equal 5, row["complex_map"]["feature1"]["count"]
+      assert_equal "Main feature", row["complex_map"]["feature1"]["description"]
+      assert_equal 3, row["complex_map"]["feature2"]["count"]
+      assert_equal "Secondary feature", row["complex_map"]["feature2"]["description"]
+
+      # Check nested lists
+      assert_equal %w[a b], row["nested_lists"][0]
+      assert_equal %w[c d e], row["nested_lists"][1]
+
+      # Check map of lists
+      assert_equal [1, 2, 3], row["map_of_lists"]["group1"]
+      assert_equal [4, 5, 6], row["map_of_lists"]["group2"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
   end
 end

@@ -1,12 +1,12 @@
+use crate::ParserResultType;
 use magnus::{
     scan_args::{get_kwargs, scan_args},
     value::ReprValue,
     Error, RString, Ruby, Symbol, Value,
 };
 
-use crate::ParserResultType;
-
-fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, Error> {
+/// Convert a Ruby Value to a String, handling both String and Symbol types
+pub fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, Error> {
     if value.is_nil() {
         Ok(None)
     } else if value.is_kind_of(ruby.class_string()) {
@@ -33,9 +33,10 @@ pub struct ParquetRowsArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub strict: bool,
+    pub logger: Option<Value>,
 }
 
-/// Parse common arguments for CSV parsing
+/// Parse common arguments for parquet row iteration
 pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRowsArgs, Error> {
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
     let (to_read,) = parsed_args.required;
@@ -47,12 +48,13 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
             Option<Option<Value>>,
             Option<Option<Vec<String>>>,
             Option<Option<bool>>,
+            Option<Option<Value>>,
         ),
         (),
     >(
         parsed_args.keywords,
         &[],
-        &["result_type", "columns", "strict"],
+        &["result_type", "columns", "strict", "logger"],
     )?;
 
     let result_type: ParserResultType = match kwargs
@@ -84,12 +86,14 @@ pub fn parse_parquet_rows_args(ruby: &Ruby, args: &[Value]) -> Result<ParquetRow
     };
 
     let strict = kwargs.optional.2.flatten().unwrap_or(true);
+    let logger = kwargs.optional.3.flatten();
 
     Ok(ParquetRowsArgs {
         to_read,
         result_type,
         columns: kwargs.optional.1.flatten(),
         strict,
+        logger,
     })
 }
 
@@ -100,9 +104,10 @@ pub struct ParquetColumnsArgs {
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
     pub strict: bool,
+    pub logger: Option<Value>,
 }
 
-/// Parse common arguments for CSV parsing
+/// Parse common arguments for parquet column iteration
 pub fn parse_parquet_columns_args(
     ruby: &Ruby,
     args: &[Value],
@@ -118,12 +123,13 @@ pub fn parse_parquet_columns_args(
             Option<Option<Vec<String>>>,
             Option<Option<usize>>,
             Option<Option<bool>>,
+            Option<Option<Value>>,
         ),
         (),
     >(
         parsed_args.keywords,
         &[],
-        &["result_type", "columns", "batch_size", "strict"],
+        &["result_type", "columns", "batch_size", "strict", "logger"],
     )?;
 
     let result_type: ParserResultType = match kwargs
@@ -154,11 +160,25 @@ pub fn parse_parquet_columns_args(
         None => ParserResultType::Hash,
     };
 
+    let batch_size = kwargs.optional.2.flatten();
+    if let Some(sz) = batch_size {
+        if sz <= 0 {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("batch_size must be > 0, got {}", sz),
+            ));
+        }
+    }
+
+    let strict = kwargs.optional.3.flatten().unwrap_or(true);
+    let logger = kwargs.optional.4.flatten();
+
     Ok(ParquetColumnsArgs {
         to_read,
         result_type,
         columns: kwargs.optional.1.flatten(),
-        batch_size: kwargs.optional.2.flatten(),
-        strict: kwargs.optional.3.flatten().unwrap_or(true),
+        batch_size,
+        strict,
+        logger,
     })
 }

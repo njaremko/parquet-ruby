@@ -1,6 +1,7 @@
 mod allocator;
 mod enumerator;
 pub mod header_cache;
+mod logger;
 mod reader;
 mod ruby_reader;
 mod types;

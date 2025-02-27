@@ -1,6 +1,8 @@
+use crate::reader::ReaderError;
+
 use super::*;
 
-pub fn parse_zoned_timestamp(value: &ParquetValue) -> jiff::Timestamp {
+pub fn parse_zoned_timestamp(value: &ParquetValue) -> Result<jiff::Timestamp, ReaderError> {
     let (ts, tz) = match value {
         ParquetValue::TimestampSecond(ts, tz) => (jiff::Timestamp::from_second(*ts).unwrap(), tz),
         ParquetValue::TimestampMillis(ts, tz) => {
@@ -12,7 +14,12 @@ pub fn parse_zoned_timestamp(value: &ParquetValue) -> jiff::Timestamp {
         ParquetValue::TimestampNanos(ts, tz) => {
             (jiff::Timestamp::from_nanosecond(*ts as i128).unwrap(), tz)
         }
-        _ => panic!("Invalid timestamp value"),
+        _ => {
+            return Err(MagnusError::new(
+                magnus::exception::type_error(),
+                "Invalid timestamp value".to_string(),
+            ))?
+        }
     };
 
     // If timezone is provided, convert to zoned timestamp
@@ -42,17 +49,17 @@ pub fn parse_zoned_timestamp(value: &ParquetValue) -> jiff::Timestamp {
 
             // Create fixed timezone
             let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset((total_minutes / 60) as i8));
-            ts.to_zoned(tz).timestamp()
+            Ok(ts.to_zoned(tz).timestamp())
         } else {
             // Try IANA timezone
             match ts.in_tz(&tz) {
-                Ok(zoned) => zoned.timestamp(),
-                Err(_) => ts, // Fall back to UTC if timezone is invalid
+                Ok(zoned) => Ok(zoned.timestamp()),
+                Err(_) => Ok(ts), // Fall back to UTC if timezone is invalid
             }
         }
     } else {
         // No timezone provided - treat as UTC
-        ts
+        Ok(ts)
     }
 }
 
@@ -62,13 +69,16 @@ macro_rules! impl_timestamp_conversion {
     ($value:expr, $unit:ident, $handle:expr) => {{
         match $value {
             ParquetValue::$unit(ts, tz) => {
-                let ts = parse_zoned_timestamp(&ParquetValue::$unit(ts, tz));
+                let ts = parse_zoned_timestamp(&ParquetValue::$unit(ts, tz))?;
                 let time_class = $handle.class_time();
                 Ok(time_class
                     .funcall::<_, _, Value>("parse", (ts.to_string(),))?
                     .into_value_with($handle))
             }
-            _ => panic!("Invalid timestamp type"),
+            _ => Err(ReaderError::Ruby(MagnusErrorWrapper(MagnusError::new(
+                magnus::exception::type_error(),
+                "Invalid timestamp type".to_string(),
+            )))),
         }
     }};
 }

@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.5.0 (Unreleased)
+
+### New Features & Enhancements
+
+1. **Schema DSL for Complex Data Types**
+   - Introduced a **new DSL** (Domain-Specific Language) for defining Parquet schemas in Ruby.
+   - You can now describe **structs**, **lists**, and **maps** in a more expressive way:
+     ```ruby
+      schema = Parquet::Schema.define do
+        field :id, :int32, nullable: false
+        field :name, :string
+        field :age, :int16
+        field :weight, :float
+        field :active, :boolean
+        field :last_seen, :timestamp_millis, nullable: true
+        field :scores, :list, item: :int32
+        field :details, :struct do
+          field :name, :string
+          field :score, :double
+        end
+        field :tags, :list, item: :string
+        field :metadata, :map, key: :string, value: :string
+        field :properties, :map, key: :string, value: :int32
+        field :complex_map, :map, key: :string, value: :struct do
+          field :count, :int32
+          field :description, :string
+        end
+        field :nested_lists, :list, item: :list do
+          field :item, :string
+        end
+        field :map_of_lists, :map, key: :string, value: :list do
+          field :item, :int32
+        end
+      end
+     ```
+   - This DSL supports nested (`struct` within `struct`, `list` of `struct`, etc.) and required/optional fields (`nullable: true`), making it easier to handle complex Parquet schemas.
+
+2. **Writing Maps, Structs, and Lists**
+   - The gem now supports **nested data** writes for:
+     - **Maps** (`map<keyType, valueType>`), including map of primitives or map of nested types.
+     - **Lists** (`list<T>`), including lists of structs or lists of primitives.
+     - **Structs** (nested structures), letting you store records that have sub-records.
+   - This feature is integrated into both the row-based and column-based writing APIs.
+   - Reading these complex types (`each_row`, `each_column`) has been updated as well, so lists and maps yield the expected Ruby arrays and hashes.
+
+3. **Logger Integration**
+   - Added support for passing in a **Ruby logger** object for the gem’s internal logging.
+   - The gem checks for an optional `logger:` keyword argument in methods and will use it if provided.
+   - We'll respect the level returned by `logger.level` otherwise you can also override the log level with the environment variable **`PARQUET_GEM_LOG_LEVEL`** (e.g., `export PARQUET_GEM_LOG_LEVEL=debug`).
+   - When no logger is provided, important warnings will print to `stderr`.
+
+4. **Optional Slow Tests in CI**
+   - In the GitHub Actions workflow (`ruby.yml`), we now set the environment variable `RUN_SLOW_TESTS=true`.
+   - This allows the test suite to include (or skip) certain slow tests. In your local development, you can unset or override this if you want to skip longer-running tests.
+
+### Other Changes
+
+- **Internal Refactoring**:
+  - Moved some reading/writing logic into `common.rs` and `logger.rs` for clearer code organization.
+  - Introduced a new `RubyLogger` wrapper in Rust for bridging Ruby’s logger with Rust logging methods.
+  - Streamlined the enumerator creation code to handle `logger` and `strict` mode more consistently.
+  - Improved error-handling wrappers (`MagnusErrorWrapper`) around Rust’s `ParquetError` to raise clearer Ruby exceptions.
+
+### Breaking Changes or Important Notes
+
+- **Non-Null Fields in DSL**: In the new schema DSL, you can mark fields as `nullable: false`. Attempting to write a `nil` value into a non-nullable field will now raise an exception. Previously, the gem did not strictly enforce non-null constraints.
+- **Strict UTF-8 Checks**: Writing invalid UTF-8 strings (e.g., corrupted byte sequences) will now raise an `EncodingError` rather than silently truncating or converting them.
+- **Complex Nested Fields**: If you attempt to write nested lists/maps/structs but pass incompatible Ruby data (like an array for a map or a simple string instead of a struct-hash), you’ll get a clearer runtime error. The gem enforces that your data matches the declared schema shape.
+
+### Migration Tips
+
+- If you already used the older “legacy” schema format (an array of `{"name" => "type"}` pairs), it will continue to work. However, you can now opt into the **DSL** approach for more nested/complex use cases.
+
 ## 0.4.2
 
 - When no schema is provided. Default to `f0`, `f1`, `f2`, etc.
