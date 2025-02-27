@@ -19,12 +19,10 @@ use crate::types::ParquetGemError;
 /// and provide a standard Read implementation for them.
 pub enum RubyReader {
     String {
-        ruby: Arc<Ruby>,
         inner: Opaque<RString>,
         offset: usize,
     },
     RubyIoLike {
-        ruby: Arc<Ruby>,
         inner: Opaque<Value>,
     },
     NativeProxyIoLike {
@@ -40,7 +38,6 @@ impl RubyReader {
     pub fn new(ruby: Arc<Ruby>, value: Value) -> Result<Self, ParquetGemError> {
         if RubyReader::is_seekable_io_like(&value) {
             Ok(RubyReader::RubyIoLike {
-                ruby,
                 inner: Opaque::from(value),
             })
         } else if RubyReader::is_io_like(&value) {
@@ -49,7 +46,6 @@ impl RubyReader {
 
             // This is safe, because we won't call seek
             let inner_readable = RubyReader::RubyIoLike {
-                ruby: ruby.clone(),
                 inner: Opaque::from(value),
             };
             let mut reader = BufReader::new(inner_readable);
@@ -68,7 +64,6 @@ impl RubyReader {
                 .funcall::<_, _, RString>("to_str", ())
                 .or_else(|_| value.funcall::<_, _, RString>("to_s", ()))?;
             Ok(RubyReader::String {
-                ruby,
                 inner: Opaque::from(string_content),
                 offset: 0,
             })
@@ -89,10 +84,10 @@ impl RubyReader {
 
 impl Seek for RubyReader {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let ruby = unsafe { Ruby::get_unchecked() };
         match self {
             RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.seek(pos),
             RubyReader::String {
-                ruby,
                 inner,
                 offset: original_offset,
             } => {
@@ -113,7 +108,7 @@ impl Seek for RubyReader {
                 *original_offset = new_offset.min(unwrapped_inner.len());
                 Ok(*original_offset as u64)
             }
-            RubyReader::RubyIoLike { ruby, inner } => {
+            RubyReader::RubyIoLike { inner } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
 
                 let (whence, ruby_offset) = match pos {
@@ -138,13 +133,10 @@ impl Seek for RubyReader {
 
 impl Read for RubyReader {
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+        let ruby = unsafe { Ruby::get_unchecked() };
         match self {
             RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.read(buf),
-            RubyReader::String {
-                ruby,
-                inner,
-                offset,
-            } => {
+            RubyReader::String { inner, offset } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
 
                 let string_buffer = unsafe { unwrapped_inner.as_slice() };
@@ -160,7 +152,7 @@ impl Read for RubyReader {
 
                 Ok(copy_size)
             }
-            RubyReader::RubyIoLike { ruby, inner } => {
+            RubyReader::RubyIoLike { inner } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
 
                 let bytes = unwrapped_inner
@@ -184,17 +176,14 @@ impl Read for RubyReader {
 
 impl Length for RubyReader {
     fn len(&self) -> u64 {
+        let ruby = unsafe { Ruby::get_unchecked() };
         match self {
             RubyReader::NativeProxyIoLike { proxy_file } => proxy_file.len(),
-            RubyReader::String {
-                ruby,
-                inner,
-                offset: _,
-            } => {
+            RubyReader::String { inner, offset: _ } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
                 unwrapped_inner.len() as u64
             }
-            RubyReader::RubyIoLike { ruby, inner } => {
+            RubyReader::RubyIoLike { inner } => {
                 let unwrapped_inner = ruby.get_inner(*inner);
 
                 // Get current position
