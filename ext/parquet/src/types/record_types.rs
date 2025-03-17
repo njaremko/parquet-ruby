@@ -29,7 +29,11 @@ impl<S: BuildHasher + Default> TryIntoValue for RowRecord<S> {
                 Ok(handle.into_value(ary))
             }
             RowRecord::Map(map) => {
+                #[cfg(ruby_lt_3_2)]
                 let hash = handle.hash_new_capa(map.len());
+
+                #[cfg(not(ruby_lt_3_2))]
+                let hash = handle.hash_new();
 
                 let mut values: [Value; 128] = [handle.qnil().as_value(); 128];
                 let mut i = 0;
@@ -78,7 +82,11 @@ impl<S: BuildHasher + Default> TryIntoValue for ColumnRecord<S> {
                 Ok(ary.into_value_with(handle))
             }
             ColumnRecord::Map(map) => {
+                #[cfg(ruby_lt_3_2)]
                 let hash = handle.hash_new_capa(map.len());
+
+                #[cfg(not(ruby_lt_3_2))]
+                let hash = handle.hash_new();
 
                 let mut values: [Value; 128] = [handle.qnil().as_value(); 128];
                 let mut i = 0;
@@ -175,9 +183,13 @@ impl TryIntoValue for ParquetField {
                 Ok(ary.into_value_with(handle))
             }
             Field::MapInternal(map) => {
-                let entries = map.entries();
-                let hash = handle.hash_new_capa(entries.len());
-                entries.iter().try_for_each(|(k, v)| {
+                #[cfg(ruby_lt_3_2)]
+                let hash = handle.hash_new_capa(map.len());
+
+                #[cfg(not(ruby_lt_3_2))]
+                let hash = handle.hash_new();
+
+                map.entries().iter().try_for_each(|(k, v)| {
                     hash.aset(
                         ParquetField(k.clone(), self.1).try_into_value_with(handle)?,
                         ParquetField(v.clone(), self.1).try_into_value_with(handle)?,

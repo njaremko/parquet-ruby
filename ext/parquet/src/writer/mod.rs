@@ -29,7 +29,6 @@ use crate::{
     IoLikeValue, ParquetSchemaType as PST, ParquetWriteArgs, SchemaField, SendableWrite,
 };
 
-const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
 const SAMPLE_SIZE: usize = 100;
 const MIN_BATCH_SIZE: usize = 10;
 const INITIAL_BATCH_SIZE: usize = 100;

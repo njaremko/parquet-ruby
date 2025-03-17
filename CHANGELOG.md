@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+- Fix support for Ruby 3.1
+
+## 0.5.1
+- Revert a change Arc usage, it was pointless.
+
 ## 0.5.0
 
 ### New Features & Enhancements

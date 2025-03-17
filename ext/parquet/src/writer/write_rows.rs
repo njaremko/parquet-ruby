@@ -1,7 +1,7 @@
 use super::{
     build_column_collectors_from_dsl, copy_temp_file_to_io_like, create_writer,
     parse_parquet_write_args, DEFAULT_MEMORY_THRESHOLD, INITIAL_BATCH_SIZE, MIN_BATCH_SIZE,
-    MIN_SAMPLES_FOR_ESTIMATE, SAMPLE_SIZE,
+    SAMPLE_SIZE,
 };
 use crate::{
     logger::RubyLogger,
@@ -17,6 +17,8 @@ use magnus::{
 };
 use rand::Rng;
 use std::sync::Arc;
+
+const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
 
 #[inline]
 pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {

@@ -160,7 +160,12 @@ impl TryIntoValue for ParquetValue {
                 Ok(ary.into_value_with(handle))
             }
             ParquetValue::Map(m) => {
+                #[cfg(ruby_lt_3_2)]
                 let hash = handle.hash_new_capa(m.len());
+
+                #[cfg(not(ruby_lt_3_2))]
+                let hash = handle.hash_new();
+
                 m.into_iter().try_for_each(|(k, v)| {
                     hash.aset(
                         k.try_into_value_with(handle)?,
