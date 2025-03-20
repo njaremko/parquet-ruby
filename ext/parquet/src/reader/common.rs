@@ -12,7 +12,7 @@ use magnus::{Error as MagnusError, Ruby, Value};
 
 use crate::header_cache::StringCache;
 use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
-use crate::types::{ParquetGemError, ParserResultType, TryIntoValue};
+use crate::types::{ParquetGemError, TryIntoValue};
 use crate::ColumnRecord;
 
 /// Opens a parquet file or IO-like object for reading
