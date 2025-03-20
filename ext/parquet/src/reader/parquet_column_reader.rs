@@ -76,13 +76,13 @@ fn parse_parquet_columns_impl<'a>(
         Either::Right(readable) => create_batch_reader(readable, &columns, batch_size)?,
     };
 
-    // Handle empty file case
-    if handle_empty_file(&ruby, &schema, num_rows)? {
-        return Ok(ruby.qnil().into_value_with(&ruby));
-    }
-
     match result_type {
         ParserResultType::Hash => {
+            // For hash return type, we need to return a hash with column names pointing at empty arrays
+            if handle_empty_file(&ruby, &schema, num_rows)? {
+                return Ok(ruby.qnil().into_value_with(&ruby));
+            }
+
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
             let iter = batch_reader.map(move |batch| {
