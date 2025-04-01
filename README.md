@@ -344,6 +344,7 @@ The rules are:
 4. When both are provided, uses the provided values
 
 # Sample data with nested structures
+```ruby
 data = [
   [
     1,                            # id
