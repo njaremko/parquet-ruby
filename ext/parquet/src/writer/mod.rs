@@ -111,13 +111,13 @@ pub fn parse_parquet_write_args(
     if let Some(type_val) = type_val {
         // If it has a type: :struct, it's the new DSL format
         // Use parse_string_or_symbol to handle both String and Symbol values
-        let ttype = parse_string_or_symbol(&ruby, type_val)?;
+        let ttype = parse_string_or_symbol(ruby, type_val)?;
         if let Some(ref type_str) = ttype {
             if type_str == "struct" {
                 // Parse using the new schema approach
-                let schema_node = crate::parse_schema_node(&ruby, schema_value)?;
+                let schema_node = crate::parse_schema_node(ruby, schema_value)?;
 
-                validate_schema_node(&ruby, &schema_node)?;
+                validate_schema_node(ruby, &schema_node)?;
 
                 return Ok(ParquetWriteArgs {
                     read_from,
@@ -143,22 +143,21 @@ pub fn parse_parquet_write_args(
                         "Schema fields must be an array",
                     )
                 })?
-                .len()
-                == 0)
+                .is_empty())
     {
         // If schema is nil or an empty array, we need to peek at the first value to determine column count
         let first_value = read_from.funcall::<_, _, Value>("peek", ())?;
         // Default to nullable:true for auto-inferred fields
-        crate::infer_schema_from_first_row(&ruby, first_value, true)?
+        crate::infer_schema_from_first_row(ruby, first_value, true)?
     } else {
         // Legacy array format - use our centralized parser
-        crate::parse_legacy_schema(&ruby, schema_value)?
+        crate::parse_legacy_schema(ruby, schema_value)?
     };
 
     // Convert the legacy schema fields to SchemaNode (DSL format)
-    let schema_node = crate::legacy_schema_to_dsl(&ruby, schema_fields)?;
+    let schema_node = crate::legacy_schema_to_dsl(ruby, schema_fields)?;
 
-    validate_schema_node(&ruby, &schema_node)?;
+    validate_schema_node(ruby, &schema_node)?;
 
     Ok(ParquetWriteArgs {
         read_from,
@@ -195,6 +194,9 @@ fn arrow_data_type_to_parquet_schema_type(dt: &DataType) -> Result<ParquetSchema
         }
         DataType::Float32 => Ok(PST::Primitive(PrimitiveType::Float32)),
         DataType::Float64 => Ok(PST::Primitive(PrimitiveType::Float64)),
+        DataType::Decimal128(precision, scale) => Ok(PST::Primitive(PrimitiveType::Decimal128(
+            *precision, *scale,
+        ))),
         DataType::Date32 => Ok(PST::Primitive(PrimitiveType::Date32)),
         DataType::Date64 => {
             // Our code typically uses Date32 or Timestamp for 64. But Arrow has Date64
@@ -414,15 +416,21 @@ fn create_writer(
     compression: Option<String>,
 ) -> Result<WriterOutput, ParquetGemError> {
     // Create writer properties with compression based on the option
+    let compression_setting = match compression.map(|s| s.to_lowercase()).as_deref() {
+        Some("none") | Some("uncompressed") => Ok(Compression::UNCOMPRESSED),
+        Some("snappy") => Ok(Compression::SNAPPY),
+        Some("gzip") => Ok(Compression::GZIP(GzipLevel::default())),
+        Some("lz4") => Ok(Compression::LZ4),
+        Some("zstd") => Ok(Compression::ZSTD(ZstdLevel::default())),
+        None => Ok(Compression::UNCOMPRESSED),
+        other => Err(MagnusError::new(
+            magnus::exception::arg_error(),
+            format!("Invalid compression option: {:?}", other),
+        )),
+    }?;
+
     let props = WriterProperties::builder()
-        .set_compression(match compression.as_deref() {
-            Some("none") | Some("uncompressed") => Compression::UNCOMPRESSED,
-            Some("snappy") => Compression::SNAPPY,
-            Some("gzip") => Compression::GZIP(GzipLevel::default()),
-            Some("lz4") => Compression::LZ4,
-            Some("zstd") => Compression::ZSTD(ZstdLevel::default()),
-            _ => Compression::UNCOMPRESSED,
-        })
+        .set_compression(compression_setting)
         .build();
 
     if write_to.is_kind_of(ruby.class_string()) {

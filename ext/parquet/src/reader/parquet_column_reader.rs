@@ -10,26 +10,25 @@ use either::Either;
 use magnus::IntoValue;
 use magnus::{Error as MagnusError, Ruby, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::rc::Rc;
+use std::sync::OnceLock;
 
 use super::common::{
     create_batch_reader, handle_block_or_enum, handle_empty_file, open_parquet_source,
 };
 
 #[inline]
-pub fn parse_parquet_columns<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
+pub fn parse_parquet_columns(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
-    Ok(
-        parse_parquet_columns_impl(Arc::new(ruby), rb_self, args).map_err(|e| {
-            let z: MagnusError = e.into();
-            z
-        })?,
-    )
+    parse_parquet_columns_impl(Rc::new(ruby), rb_self, args).map_err(|e| {
+        let z: MagnusError = e.into();
+        z
+    })
 }
 
 #[inline]
-fn parse_parquet_columns_impl<'a>(
-    ruby: Arc<Ruby>,
+fn parse_parquet_columns_impl(
+    ruby: Rc<Ruby>,
     rb_self: Value,
     args: &[Value],
 ) -> Result<Value, ParquetGemError> {
@@ -112,8 +111,8 @@ fn parse_parquet_columns_impl<'a>(
                         .try_for_each(|(i, column)| {
                             let header = local_headers[i];
                             let values = ParquetValueVec::try_from(ArrayWrapper {
-                                array: &*column,
-                                strict: strict,
+                                array: column,
+                                strict,
                             })?;
                             map.insert(header, values.into_inner());
                             Ok::<_, ParquetGemError>(())
@@ -133,11 +132,11 @@ fn parse_parquet_columns_impl<'a>(
                 batch.map_err(ParquetGemError::Arrow).and_then(|batch| {
                     let vec = batch
                         .columns()
-                        .into_iter()
+                        .iter()
                         .map(|column| {
                             let values = ParquetValueVec::try_from(ArrayWrapper {
-                                array: &*column,
-                                strict: strict,
+                                array: column,
+                                strict,
                             })?;
                             Ok::<_, ParquetGemError>(values.into_inner())
                         })

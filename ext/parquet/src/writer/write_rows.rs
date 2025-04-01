@@ -16,14 +16,14 @@ use magnus::{
     value::ReprValue, Error as MagnusError, RArray, RHash, Ruby, Symbol, TryConvert, Value,
 };
 use rand::Rng;
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
 
 #[inline]
 pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
-    write_rows_impl(Arc::new(ruby), args).map_err(|e| {
+    write_rows_impl(Rc::new(ruby), args).map_err(|e| {
         let z: MagnusError = e.into();
         z
     })?;
@@ -31,7 +31,7 @@ pub fn write_rows(args: &[Value]) -> Result<(), MagnusError> {
 }
 
 #[inline]
-fn write_rows_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemError> {
+fn write_rows_impl(ruby: Rc<Ruby>, args: &[Value]) -> Result<(), ParquetGemError> {
     let ParquetWriteArgs {
         read_from,
         write_to,
@@ -83,8 +83,8 @@ fn write_rows_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemErro
                         })?;
                         let row_size = estimate_single_row_size(&row_array, &column_collectors)?;
                         size_samples.push(row_size);
-                    } else if rng.random_range(0..=total_rows) < sample_size as usize {
-                        let idx = rng.random_range(0..sample_size as usize);
+                    } else if rng.random_range(0..=total_rows) < sample_size {
+                        let idx = rng.random_range(0..sample_size);
                         let row_array = RArray::from_value(row).ok_or_else(|| {
                             MagnusError::new(ruby.exception_type_error(), "Row must be an array")
                         })?;
@@ -115,12 +115,12 @@ fn write_rows_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemErro
                         }
                         break;
                     }
-                    return Err(e)?;
+                    Err(e)?;
                 }
             }
         }
     } else {
-        return Err(MagnusError::new(
+        Err(MagnusError::new(
             magnus::exception::type_error(),
             "read_from must be an Enumerator".to_string(),
         ))?;
@@ -257,6 +257,7 @@ pub fn estimate_value_size(
         | PST::Primitive(PrimitiveType::UInt64)
         | PST::Primitive(PrimitiveType::Float64) => Ok(8),
         PST::Primitive(PrimitiveType::Boolean) => Ok(1),
+        PST::Primitive(PrimitiveType::Decimal128(_, _)) => Ok(16),
         PST::Primitive(PrimitiveType::Date32)
         | PST::Primitive(PrimitiveType::TimestampMillis)
         | PST::Primitive(PrimitiveType::TimestampMicros) => Ok(8),
@@ -429,15 +430,13 @@ pub fn estimate_value_size(
                             if let Some(field_value) = hash.get(&*field.name) {
                                 total_fields_size +=
                                     estimate_value_size(field_value, &field.type_)?;
+                            } else if field.nullable {
+                                total_fields_size += 0;
                             } else {
-                                if field.nullable {
-                                    total_fields_size += 0;
-                                } else {
-                                    return Err(MagnusError::new(
-                                        magnus::exception::runtime_error(),
-                                        format!("Missing field: {} in hash {:?}", field.name, hash),
-                                    ));
-                                }
+                                return Err(MagnusError::new(
+                                    magnus::exception::runtime_error(),
+                                    format!("Missing field: {} in hash {:?}", field.name, hash),
+                                ));
                             }
                         }
                     }

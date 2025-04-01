@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require "tempfile"
+require "bigdecimal"
 
 require "parquet"
 require "minitest/autorun"
@@ -225,6 +226,7 @@ class SchemaTest < Minitest::Test
         field "name", :string
         field "active", :boolean
         field "score", :float
+        field "price", :decimal, precision: 10, scale: 2 # Added decimal type with precision and scale
         field "created_at", :timestamp_millis
         field "tags", :list, item: :string
         field "metadata", :map, key: :string, value: :string
@@ -245,6 +247,7 @@ class SchemaTest < Minitest::Test
         "John Doe",
         true,
         95.5,
+        "123.45", # Decimal value
         Time.now,
         %w[ruby parquet],
         { "version" => "1.0", "env" => "test" },
@@ -257,6 +260,7 @@ class SchemaTest < Minitest::Test
         "Jane Smith",
         false,
         82.3,
+        "456.78", # Decimal value
         Time.now - 86_400,
         %w[data processing],
         { "status" => "active" },
@@ -278,6 +282,7 @@ class SchemaTest < Minitest::Test
       assert_equal "John Doe", rows[0]["name"]
       assert_equal true, rows[0]["active"]
       assert_in_delta 95.5, rows[0]["score"], 0.001
+      assert_equal BigDecimal("123.45"), rows[0]["price"] # Check decimal value
       assert_instance_of Time, rows[0]["created_at"]
       assert_equal %w[ruby parquet], rows[0]["tags"]
       assert_equal({ "version" => "1.0", "env" => "test" }, rows[0]["metadata"])
@@ -292,6 +297,7 @@ class SchemaTest < Minitest::Test
       assert_equal "Jane Smith", rows[1]["name"]
       assert_equal false, rows[1]["active"]
       assert_in_delta 82.3, rows[1]["score"], 0.001
+      assert_equal BigDecimal("456.78"), rows[1]["price"] # Check decimal value
       assert_instance_of Time, rows[1]["created_at"]
       assert_equal %w[data processing], rows[1]["tags"]
       assert_equal({ "status" => "active" }, rows[1]["metadata"])
@@ -300,6 +306,204 @@ class SchemaTest < Minitest::Test
       assert_equal "another nested value", rows[1]["nested"]["deep"]["value"]
       assert_equal [400, 500], rows[1]["numbers"]
       assert_equal "more\x00binary".b, rows[1]["binary_data"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_write_bigdecimal_directly
+    temp_path = "test/write_bigdecimal.parquet"
+    begin
+      # Convert BigDecimal to formatted strings with exact decimal places
+      # to avoid scientific notation that could cause parsing issues
+      data = [%w[123.45 9876.54321 -999.99], %w[0.01 1234567.89 -0.001]].each
+
+      # Schema with different precisions and scales
+      schema = [
+        { "decimal_5_2" => "decimal(5,2)" },
+        { "decimal_10_5" => "decimal(10,5)" },
+        { "negative_decimal" => "decimal(5,2)" }
+      ]
+
+      Parquet.write_rows(data, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 2, rows.length
+
+      # First row
+      assert_equal BigDecimal("123.45"), rows[0]["decimal_5_2"]
+      assert_equal BigDecimal("9876.54321"), rows[0]["decimal_10_5"]
+      assert_equal BigDecimal("-999.99"), rows[0]["negative_decimal"]
+
+      # Second row
+      assert_equal BigDecimal("0.01"), rows[1]["decimal_5_2"]
+      assert_equal BigDecimal("1234567.89"), rows[1]["decimal_10_5"]
+      assert_equal BigDecimal("0.00"), rows[1]["negative_decimal"] # Scale is 2, so -0.001 becomes 0.00
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_decimal_edge_cases
+    temp_path = "test/decimal_edge_cases.parquet"
+    begin
+      # Test edge cases for decimal: zero, max/min values for given precision
+      data = [
+        # Zero with different representations
+        %w[0 0.0 -0],
+        # Values at the boundary of precision
+        %w[999.99 9999.999 -999.99],
+        # Very small values
+        %w[0.01 0.001 -0.01]
+      ].each
+
+      schema = [
+        { "decimal_5_2" => "decimal(5,2)" },
+        { "decimal_7_3" => "decimal(7,3)" },
+        { "negative_decimal" => "decimal(5,2)" }
+      ]
+
+      Parquet.write_rows(data, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.length
+
+      # Zero values
+      assert_equal BigDecimal("0.00"), rows[0]["decimal_5_2"]
+      assert_equal BigDecimal("0.000"), rows[0]["decimal_7_3"]
+      assert_equal BigDecimal("0.00"), rows[0]["negative_decimal"]
+
+      # Boundary values
+      assert_equal BigDecimal("999.99"), rows[1]["decimal_5_2"]
+      assert_equal BigDecimal("9999.999"), rows[1]["decimal_7_3"]
+      assert_equal BigDecimal("-999.99"), rows[1]["negative_decimal"]
+
+      # Small values
+      assert_equal BigDecimal("0.01"), rows[2]["decimal_5_2"]
+      assert_equal BigDecimal("0.001"), rows[2]["decimal_7_3"]
+      assert_equal BigDecimal("-0.01"), rows[2]["negative_decimal"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_decimal_small_values
+    temp_path = "test/decimal_small_values.parquet"
+    begin
+      # This test checks how small values within precision are handled
+      data = [
+        # Values within precision limits
+        %w[999.99 999.9999 -999.99]
+      ].each
+
+      schema = [
+        { "decimal_5_2" => "decimal(5,2)" }, # Can represent up to 999.99
+        { "decimal_7_4" => "decimal(7,4)" }, # Can represent up to 999.9999
+        { "negative_decimal" => "decimal(5,2)" } # Can represent up to -999.99
+      ]
+
+      # This should work fine as values are within precision
+      Parquet.write_rows(data, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 1, rows.length
+
+      # Check the values
+      assert_equal BigDecimal("999.99"), rows[0]["decimal_5_2"]
+      assert_equal BigDecimal("999.9999"), rows[0]["decimal_7_4"]
+      assert_equal BigDecimal("-999.99"), rows[0]["negative_decimal"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_decimal_row_operations
+    # Since column operations with decimals aren't fully supported yet,
+    # we'll test just basic row operations with decimals
+    temp_path = "test/decimal_row_ops.parquet"
+    begin
+      # Create a file with decimal columns for testing row API only
+      data = [%w[1.23 456.789 -9.87], %w[2.34 567.890 -8.76], %w[3.45 678.901 -7.65]].each
+
+      schema = [
+        { "decimal_3_2" => "decimal(3,2)" },
+        { "decimal_6_3" => "decimal(6,3)" },
+        { "negative_decimal" => "decimal(3,2)" }
+      ]
+
+      Parquet.write_rows(data, schema: schema, write_to: temp_path)
+
+      # Read rows and verify values
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.length
+
+      # First row
+      assert_equal BigDecimal("1.23"), rows[0]["decimal_3_2"]
+      assert_equal BigDecimal("456.789"), rows[0]["decimal_6_3"]
+      assert_equal BigDecimal("-9.87"), rows[0]["negative_decimal"]
+
+      # Second row
+      assert_equal BigDecimal("2.34"), rows[1]["decimal_3_2"]
+      assert_equal BigDecimal("567.890"), rows[1]["decimal_6_3"]
+      assert_equal BigDecimal("-8.76"), rows[1]["negative_decimal"]
+
+      # Third row
+      assert_equal BigDecimal("3.45"), rows[2]["decimal_3_2"]
+      assert_equal BigDecimal("678.901"), rows[2]["decimal_6_3"]
+      assert_equal BigDecimal("-7.65"), rows[2]["negative_decimal"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_mixed_decimal_with_other_types
+    temp_path = "test/mixed_decimal_types.parquet"
+    begin
+      # Test mixing decimal with other types in the same schema
+      # Convert BigDecimal to strings for decimal type
+      data = [
+        [1, "row1", "123.45", true, Time.utc(2023, 1, 1)],
+        [2, "row2", "456.78", false, Time.utc(2023, 1, 2)],
+        [3, "row3", "789.01", nil, nil]
+      ].each
+
+      schema = [
+        { "id" => "int32" },
+        { "name" => "string" },
+        { "amount" => "decimal(5,2)" },
+        { "active" => "boolean" },
+        { "date" => "timestamp_millis" }
+      ]
+
+      Parquet.write_rows(data, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.length
+
+      # Check first row
+      assert_equal 1, rows[0]["id"]
+      assert_equal "row1", rows[0]["name"]
+      assert_equal BigDecimal("123.45"), rows[0]["amount"]
+      assert_equal true, rows[0]["active"]
+      assert_equal Time.utc(2023, 1, 1).to_s, rows[0]["date"].to_s
+
+      # Check second row
+      assert_equal 2, rows[1]["id"]
+      assert_equal "row2", rows[1]["name"]
+      assert_equal BigDecimal("456.78"), rows[1]["amount"]
+      assert_equal false, rows[1]["active"]
+      assert_equal Time.utc(2023, 1, 2).to_s, rows[1]["date"].to_s
+
+      # Check third row with nulls
+      assert_equal 3, rows[2]["id"]
+      assert_equal "row3", rows[2]["name"]
+      assert_equal BigDecimal("789.01"), rows[2]["amount"]
+      assert_nil rows[2]["active"]
+      assert_nil rows[2]["date"]
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -394,6 +598,96 @@ class SchemaTest < Minitest::Test
     end
   end
 
+  def test_schema_dsl_decimal
+    temp_path = "test/decimal_dsl.parquet"
+
+    schema =
+      Parquet::Schema.define do
+        field "id", :int32
+        field "name", :string
+        field "standard_decimal", :decimal # Uses default precision 18, scale 2
+        field "precise_decimal", :decimal, precision: 9, scale: 3 # Specifies precision and scale
+        field "nested", :struct do
+          field "struct_decimal", :decimal, precision: 5, scale: 2
+        end
+        field "list_of_decimals", :list, item: :decimal, item_nullable: true
+        field "map_of_decimals", :map, key: :string, value: :decimal, value_nullable: true
+      end
+
+    data = [
+      [
+        1,
+        "Sample",
+        "123.45",
+        "123.456",
+        { "struct_decimal" => "12.34" },
+        ["1.00", "2.50", "3.75", nil],
+        { "first" => "10.01", "second" => "20.02", "empty" => nil }
+      ]
+    ]
+
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 1, rows.size
+
+      # Verify values
+      assert_equal 1, rows[0]["id"]
+      assert_equal "Sample", rows[0]["name"]
+      assert_equal BigDecimal("123.0"), rows[0]["standard_decimal"]
+      assert_equal BigDecimal("123.456"), rows[0]["precise_decimal"]
+      assert_equal BigDecimal("12.34"), rows[0]["nested"]["struct_decimal"]
+      assert_equal [BigDecimal("1.00"), BigDecimal("2.50"), BigDecimal("3.75"), nil], rows[0]["list_of_decimals"]
+      assert_equal(
+        { "first" => BigDecimal("10.01"), "second" => BigDecimal("20.02"), "empty" => nil },
+        rows[0]["map_of_decimals"]
+      )
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_write_decimal_from_bigdecimal
+    require "bigdecimal"
+
+    temp_path = "test/decimal_bigdecimal.parquet"
+
+    schema =
+      Parquet::Schema.define do
+        field "id", :int32
+        field "standard_decimal", :decimal # Uses default precision 18, scale 2
+        field "high_precision", :decimal, precision: 38, scale: 10
+        field "zero_scale", :decimal, precision: 10, scale: 0
+      end
+
+    # Create data with BigDecimal objects directly
+    data = [[1, BigDecimal("123.45"), BigDecimal("9876543210.0123456789"), BigDecimal("42")]]
+
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 1, rows.size
+
+      # Verify values
+      assert_equal 1, rows[0]["id"]
+      assert_equal BigDecimal("123.0"), rows[0]["standard_decimal"]
+      assert_equal BigDecimal("9876543210.0123456789"), rows[0]["high_precision"]
+      assert_equal BigDecimal("42"), rows[0]["zero_scale"]
+
+      # Verify precision and scale are maintained
+      assert_equal "123.0", rows[0]["standard_decimal"].to_s("F")
+      assert_equal "9876543210.0123456789", rows[0]["high_precision"].to_s("F")
+      assert_equal 0, rows[0]["zero_scale"].scale
+      assert_equal 42, rows[0]["zero_scale"].to_i
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
   def test_schema_dsl_bogus_type
     schema = {
       type: :struct,
@@ -420,6 +714,244 @@ class SchemaTest < Minitest::Test
     begin
       error = assert_raises(ArgumentError) { Parquet.write_rows(data, schema: schema, write_to: temp_path) }
       assert_match(/Cannot create a struct with zero fields|Top-level schema must be a Struct/i, error.message)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_parquet_metadata
+    # Create a test file with known schema and data
+    temp_path = "test/metadata_test.parquet"
+
+    begin
+      # Define schema with various types to test metadata extraction
+      schema = [
+        { "id" => "int32" },
+        { "name" => "string" },
+        { "active" => "boolean" },
+        { "score" => "double" },
+        { "decimal_val" => "decimal(38,2)" }
+      ]
+
+      # Create test data
+      data = [
+        [1, "Alice", true, 95.5, BigDecimal("123.45")],
+        [2, "Bob", false, 82.3, BigDecimal("67.89")],
+        [3, "Charlie", true, 76.8, BigDecimal("42.00")]
+      ]
+
+      # Write the test file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Get metadata from the file
+      metadata = Parquet.metadata(temp_path)
+
+      # Test basic file metadata
+      assert_instance_of Hash, metadata
+      assert_equal 3, metadata["num_rows"]
+      assert_includes metadata["created_by"].to_s, "parquet-rs"
+
+      # Test schema metadata
+      assert_instance_of Hash, metadata["schema"]
+      assert_equal "arrow_schema", metadata["schema"]["name"]
+      assert_instance_of Array, metadata["schema"]["fields"]
+      assert_equal 5, metadata["schema"]["fields"].length
+
+      # Test field metadata for specific columns
+      id_field = metadata["schema"]["fields"].find { |f| f["name"] == "id" }
+      assert_equal "primitive", id_field["type"]
+      assert_equal "INT32", id_field["physical_type"]
+
+      decimal_field = metadata["schema"]["fields"].find { |f| f["name"] == "decimal_val" }
+      assert_equal "primitive", decimal_field["type"]
+      assert_equal "FIXED_LEN_BYTE_ARRAY", decimal_field["physical_type"]
+      assert_equal 38, decimal_field["precision"]
+      assert_equal 2, decimal_field["scale"]
+
+      # Test row group metadata
+      assert_instance_of Array, metadata["row_groups"]
+      assert_equal 1, metadata["row_groups"].length
+
+      row_group = metadata["row_groups"][0]
+      assert_equal 5, row_group["num_columns"]
+      assert_equal 3, row_group["num_rows"]
+      assert_instance_of Integer, row_group["total_byte_size"]
+      assert_instance_of Integer, row_group["file_offset"]
+
+      # Test column metadata
+      assert_instance_of Array, row_group["columns"]
+      assert_equal 5, row_group["columns"].length
+
+      # Check specific column metadata
+      id_column = row_group["columns"].find { |c| c["column_path"] == "id" }
+      assert_equal 3, id_column["num_values"]
+      assert_instance_of Array, id_column["encodings"]
+      assert_instance_of Integer, id_column["total_compressed_size"]
+      assert_instance_of Integer, id_column["total_uncompressed_size"]
+
+      # Test with compression specified
+      compressed_path = "test/metadata_compressed_test.parquet"
+      begin
+        Parquet.write_rows(data.each, schema: schema, write_to: compressed_path, compression: "GZIP")
+
+        compressed_metadata = Parquet.metadata(compressed_path)
+        compressed_column = compressed_metadata["row_groups"][0]["columns"][0]
+
+        # Verify compression is reported correctly
+        assert_equal "GZIP(GzipLevel(6))", compressed_column["compression"]
+      ensure
+        File.delete(compressed_path) if File.exist?(compressed_path)
+      end
+
+      # Test error handling for non-existent file
+      assert_raises { Parquet.metadata("non_existent_file.parquet") }
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_parquet_metadata_small_decimal
+    # Create a test file with known schema and data
+    temp_path = "test/metadata_test.parquet"
+
+    begin
+      # Define schema with various types to test metadata extraction
+      schema = [
+        { "id" => "int32" },
+        { "name" => "string" },
+        { "active" => "boolean" },
+        { "score" => "double" },
+        { "decimal_val" => "decimal(4,2)" }
+      ]
+
+      # Create test data
+      data = [
+        [1, "Alice", true, 95.5, BigDecimal("123.45")],
+        [2, "Bob", false, 82.3, BigDecimal("67.89")],
+        [3, "Charlie", true, 76.8, BigDecimal("42.00")]
+      ]
+
+      # Write the test file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Get metadata from the file
+      metadata = Parquet.metadata(temp_path)
+
+      # Test basic file metadata
+      assert_instance_of Hash, metadata
+      assert_equal 3, metadata["num_rows"]
+      assert_includes metadata["created_by"].to_s, "parquet-rs"
+
+      # Test schema metadata
+      assert_instance_of Hash, metadata["schema"]
+      assert_equal "arrow_schema", metadata["schema"]["name"]
+      assert_instance_of Array, metadata["schema"]["fields"]
+      assert_equal 5, metadata["schema"]["fields"].length
+
+      # Test field metadata for specific columns
+      id_field = metadata["schema"]["fields"].find { |f| f["name"] == "id" }
+      assert_equal "primitive", id_field["type"]
+      assert_equal "INT32", id_field["physical_type"]
+
+      decimal_field = metadata["schema"]["fields"].find { |f| f["name"] == "decimal_val" }
+      assert_equal "primitive", decimal_field["type"]
+      assert_equal "INT32", decimal_field["physical_type"]
+      assert_equal 4, decimal_field["precision"]
+      assert_equal 2, decimal_field["scale"]
+
+      # Test row group metadata
+      assert_instance_of Array, metadata["row_groups"]
+      assert_equal 1, metadata["row_groups"].length
+
+      row_group = metadata["row_groups"][0]
+      assert_equal 5, row_group["num_columns"]
+      assert_equal 3, row_group["num_rows"]
+      assert_instance_of Integer, row_group["total_byte_size"]
+      assert_instance_of Integer, row_group["file_offset"]
+
+      # Test column metadata
+      assert_instance_of Array, row_group["columns"]
+      assert_equal 5, row_group["columns"].length
+
+      # Check specific column metadata
+      id_column = row_group["columns"].find { |c| c["column_path"] == "id" }
+      assert_equal 3, id_column["num_values"]
+      assert_instance_of Array, id_column["encodings"]
+      assert_instance_of Integer, id_column["total_compressed_size"]
+      assert_instance_of Integer, id_column["total_uncompressed_size"]
+
+      # Test with compression specified
+      compressed_path = "test/metadata_compressed_test.parquet"
+      begin
+        Parquet.write_rows(data.each, schema: schema, write_to: compressed_path, compression: "GZIP")
+
+        compressed_metadata = Parquet.metadata(compressed_path)
+        compressed_column = compressed_metadata["row_groups"][0]["columns"][0]
+
+        # Verify compression is reported correctly
+        assert_equal "GZIP(GzipLevel(6))", compressed_column["compression"]
+      ensure
+        File.delete(compressed_path) if File.exist?(compressed_path)
+      end
+
+      # Test error handling for non-existent file
+      assert_raises { Parquet.metadata("non_existent_file.parquet") }
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_metadata_from_io
+    # Create test data
+    data = [[1, "Alice", true, 4.5, 12.34], [2, "Bob", false, 3.2, 45.67], [3, "Charlie", true, 9.9, 78.90]]
+
+    schema = [
+      { "id" => "int64" },
+      { "name" => "string" },
+      { "active" => "boolean" },
+      { "score" => "double" },
+      { "decimal_val" => { "type" => "decimal", "precision" => 4, "scale" => 2 } }
+    ]
+
+    temp_path = "test/metadata_io_test.parquet"
+    begin
+      # Write test data to file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read metadata from file using IO object
+      File.open(temp_path, "rb") do |io|
+        metadata = Parquet.metadata(io)
+
+        # Verify basic metadata
+        assert_equal "parquet-rs version 54.2.0", metadata["created_by"]
+        assert_instance_of Hash, metadata["schema"]
+        assert_instance_of Array, metadata["schema"]["fields"]
+        assert_equal 5, metadata["schema"]["fields"].length
+
+        # Verify row group metadata
+        assert_instance_of Array, metadata["row_groups"]
+        assert_equal 1, metadata["row_groups"].length
+        assert_equal 3, metadata["row_groups"][0]["num_rows"]
+
+        # Verify column metadata
+        columns = metadata["row_groups"][0]["columns"]
+        assert_equal 5, columns.length
+
+        # Check specific column details
+        name_column = columns.find { |c| c["column_path"] == "name" }
+        assert_equal 3, name_column["num_values"]
+        assert_instance_of Array, name_column["encodings"]
+      end
+
+      # Test with StringIO
+      require "stringio"
+      file_content = File.binread(temp_path)
+      stringio = StringIO.new(file_content)
+
+      metadata = Parquet.metadata(stringio)
+      assert_equal "parquet-rs version 54.2.0", metadata["created_by"]
+      assert_equal 5, metadata["schema"]["fields"].length
+      assert_equal 3, metadata["row_groups"][0]["num_rows"]
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

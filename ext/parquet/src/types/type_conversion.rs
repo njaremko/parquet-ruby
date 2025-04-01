@@ -2,8 +2,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use super::*;
-use arrow_array::builder::MapFieldNames;
 use arrow_array::builder::*;
+use arrow_array::builder::MapFieldNames;
 use arrow_schema::{DataType, Field, Fields, TimeUnit};
 use jiff::tz::{Offset, TimeZone};
 use magnus::{RArray, RString, TryConvert};
@@ -41,9 +41,9 @@ pub fn convert_to_date32(
         let s = String::try_convert(value)?;
         // Parse string into Date using jiff
         let date = if let Some(fmt) = format {
-            jiff::civil::Date::strptime(&fmt, &s).or_else(|e1| {
+            jiff::civil::Date::strptime(fmt, &s).or_else(|e1| {
                 // Try parsing as DateTime and convert to Date with zero offset
-                jiff::civil::DateTime::strptime(&fmt, &s)
+                jiff::civil::DateTime::strptime(fmt, &s)
                     .and_then(|dt| dt.to_zoned(TimeZone::fixed(Offset::constant(0))))
                     .map(|dt| dt.date())
                     .map_err(|e2| {
@@ -78,7 +78,7 @@ pub fn convert_to_date32(
             .timestamp();
 
         // Convert to epoch days
-        Ok((x.as_second() as i64 / 86400) as i32)
+        Ok((x.as_second() / 86400) as i32)
     } else if value.is_kind_of(ruby.class_time()) {
         // Convert Time object to epoch days
         let secs = i64::try_convert(value.funcall::<_, _, Value>("to_i", ())?)?;
@@ -100,10 +100,10 @@ pub fn convert_to_timestamp_millis(
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
         let timestamp = if let Some(fmt) = format {
-            jiff::Timestamp::strptime(&fmt, &s)
+            jiff::Timestamp::strptime(fmt, &s)
                 .or_else(|e1| {
                     // Try parsing as DateTime and convert to Timestamp with zero offset
-                    jiff::civil::DateTime::strptime(&fmt, &s)
+                    jiff::civil::DateTime::strptime(fmt, &s)
                         .and_then(|dt| dt.to_zoned(TimeZone::fixed(Offset::constant(0))))
                         .map(|dt| dt.timestamp())
                         .map_err(|e2| {
@@ -150,9 +150,9 @@ pub fn convert_to_timestamp_micros(
         let s = String::try_convert(value)?;
         // Parse string into Timestamp using jiff
         let timestamp = if let Some(fmt) = format {
-            jiff::Timestamp::strptime(&fmt, &s).or_else(|e1| {
+            jiff::Timestamp::strptime(fmt, &s).or_else(|e1| {
                 // Try parsing as DateTime and convert to Timestamp with zero offset
-                jiff::civil::DateTime::strptime(&fmt, &s).and_then(|dt| {
+                jiff::civil::DateTime::strptime(fmt, &s).and_then(|dt| {
                     dt.to_zoned(TimeZone::fixed(Offset::constant(0)))
                 })
                 .map(|dt| dt.timestamp())
@@ -242,6 +242,7 @@ pub fn parquet_schema_type_to_arrow_data_type(
             PrimitiveType::UInt64 => DataType::UInt64,
             PrimitiveType::Float32 => DataType::Float32,
             PrimitiveType::Float64 => DataType::Float64,
+            PrimitiveType::Decimal128(precision, scale) => DataType::Decimal128(*precision, *scale),
             PrimitiveType::String => DataType::Utf8,
             PrimitiveType::Binary => DataType::Binary,
             PrimitiveType::Boolean => DataType::Boolean,
@@ -364,6 +365,20 @@ fn create_arrow_builder_for_type(
         ParquetSchemaType::Primitive(PrimitiveType::Float64) => {
             Ok(Box::new(Float64Builder::with_capacity(cap)))
         }
+        ParquetSchemaType::Primitive(PrimitiveType::Decimal128(precision, scale)) => {
+            // Create a Decimal128Builder with specific precision and scale
+            let builder = Decimal128Builder::with_capacity(cap);
+            
+            // Set precision and scale for the decimal and return the new builder
+            let builder_with_precision = builder.with_precision_and_scale(*precision, *scale).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    format!("Failed to set precision and scale: {}", e),
+                )
+            })?;
+            
+            Ok(Box::new(builder_with_precision))
+        }
         ParquetSchemaType::Primitive(PrimitiveType::String) => {
             Ok(Box::new(StringBuilder::with_capacity(cap, cap * 32)))
         }
@@ -415,7 +430,7 @@ fn create_arrow_builder_for_type(
         ParquetSchemaType::Struct(struct_field) => {
             // Check for empty struct immediately
             if struct_field.fields.is_empty() {
-                return Err(MagnusError::new(
+                Err(MagnusError::new(
                     magnus::exception::runtime_error(),
                     "Cannot build a struct with zero fields - Parquet doesn't support empty structs".to_string(),
                 ))?;
@@ -445,7 +460,7 @@ fn create_arrow_builder_for_type(
 
             // Make sure we have the right number of builders
             if child_field_builders.len() != arrow_fields.len() {
-                return Err(MagnusError::new(
+                Err(MagnusError::new(
                     magnus::exception::runtime_error(),
                     format!(
                         "Number of field builders ({}) doesn't match number of arrow fields ({})",
@@ -834,6 +849,46 @@ fn fill_builder(
             }
             Ok(())
         }
+        ParquetSchemaType::Primitive(PrimitiveType::Decimal128(_precision, scale)) => {
+            let typed_builder = builder
+                .as_any_mut()
+                .downcast_mut::<Decimal128Builder>()
+                .expect("Builder mismatch: expected Float64Builder");
+
+            for val in values {
+                match val {
+                    ParquetValue::Decimal128(d) => typed_builder.append_value(*d),
+                    ParquetValue::Float64(f) => {
+                        // Scale the float to the desired precision and scale
+                        let scaled_value = (*f * 10_f64.powi(*scale as i32)) as i128;
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Float32(flo) => {
+                        // Scale the float to the desired precision and scale
+                        let scaled_value = (*flo as f64 * 10_f64.powi(*scale as i32)) as i128;
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Int64(i) => {
+                        // Scale the integer to the desired scale
+                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Int32(i) => {
+                        // Scale the integer to the desired scale
+                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Null => typed_builder.append_null(),
+                    other => {
+                        return Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            format!("Expected Float64, got {:?}", other),
+                        ))
+                    }
+                }
+            }
+            Ok(())
+        }
         ParquetSchemaType::Primitive(PrimitiveType::Boolean) => {
             let typed_builder = builder
                 .as_any_mut()
@@ -954,7 +1009,7 @@ fn fill_builder(
                 .expect("Builder mismatch: expected BinaryBuilder");
             for val in values {
                 match val {
-                    ParquetValue::Bytes(b) => typed_builder.append_value(&b),
+                    ParquetValue::Bytes(b) => typed_builder.append_value(b),
                     ParquetValue::Null => typed_builder.append_null(),
                     other => {
                         return Err(MagnusError::new(
@@ -1106,6 +1161,15 @@ fn fill_builder(
                                             )
                                         })?
                                         .append_value(bytes),
+                                    ParquetValue::Decimal128(x) => typed_builder
+                                        .field_builder::<Decimal128Builder>(i)
+                                        .ok_or_else(|| {
+                                            MagnusError::new(
+                                                magnus::exception::type_error(),
+                                                "Failed to coerce into Decimal128Builder",
+                                            )
+                                        })?
+                                        .append_value(*x),
                                     ParquetValue::Date32(x) => typed_builder
                                         .field_builder::<Date32Builder>(i)
                                         .ok_or_else(|| {
@@ -1299,6 +1363,15 @@ fn fill_builder(
                                                 MagnusError::new(
                                                     magnus::exception::type_error(),
                                                     "Failed to coerce into Float64Builder",
+                                                )
+                                            })?
+                                            .append_null(),
+                                            ParquetSchemaType::Primitive(PrimitiveType::Decimal128(_, _)) => typed_builder
+                                            .field_builder::<Decimal128Builder>(i)
+                                            .ok_or_else(|| {
+                                                MagnusError::new(
+                                                    magnus::exception::type_error(),
+                                                    "Failed to coerce into Decimal128Builder",
                                                 )
                                             })?
                                             .append_null(),

@@ -11,6 +11,9 @@ module Parquet
     #     field :id, :int64, nullable: false  # ID cannot be null
     #     field :name, :string  # Default nullable: true
     #
+    #     # Decimal field with precision and scale
+    #     field :price, :decimal, precision: 10, scale: 2
+    #
     #     # List with non-nullable items
     #     field :scores, :list, item: :float, item_nullable: false
     #
@@ -45,7 +48,7 @@ module Parquet
 
       # Define a field in the schema
       # @param name [String, Symbol] field name
-      # @param type [Symbol] data type (:int32, :int64, :string, :list, :map, :struct, etc)
+      # @param type [Symbol] data type (:int32, :int64, :string, :list, :map, :struct, :decimal, etc)
       # @param nullable [Boolean] whether the field can be null (default: true)
       # @param kwargs [Hash] additional options depending on type
       #
@@ -55,6 +58,7 @@ module Parquet
       #   - `key:, value:` if type == :map
       #   - `key_nullable:, value_nullable:` controls nullability of map keys/values (default: true)
       #   - `format:` if you want to store some format string
+      #   - `precision:, scale:` if type == :decimal (precision defaults to 18, scale to 2)
       #   - `nullable:` default to true if not specified
       def field(name, type, nullable: true, **kwargs, &block)
         field_hash = { name: name.to_s, type: type, nullable: !!nullable }
@@ -84,6 +88,12 @@ module Parquet
           value_nullable = kwargs[:value_nullable].nil? ? true : !!kwargs[:value_nullable]
           field_hash[:key] = wrap_subtype(key_type, nullable: key_nullable)
           field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, &block)
+        when :decimal
+          # Store precision and scale for decimal type
+          precision = kwargs[:precision] || 18 # Default precision is 18
+          scale = kwargs[:scale] || 0 # Default scale is 0
+          field_hash[:precision] = precision
+          field_hash[:scale] = scale
         else
           # primitive type: :int32, :int64, :string, etc.
           # do nothing else special
@@ -122,7 +132,7 @@ module Parquet
       # If user said: field "something", :list, item: :struct do ... end
       # we want to recursively parse that sub-struct from the block.
       # So wrap_subtype might be:
-      def wrap_subtype(t, nullable: true, &block)
+      def wrap_subtype(t, nullable: true, precision: nil, scale: nil, &block)
         if t == :struct
           sub_builder = SchemaBuilder.new
           sub_builder.instance_eval(&block) if block
@@ -144,6 +154,12 @@ module Parquet
           end
 
           { type: :list, nullable: nullable, name: "item", item: sub_builder.fields[0] }
+        elsif t == :decimal
+          # Handle decimal type with precision and scale
+          result = { type: t, nullable: nullable, name: "item" }
+          result[:precision] = precision || 18 # Default precision is 18
+          result[:scale] = scale || 2 # Default scale is 2
+          result
         else
           # e.g. :int32 => { type: :int32, nullable: true }
           { type: t, nullable: nullable, name: "item" }

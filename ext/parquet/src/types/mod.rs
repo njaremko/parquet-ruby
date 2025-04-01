@@ -32,6 +32,7 @@ use arrow_schema::{DataType, TimeUnit};
 use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, Value};
 use parquet::data_type::Decimal;
 use parquet::record::Field;
+use std::array::TryFromSliceError;
 use std::{collections::HashMap, hash::BuildHasher, sync::Arc};
 
 use crate::header_cache::StringCacheKey;
@@ -58,6 +59,8 @@ pub enum ParquetGemError {
     Utf8Error(#[from] simdutf8::basic::Utf8Error),
     #[error("Jiff error: {0}")]
     Jiff(#[from] jiff::Error),
+    #[error("Failed to cast slice to array: {0}")]
+    InvalidDecimal(#[from] TryFromSliceError),
 }
 
 #[derive(Debug)]
@@ -83,11 +86,11 @@ impl From<MagnusError> for ParquetGemError {
     }
 }
 
-impl Into<MagnusError> for ParquetGemError {
-    fn into(self) -> MagnusError {
-        match self {
-            Self::Ruby(MagnusErrorWrapper(err)) => err.into(),
-            _ => MagnusError::new(magnus::exception::runtime_error(), self.to_string()),
+impl From<ParquetGemError> for MagnusError {
+    fn from(val: ParquetGemError) -> Self {
+        match val {
+            ParquetGemError::Ruby(MagnusErrorWrapper(err)) => err,
+            _ => MagnusError::new(magnus::exception::runtime_error(), val.to_string()),
         }
     }
 }

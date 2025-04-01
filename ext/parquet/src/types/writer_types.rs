@@ -59,7 +59,7 @@ impl Write for IoLikeValue {
     }
 }
 
-impl<'a> FromStr for ParquetSchemaType<'a> {
+impl FromStr for ParquetSchemaType<'_> {
     type Err = MagnusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -98,6 +98,36 @@ impl<'a> FromStr for ParquetSchemaType<'a> {
             })));
         }
 
+        // Check if it's a decimal type with precision and scale
+        if let Some(decimal_params) = s.strip_prefix("decimal(").and_then(|s| s.strip_suffix(")")) {
+            let parts: Vec<&str> = decimal_params.split(',').collect();
+            if parts.len() != 2 {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    format!(
+                        "Invalid decimal format. Expected 'decimal(precision,scale)', got '{}'",
+                        s
+                    ),
+                ));
+            }
+
+            let precision = parts[0].trim().parse::<u8>().map_err(|_| {
+                MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    format!("Invalid precision value in decimal type: {}", parts[0]),
+                )
+            })?;
+
+            let scale = parts[1].trim().parse::<i8>().map_err(|_| {
+                MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    format!("Invalid scale value in decimal type: {}", parts[1]),
+                )
+            })?;
+
+            return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(precision, scale)));
+        }
+
         // Handle primitive types
         match s {
             "int8" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int8)),
@@ -116,6 +146,7 @@ impl<'a> FromStr for ParquetSchemaType<'a> {
             "date32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Date32)),
             "timestamp_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis)),
             "timestamp_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros)),
+            "decimal" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(18, 2))), // Default precision 18, scale 2
             "list" => Ok(ParquetSchemaType::List(Box::new(ListField {
                 item_type: ParquetSchemaType::Primitive(PrimitiveType::String),
                 format: None,
@@ -129,7 +160,7 @@ impl<'a> FromStr for ParquetSchemaType<'a> {
     }
 }
 
-impl<'a> TryConvert for ParquetSchemaType<'a> {
+impl TryConvert for ParquetSchemaType<'_> {
     fn try_convert(value: Value) -> Result<Self, MagnusError> {
         let ruby = unsafe { Ruby::get_unchecked() };
         let schema_type = parse_string_or_symbol(&ruby, value)?;
@@ -144,7 +175,7 @@ impl<'a> TryConvert for ParquetSchemaType<'a> {
 
 // We know this type is safe to move between threads because it's just an enum
 // with simple primitive types and strings
-unsafe impl<'a> Send for ParquetSchemaType<'a> {}
+unsafe impl Send for ParquetSchemaType<'_> {}
 
 pub enum WriterOutput {
     File(ArrowWriter<Box<dyn SendableWrite>>),
@@ -202,14 +233,12 @@ impl<'a> ColumnCollector<'a> {
     pub fn push_value(&mut self, value: Value) -> Result<(), MagnusError> {
         use crate::types::ParquetValue;
 
-        if value.is_nil() {
-            if !self.nullable {
-                // For non-nullable fields, raise an error
-                return Err(MagnusError::new(
-                    magnus::exception::runtime_error(),
-                    "Cannot write nil value for non-nullable field",
-                ));
-            }
+        if value.is_nil() && !self.nullable {
+            // For non-nullable fields, raise an error
+            return Err(MagnusError::new(
+                magnus::exception::runtime_error(),
+                "Cannot write nil value for non-nullable field",
+            ));
         }
 
         // For all other types, proceed as normal

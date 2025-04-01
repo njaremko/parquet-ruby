@@ -1,6 +1,17 @@
 # typed: true
 
 module Parquet
+  # Returns metadata information about a Parquet file
+  #
+  # The returned hash contains information about:
+  # - Basic file metadata (num_rows, created_by)
+  # - Schema information (fields, types, etc.)
+  # - Row group details
+  # - Column chunk information (compression, encodings, statistics)
+  sig { params(path: String).returns(T::Hash[String, T.untyped]) }
+  def self.metadata(path)
+  end
+
   # Options:
   #   - `input`: String, File, or IO object containing parquet data
   #   - `result_type`: String specifying the output format

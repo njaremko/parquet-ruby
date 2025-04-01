@@ -9,9 +9,10 @@ pkg/
 /benchmark/*.csv*
 profile.json
 **/*.parquet
-!test/*.parquet
+test/*.parquet
 
 *.py
 *.txt
 .cursorrules
 CLAUDE.md
+.mcp.json

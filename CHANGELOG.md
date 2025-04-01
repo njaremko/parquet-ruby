@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+- _Actually_ fix support for Ruby 3.1
+- Add support for decimal type
+- Add support for reading metadata from parquet files
+
 ## 0.5.2
 - Fix support for Ruby 3.1
 

@@ -20,6 +20,7 @@ use writer::write_rows;
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("Parquet")?;
+    module.define_module_function("metadata", magnus::method!(reader::parse_metadata, -1))?;
     module.define_module_function("each_row", magnus::method!(parse_parquet_rows, -1))?;
     module.define_module_function("each_column", magnus::method!(parse_parquet_columns, -1))?;
     module.define_module_function("write_rows", magnus::function!(write_rows, -1))?;

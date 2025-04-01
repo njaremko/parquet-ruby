@@ -13,12 +13,12 @@ pub fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String
         RString::from_value(value)
             .ok_or_else(|| Error::new(magnus::exception::type_error(), "Invalid string value"))?
             .to_string()
-            .map(|s| Some(s))
+            .map(Some)
     } else if value.is_kind_of(ruby.class_symbol()) {
         Symbol::from_value(value)
             .ok_or_else(|| Error::new(magnus::exception::type_error(), "Invalid symbol value"))?
             .funcall("to_s", ())
-            .map(|s| Some(s))
+            .map(Some)
     } else {
         Err(Error::new(
             magnus::exception::type_error(),
@@ -161,11 +161,11 @@ pub fn parse_parquet_columns_args(
     };
 
     let batch_size = kwargs.optional.2.flatten();
-    if let Some(sz) = batch_size {
-        if sz <= 0 {
+    if let Some(batch_size) = batch_size {
+        if batch_size == 0 {
             return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("batch_size must be > 0, got {}", sz),
+                magnus::exception::arg_error(),
+                "Batch size must be greater than 0",
             ));
         }
     }

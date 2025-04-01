@@ -11,12 +11,12 @@ use crate::{
 use crate::{types::PrimitiveType, SchemaNode};
 use arrow_array::{Array, RecordBatch};
 use magnus::{value::ReprValue, Error as MagnusError, RArray, Ruby, Value};
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 #[inline]
 pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
-    write_columns_impl(Arc::new(ruby), args).map_err(|e| {
+    write_columns_impl(Rc::new(ruby), args).map_err(|e| {
         let z: MagnusError = e.into();
         z
     })?;
@@ -24,7 +24,7 @@ pub fn write_columns(args: &[Value]) -> Result<(), MagnusError> {
 }
 
 #[inline]
-fn write_columns_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemError> {
+fn write_columns_impl(ruby: Rc<Ruby>, args: &[Value]) -> Result<(), ParquetGemError> {
     let ParquetWriteArgs {
         read_from,
         write_to,
@@ -94,7 +94,7 @@ fn write_columns_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemE
                     };
 
                     if batch_array.len() != schema_len {
-                        return Err(MagnusError::new(
+                        Err(MagnusError::new(
                             magnus::exception::type_error(),
                             format!(
                                 "Batch column count ({}) does not match schema length ({}). Schema expects columns: {:?}",
@@ -118,7 +118,7 @@ fn write_columns_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemE
                                 ))?,
                             };
                         if top_fields.len() != fields.len() {
-                            return Err(MagnusError::new(
+                            Err(MagnusError::new(
                                 magnus::exception::runtime_error(),
                                 "Mismatch top-level DSL fields vs Arrow fields",
                             ))?;
@@ -140,31 +140,34 @@ fn write_columns_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemE
                                     parquet_type,
                                     // Format is handled internally now
                                     ..
-                                } => match parquet_type {
-                                    &PrimitiveType::Int8 => PST::Primitive(PrimitiveType::Int8),
-                                    &PrimitiveType::Int16 => PST::Primitive(PrimitiveType::Int16),
-                                    &PrimitiveType::Int32 => PST::Primitive(PrimitiveType::Int32),
-                                    &PrimitiveType::Int64 => PST::Primitive(PrimitiveType::Int64),
-                                    &PrimitiveType::UInt8 => PST::Primitive(PrimitiveType::UInt8),
-                                    &PrimitiveType::UInt16 => PST::Primitive(PrimitiveType::UInt16),
-                                    &PrimitiveType::UInt32 => PST::Primitive(PrimitiveType::UInt32),
-                                    &PrimitiveType::UInt64 => PST::Primitive(PrimitiveType::UInt64),
-                                    &PrimitiveType::Float32 => {
+                                } => match *parquet_type {
+                                    PrimitiveType::Int8 => PST::Primitive(PrimitiveType::Int8),
+                                    PrimitiveType::Int16 => PST::Primitive(PrimitiveType::Int16),
+                                    PrimitiveType::Int32 => PST::Primitive(PrimitiveType::Int32),
+                                    PrimitiveType::Int64 => PST::Primitive(PrimitiveType::Int64),
+                                    PrimitiveType::UInt8 => PST::Primitive(PrimitiveType::UInt8),
+                                    PrimitiveType::UInt16 => PST::Primitive(PrimitiveType::UInt16),
+                                    PrimitiveType::UInt32 => PST::Primitive(PrimitiveType::UInt32),
+                                    PrimitiveType::UInt64 => PST::Primitive(PrimitiveType::UInt64),
+                                    PrimitiveType::Float32 => {
                                         PST::Primitive(PrimitiveType::Float32)
                                     }
-                                    &PrimitiveType::Float64 => {
+                                    PrimitiveType::Float64 => {
                                         PST::Primitive(PrimitiveType::Float64)
                                     }
-                                    &PrimitiveType::String => PST::Primitive(PrimitiveType::String),
-                                    &PrimitiveType::Binary => PST::Primitive(PrimitiveType::Binary),
-                                    &PrimitiveType::Boolean => {
+                                    PrimitiveType::Decimal128(precision, scale) => {
+                                        PST::Primitive(PrimitiveType::Decimal128(precision, scale))
+                                    }
+                                    PrimitiveType::String => PST::Primitive(PrimitiveType::String),
+                                    PrimitiveType::Binary => PST::Primitive(PrimitiveType::Binary),
+                                    PrimitiveType::Boolean => {
                                         PST::Primitive(PrimitiveType::Boolean)
                                     }
-                                    &PrimitiveType::Date32 => PST::Primitive(PrimitiveType::Date32),
-                                    &PrimitiveType::TimestampMillis => {
+                                    PrimitiveType::Date32 => PST::Primitive(PrimitiveType::Date32),
+                                    PrimitiveType::TimestampMillis => {
                                         PST::Primitive(PrimitiveType::TimestampMillis)
                                     }
-                                    &PrimitiveType::TimestampMicros => {
+                                    PrimitiveType::TimestampMicros => {
                                         PST::Primitive(PrimitiveType::TimestampMicros)
                                     }
                                 },
@@ -205,12 +208,12 @@ fn write_columns_impl(ruby: Arc<Ruby>, args: &[Value]) -> Result<(), ParquetGemE
                     if e.is_kind_of(ruby.exception_stop_iteration()) {
                         break;
                     }
-                    return Err(e)?;
+                    Err(e)?;
                 }
             }
         }
     } else {
-        return Err(MagnusError::new(
+        Err(MagnusError::new(
             magnus::exception::type_error(),
             "read_from must be an Enumerator".to_string(),
         ))?;
