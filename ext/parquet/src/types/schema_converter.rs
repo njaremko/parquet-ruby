@@ -1,5 +1,5 @@
 use magnus::value::ReprValue; // Add ReprValue trait to scope
-use magnus::{Error as MagnusError, RArray, Ruby, TryConvert, Value};
+use magnus::{Error as MagnusError, IntoValue, RArray, Ruby, TryConvert, Value};
 
 use crate::types::{ParquetSchemaType as PST, PrimitiveType, SchemaField, SchemaNode};
 use crate::utils::parse_string_or_symbol;
@@ -22,7 +22,7 @@ fn convert_schema_field_to_node(field: &SchemaField) -> SchemaNode {
                     let item_field = SchemaField {
                         name: "item".to_string(),
                         type_: list_field.item_type.clone(),
-                        format: list_field.format.clone().map(String::from),
+                        format: list_field.format.map(String::from),
                         nullable: list_field.nullable,
                     };
                     convert_schema_field_to_node(&item_field)
@@ -33,7 +33,7 @@ fn convert_schema_field_to_node(field: &SchemaField) -> SchemaNode {
                     let item_field = SchemaField {
                         name: "item".to_string(),
                         type_: list_field.item_type.clone(),
-                        format: list_field.format.clone().map(String::from),
+                        format: list_field.format.map(String::from),
                         nullable: list_field.nullable,
                     };
                     convert_schema_field_to_node(&item_field)
@@ -50,13 +50,13 @@ fn convert_schema_field_to_node(field: &SchemaField) -> SchemaNode {
             let key_field = SchemaField {
                 name: "key".to_string(),
                 type_: map_field.key_type.clone(),
-                format: map_field.key_format.clone().map(String::from),
+                format: map_field.key_format.map(String::from),
                 nullable: false, // Map keys can never be null in Parquet
             };
             let value_field = SchemaField {
                 name: "value".to_string(),
                 type_: map_field.value_type.clone(),
-                format: map_field.value_format.clone().map(String::from),
+                format: map_field.value_format.map(String::from),
                 nullable: map_field.value_nullable,
             };
 
@@ -121,9 +121,7 @@ pub fn parse_legacy_schema(
                         ruby.exception_type_error(),
                         "Schema must be an array of field definitions or nil",
                     )
-                })?
-                .len()
-                == 0)
+                })?.is_empty())
     {
         // If schema is nil or an empty array, we'll handle this in the caller
         return Ok(Vec::new());
@@ -155,7 +153,7 @@ pub fn parse_legacy_schema(
             }
 
             let (name, type_value) = &entries[0];
-            let name_option = parse_string_or_symbol(ruby, name.clone())?;
+            let name_option = parse_string_or_symbol(ruby, *name)?;
             let name = name_option.ok_or_else(|| {
                 MagnusError::new(ruby.exception_runtime_error(), "Field name cannot be nil")
             })?;
@@ -165,6 +163,9 @@ pub fn parse_legacy_schema(
                 let mut type_str = None;
                 let mut format_str = None;
                 let mut nullable = true; // Default to true if not specified
+
+                let mut precision: Option<Value> = None;
+                let mut scale: Option<Value> = None;
 
                 for (key, value) in type_hash {
                     let key_option = parse_string_or_symbol(ruby, key)?;
@@ -180,6 +181,12 @@ pub fn parse_legacy_schema(
                         "nullable" => {
                             // Extract nullable if present - convert to boolean
                             nullable = bool::try_convert(value).unwrap_or(true);
+                        }
+                        "precision" => {
+                            precision = Some(value);
+                        }
+                        "scale" => {
+                            scale = Some(value);
                         }
                         _ => {
                             return Err(MagnusError::new(
@@ -197,9 +204,109 @@ pub fn parse_legacy_schema(
                     )
                 })?;
 
-                (PST::try_convert(type_str)?, format_str, nullable)
+                // Handle decimal type with precision and scale
+                let mut type_result = PST::try_convert(type_str)?;
+                
+                // If it's a decimal type and we have precision and scale, override the type
+                if let PST::Primitive(PrimitiveType::Decimal128(_, _)) = type_result {
+                    let precision_value = precision.unwrap_or_else(|| {
+                        let val: u8 = 18;
+                        val.into_value_with(ruby)
+                    });
+                    let scale_value = scale.unwrap_or_else(|| {
+                        let val: i8 = 2;
+                        val.into_value_with(ruby)
+                    });
+                    
+                    let precision_u8 = u8::try_convert(precision_value).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                        )
+                    })?;
+                    
+                    // Validate precision is in a valid range
+                    if precision_u8 < 1 {
+                        return Err(MagnusError::new(
+                            ruby.exception_arg_error(),
+                            format!(
+                                "Precision for decimal type must be at least 1, got {}", 
+                                precision_u8
+                            ),
+                        ));
+                    }
+                    
+                    if precision_u8 > 38 {
+                        return Err(MagnusError::new(
+                            ruby.exception_arg_error(),
+                            format!(
+                                "Precision for decimal type cannot exceed 38, got {}", 
+                                precision_u8
+                            ),
+                        ));
+                    }
+                    
+                    let scale_i8 = i8::try_convert(scale_value).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid scale value for decimal type, expected an integer".to_string(),
+                        )
+                    })?;
+                    
+                    // Validate scale is in a valid range relative to precision
+                    if scale_i8 < 0 {
+                        return Err(MagnusError::new(
+                            ruby.exception_arg_error(),
+                            format!(
+                                "Scale for decimal type cannot be negative, got {}", 
+                                scale_i8
+                            ),
+                        ));
+                    }
+                    
+                    if scale_i8 as u8 > precision_u8 {
+                        return Err(MagnusError::new(
+                            ruby.exception_arg_error(),
+                            format!(
+                                "Scale ({}) cannot be larger than precision ({}) for decimal type", 
+                                scale_i8, precision_u8
+                            ),
+                        ));
+                    }
+                    
+                    type_result = PST::Primitive(PrimitiveType::Decimal128(precision_u8, scale_i8));
+                } else if let Some(type_name) = parse_string_or_symbol(ruby, type_str)? {
+                    if type_name == "decimal" {
+                        let precision_value = precision.unwrap_or_else(|| {
+                            let val: u8 = 18;
+                            val.into_value_with(ruby)
+                        });
+                        let scale_value = scale.unwrap_or_else(|| {
+                            let val: i8 = 2;
+                            val.into_value_with(ruby)
+                        });
+                        
+                        let precision_u8 = u8::try_convert(precision_value).map_err(|_| {
+                            MagnusError::new(
+                                ruby.exception_type_error(),
+                                "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                            )
+                        })?;
+                        
+                        let scale_i8 = i8::try_convert(scale_value).map_err(|_| {
+                            MagnusError::new(
+                                ruby.exception_type_error(),
+                                "Invalid scale value for decimal type, expected an integer".to_string(),
+                            )
+                        })?;
+                        
+                        type_result = PST::Primitive(PrimitiveType::Decimal128(precision_u8, scale_i8));
+                    }
+                }
+
+                (type_result, format_str, nullable)
             } else {
-                (PST::try_convert(type_value.clone())?, None, true)
+                (PST::try_convert(*type_value)?, None, true)
             };
 
             schema.push(SchemaField {

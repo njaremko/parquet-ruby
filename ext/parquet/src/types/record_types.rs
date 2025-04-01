@@ -1,6 +1,11 @@
+use std::sync::OnceLock;
+
 use itertools::Itertools;
+use parquet::data_type::AsBytes;
 
 use super::*;
+
+static LOADED_BIGDECIMAL: OnceLock<bool> = OnceLock::new();
 
 #[derive(Debug)]
 pub enum RowRecord<S: BuildHasher + Default> {
@@ -145,8 +150,8 @@ impl TryIntoValue for ParquetField {
             Field::Str(s) => {
                 if self.1 {
                     Ok(simdutf8::basic::from_utf8(s.as_bytes())
-                        .map_err(|e| ParquetGemError::Utf8Error(e))
-                        .and_then(|s| Ok(s.into_value_with(handle)))?)
+                        .map_err(ParquetGemError::Utf8Error)
+                        .map(|s| s.into_value_with(handle))?)
                 } else {
                     let s = String::from_utf8_lossy(s.as_bytes());
                     Ok(s.into_value_with(handle))
@@ -209,12 +214,18 @@ impl TryIntoValue for ParquetField {
                         format!("{}e-{}", unscaled, scale)
                     }
                     Decimal::Bytes { value, scale, .. } => {
-                        // Convert bytes to string representation of unscaled value
-                        let unscaled = String::from_utf8_lossy(value.data());
+                        // value is a byte array containing the bytes for an i128 value in big endian order
+                        let casted = value.as_bytes()[..16].try_into()?;
+                        let unscaled = i128::from_be_bytes(casted);
                         format!("{}e-{}", unscaled, scale)
                     }
                 };
-                Ok(handle.eval(&format!("BigDecimal(\"{value}\")"))?)
+
+                // Load the bigdecimal gem if it's not already loaded
+                LOADED_BIGDECIMAL.get_or_init(|| handle.require("bigdecimal").unwrap_or_default());
+
+                let kernel = handle.module_kernel();
+                Ok(kernel.funcall::<_, _, Value>("BigDecimal", (value,))?)
             }
             Field::Group(row) => {
                 let hash = handle.hash_new();

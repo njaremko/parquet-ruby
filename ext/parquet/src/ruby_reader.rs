@@ -7,7 +7,7 @@ use parquet::{
     errors::ParquetError,
     file::reader::{ChunkReader, Length},
 };
-use std::{fs::File, sync::Mutex};
+use std::{fs::File, rc::Rc, sync::Mutex};
 use std::{
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     sync::Arc,
@@ -35,7 +35,7 @@ pub enum RubyReader {
 unsafe impl Send for RubyReader {}
 
 impl RubyReader {
-    pub fn new(ruby: Arc<Ruby>, value: Value) -> Result<Self, ParquetGemError> {
+    pub fn new(ruby: Rc<Ruby>, value: Value) -> Result<Self, ParquetGemError> {
         if RubyReader::is_seekable_io_like(&value) {
             Ok(RubyReader::RubyIoLike {
                 inner: Opaque::from(value),
@@ -165,9 +165,7 @@ impl Read for RubyReader {
                         buf.write_all(string_buffer)?;
                         Ok(string_buffer.len())
                     }
-                    None => {
-                        return Ok(0);
-                    }
+                    None => Ok(0),
                 }
             }
         }

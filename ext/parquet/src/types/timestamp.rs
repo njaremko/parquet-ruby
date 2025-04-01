@@ -2,15 +2,11 @@ use super::*;
 
 pub fn parse_zoned_timestamp(value: &ParquetValue) -> Result<jiff::Timestamp, ParquetGemError> {
     let (ts, tz) = match value {
-        ParquetValue::TimestampSecond(ts, tz) => (jiff::Timestamp::from_second(*ts).unwrap(), tz),
-        ParquetValue::TimestampMillis(ts, tz) => {
-            (jiff::Timestamp::from_millisecond(*ts).unwrap(), tz)
-        }
-        ParquetValue::TimestampMicros(ts, tz) => {
-            (jiff::Timestamp::from_microsecond(*ts).unwrap(), tz)
-        }
+        ParquetValue::TimestampSecond(ts, tz) => (jiff::Timestamp::from_second(*ts)?, tz),
+        ParquetValue::TimestampMillis(ts, tz) => (jiff::Timestamp::from_millisecond(*ts)?, tz),
+        ParquetValue::TimestampMicros(ts, tz) => (jiff::Timestamp::from_microsecond(*ts)?, tz),
         ParquetValue::TimestampNanos(ts, tz) => {
-            (jiff::Timestamp::from_nanosecond(*ts as i128).unwrap(), tz)
+            (jiff::Timestamp::from_nanosecond(*ts as i128)?, tz)
         }
         _ => {
             return Err(MagnusError::new(
@@ -50,7 +46,7 @@ pub fn parse_zoned_timestamp(value: &ParquetValue) -> Result<jiff::Timestamp, Pa
             Ok(ts.to_zoned(tz).timestamp())
         } else {
             // Try IANA timezone
-            match ts.in_tz(&tz) {
+            match ts.in_tz(tz) {
                 Ok(zoned) => Ok(zoned.timestamp()),
                 Err(_) => Ok(ts), // Fall back to UTC if timezone is invalid
             }
@@ -85,7 +81,7 @@ macro_rules! impl_timestamp_conversion {
 #[macro_export]
 macro_rules! impl_date_conversion {
     ($value:expr, $handle:expr) => {{
-        let ts = jiff::Timestamp::from_second(($value as i64) * 86400).unwrap();
+        let ts = jiff::Timestamp::from_second(($value as i64) * 86400)?;
         let formatted = ts.strftime("%Y-%m-%d").to_string();
         Ok(formatted.into_value_with($handle))
     }};

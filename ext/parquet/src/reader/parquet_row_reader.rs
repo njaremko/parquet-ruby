@@ -13,24 +13,23 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter as ParquetRowIter;
 use parquet::schema::types::{Type as SchemaType, TypePtr};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::rc::Rc;
+use std::sync::OnceLock;
 
 use super::common::{handle_block_or_enum, open_parquet_source};
 
 #[inline]
-pub fn parse_parquet_rows<'a>(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
+pub fn parse_parquet_rows(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
     let ruby = unsafe { Ruby::get_unchecked() };
-    Ok(
-        parse_parquet_rows_impl(Arc::new(ruby), rb_self, args).map_err(|e| {
-            let z: MagnusError = e.into();
-            z
-        })?,
-    )
+    parse_parquet_rows_impl(Rc::new(ruby), rb_self, args).map_err(|e| {
+        let z: MagnusError = e.into();
+        z
+    })
 }
 
 #[inline]
-fn parse_parquet_rows_impl<'a>(
-    ruby: Arc<Ruby>,
+fn parse_parquet_rows_impl(
+    ruby: Rc<Ruby>,
     rb_self: Value,
     args: &[Value],
 ) -> Result<Value, ParquetGemError> {
@@ -93,7 +92,7 @@ fn parse_parquet_rows_impl<'a>(
             let headers = OnceLock::new();
             let headers_clone = headers.clone();
             let iter = iter.map(move |row| {
-                row.and_then(|row| {
+                row.map(|row| {
                     let headers = headers_clone.get_or_init(|| {
                         let column_count = row.get_column_iter().count();
 
@@ -102,10 +101,7 @@ fn parse_parquet_rows_impl<'a>(
                             header_string.push(k.to_owned());
                         }
 
-                        let headers = StringCache::intern_many(&header_string)
-                            .expect("Failed to intern headers");
-
-                        headers
+                        StringCache::intern_many(&header_string).expect("Failed to intern headers")
                     });
 
                     let mut map =
@@ -113,10 +109,10 @@ fn parse_parquet_rows_impl<'a>(
                     for (i, (_, v)) in row.get_column_iter().enumerate() {
                         map.insert(headers[i], ParquetField(v.clone(), strict));
                     }
-                    Ok(map)
+                    map
                 })
-                .and_then(|row| Ok(RowRecord::Map::<RandomState>(row)))
-                .map_err(|e| ParquetGemError::from(e))
+                .map(RowRecord::Map::<RandomState>)
+                .map_err(ParquetGemError::from)
             });
 
             for result in iter {
@@ -126,16 +122,16 @@ fn parse_parquet_rows_impl<'a>(
         }
         ParserResultType::Array => {
             let iter = iter.map(|row| {
-                row.and_then(|row| {
+                row.map(|row| {
                     let column_count = row.get_column_iter().count();
                     let mut vec = Vec::with_capacity(column_count);
                     for (_, v) in row.get_column_iter() {
                         vec.push(ParquetField(v.clone(), strict));
                     }
-                    Ok(vec)
+                    vec
                 })
-                .and_then(|row| Ok(RowRecord::Vec::<RandomState>(row)))
-                .map_err(|e| ParquetGemError::from(e))
+                .map(RowRecord::Vec::<RandomState>)
+                .map_err(ParquetGemError::from)
             });
 
             for result in iter {

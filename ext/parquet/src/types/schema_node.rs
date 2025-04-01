@@ -68,7 +68,7 @@ fn parse_struct_node(
     })?;
 
     // Check for empty struct immediately
-    if fields_arr.len() == 0 {
+    if fields_arr.is_empty() {
         return Err(MagnusError::new(
             ruby.exception_arg_error(),
             format!("Cannot create a struct with zero fields. Struct name: '{}'. Parquet doesn't support empty structs", name)
@@ -175,6 +175,83 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
         "struct" => parse_struct_node(ruby, &node_hash, name, nullable),
         "list" => parse_list_node(ruby, &node_hash, name, nullable),
         "map" => parse_map_node(ruby, &node_hash, name, nullable),
+        "decimal" => {
+            // Check for precision and scale
+            let precision_val = node_hash.get(Symbol::new("precision"));
+            let scale_val = node_hash.get(Symbol::new("scale"));
+
+            // Handle different precision/scale combinations:
+            // 1. When no precision or scale - use max precision (38)
+            // 2. When precision only - use scale 0
+            // 3. When scale only - use max precision (38)
+            let (precision, scale) = match (precision_val, scale_val) {
+                (None, None) => (38, 0),  // Maximum accuracy, scale 0
+                (Some(p), None) => {
+                    // Precision provided, scale defaults to 0
+                    let prec = u8::try_convert(p).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                        )
+                    })?;
+                    (prec, 0)
+                },
+                (None, Some(s)) => {
+                    // Scale provided, precision set to maximum (38)
+                    let scl = i8::try_convert(s).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid scale value for decimal type, expected an integer".to_string(),
+                        )
+                    })?;
+                    (38, scl)
+                },
+                (Some(p), Some(s)) => {
+                    // Both provided
+                    let prec = u8::try_convert(p).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                        )
+                    })?;
+                    let scl = i8::try_convert(s).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid scale value for decimal type, expected an integer".to_string(),
+                        )
+                    })?;
+                    (prec, scl)
+                }
+            };
+
+            // Validate precision is in a valid range
+            if precision < 1 {
+                return Err(MagnusError::new(
+                    ruby.exception_arg_error(),
+                    format!(
+                        "Precision for decimal type must be at least 1, got {}",
+                        precision
+                    ),
+                ));
+            }
+
+            if precision > 38 {
+                return Err(MagnusError::new(
+                    ruby.exception_arg_error(),
+                    format!(
+                        "Precision for decimal type cannot exceed 38, got {}",
+                        precision
+                    ),
+                ));
+            }
+
+            Ok(SchemaNode::Primitive {
+                name,
+                parquet_type: PrimitiveType::Decimal128(precision, scale),
+                nullable,
+                format,
+            })
+        }
         // For primitives, provide better error messages when type isn't recognized
         other => {
             if let Some(parquet_type) = parse_primitive_type(other) {
@@ -188,7 +265,7 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
                 Err(MagnusError::new(
                     magnus::exception::arg_error(),
                     format!(
-                        "Unknown type: '{}'. Supported types are: struct, list, map, int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64, boolean, string, binary, date32, timestamp_millis, timestamp_micros",
+                        "Unknown type: '{}'. Supported types are: struct, list, map, int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64, boolean, string, binary, date32, timestamp_millis, timestamp_micros, decimal",
                         other
                     )
                 ))
@@ -216,6 +293,7 @@ fn parse_primitive_type(s: &str) -> Option<PrimitiveType> {
         "date" | "date32" => Some(PrimitiveType::Date32),
         "timestamp_millis" | "timestamp_ms" => Some(PrimitiveType::TimestampMillis),
         "timestamp_micros" | "timestamp_us" => Some(PrimitiveType::TimestampMicros),
+        "decimal" => Some(PrimitiveType::Decimal128(38, 0)), // Maximum precision, scale 0
         _ => None,
     }
 }
@@ -240,6 +318,9 @@ pub fn schema_node_to_arrow_field(node: &SchemaNode) -> ArrowField {
                 PrimitiveType::UInt64 => ArrowDataType::UInt64,
                 PrimitiveType::Float32 => ArrowDataType::Float32,
                 PrimitiveType::Float64 => ArrowDataType::Float64,
+                PrimitiveType::Decimal128(precision, scale) => {
+                    ArrowDataType::Decimal128(*precision, *scale)
+                }
                 PrimitiveType::Boolean => ArrowDataType::Boolean,
                 PrimitiveType::String => ArrowDataType::Utf8,
                 PrimitiveType::Binary => ArrowDataType::Binary,

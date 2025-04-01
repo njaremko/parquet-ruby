@@ -5,6 +5,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use parquet::arrow::ProjectionMask;
 use std::collections::HashMap;
 use std::fs::File;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use magnus::value::ReprValue;
@@ -21,7 +22,7 @@ use crate::ColumnRecord;
 /// returning either a File or a ThreadSafeRubyReader that can be used with
 /// parquet readers.
 pub fn open_parquet_source(
-    ruby: Arc<Ruby>,
+    ruby: Rc<Ruby>,
     to_read: Value,
 ) -> Result<Either<File, ThreadSafeRubyReader>, ParquetGemError> {
     if to_read.is_kind_of(ruby.class_string()) {
@@ -58,8 +59,8 @@ pub fn create_batch_reader<T: parquet::file::reader::ChunkReader + 'static>(
     columns: &Option<Vec<String>>,
     batch_size: Option<usize>,
 ) -> Result<(ParquetRecordBatchReader, std::sync::Arc<Schema>, i64), ParquetGemError> {
-    let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
-        .map_err(|e| ParquetGemError::Parquet(e))?;
+    let mut builder =
+        ParquetRecordBatchReaderBuilder::try_new(reader).map_err(ParquetGemError::Parquet)?;
 
     let schema = builder.schema().clone();
     let num_rows = builder.metadata().file_metadata().num_rows();
@@ -78,7 +79,7 @@ pub fn create_batch_reader<T: parquet::file::reader::ChunkReader + 'static>(
         builder = builder.with_batch_size(batch_size);
     }
 
-    let reader = builder.build().map_err(|e| ParquetGemError::Parquet(e))?;
+    let reader = builder.build().map_err(ParquetGemError::Parquet)?;
     Ok((reader, schema, num_rows))
 }
 
@@ -98,12 +99,12 @@ pub fn handle_empty_file(
             .map(|field| field.name().to_string())
             .collect();
         let interned_headers =
-            StringCache::intern_many(&headers).map_err(|e| ParquetGemError::HeaderIntern(e))?;
+            StringCache::intern_many(&headers).map_err(ParquetGemError::HeaderIntern)?;
         for field in interned_headers.iter() {
             map.insert(*field, vec![]);
         }
         let record = ColumnRecord::Map(map);
-        let _: Value = ruby.yield_value(record.try_into_value_with(&ruby)?)?;
+        let _: Value = ruby.yield_value(record.try_into_value_with(ruby)?)?;
         return Ok(true);
     }
     Ok(false)
