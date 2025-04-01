@@ -8,6 +8,78 @@ This project is a Ruby library wrapping the [parquet-rs](https://github.com/apac
 
 This library provides high-level bindings to parquet-rs with two primary APIs for reading Parquet files: row-wise and column-wise iteration. The column-wise API generally offers better performance, especially when working with subset of columns.
 
+### Metadata
+
+The `metadata` method provides detailed information about a Parquet file's structure and contents:
+
+```ruby
+require "parquet"
+
+# Get metadata from a file path
+metadata = Parquet.metadata("data.parquet")
+
+# Or from an IO object
+File.open("data.parquet", "rb") do |file|
+  metadata = Parquet.metadata(file)
+end
+
+# Example metadata output:
+# {
+#   "num_rows" => 3,
+#   "created_by" => "parquet-rs version 54.2.0",
+#   "key_value_metadata" => [
+#     {
+#       "key" => "ARROW:schema",
+#       "value" => "base64_encoded_schema"
+#     }
+#   ],
+#   "schema" => {
+#     "name" => "arrow_schema",
+#     "fields" => [
+#       {
+#         "name" => "id",
+#         "type" => "primitive",
+#         "physical_type" => "INT64",
+#         "repetition" => "OPTIONAL",
+#         "converted_type" => "NONE"
+#       },
+#       # ... other fields
+#     ]
+#   },
+#   "row_groups" => [
+#     {
+#       "num_columns" => 5,
+#       "num_rows" => 3,
+#       "total_byte_size" => 379,
+#       "columns" => [
+#         {
+#           "column_path" => "id",
+#           "num_values" => 3,
+#           "compression" => "UNCOMPRESSED",
+#           "total_compressed_size" => 91,
+#           "encodings" => ["PLAIN", "RLE", "RLE_DICTIONARY"],
+#           "statistics" => {
+#             "min_is_exact" => true,
+#             "max_is_exact" => true
+#           }
+#         },
+#         # ... other columns
+#       ]
+#     }
+#   ]
+# }
+```
+
+The metadata includes:
+- Total number of rows
+- File creation information
+- Key-value metadata (including Arrow schema)
+- Detailed schema information for each column
+- Row group information including:
+  - Number of columns and rows
+  - Total byte size
+  - Column-level details (compression, encodings, statistics)
+
 ### Row-wise Iteration
 
 The `each_row` method provides sequential access to individual rows:
@@ -246,6 +318,30 @@ schema = Parquet::Schema.define do
     field :item, :int32  # For list items in maps, item must be named 'item'
   end
 end
+
+### Decimal Precision Rules
+
+When working with decimal fields, the following rules apply for precision and scale:
+
+```ruby
+# No precision/scale specified - uses maximum precision (38) with scale 0
+field :amount1, :decimal
+
+# Only precision specified - scale defaults to 0
+field :amount2, :decimal, precision: 10
+
+# Only scale specified - uses maximum precision (38)
+field :amount3, :decimal, scale: 2
+
+# Both precision and scale specified
+field :amount4, :decimal, precision: 10, scale: 2
+```
+
+The rules are:
+1. When neither precision nor scale is provided, uses maximum precision (38) with scale 0
+2. When only precision is provided, scale defaults to 0
+3. When only scale is provided, uses maximum precision (38)
+4. When both are provided, uses the provided values
 
 # Sample data with nested structures
 data = [
