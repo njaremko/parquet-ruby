@@ -77,7 +77,15 @@ module Parquet
           raise ArgumentError, "list field `#{name}` requires `item:` type" unless item_type
           # Pass item_nullable if provided, otherwise use true as default
           item_nullable = kwargs[:item_nullable].nil? ? true : !!kwargs[:item_nullable]
-          field_hash[:item] = wrap_subtype(item_type, nullable: item_nullable, &block)
+          
+          # Pass precision and scale if type is decimal
+          if item_type == :decimal
+            precision = kwargs[:precision]
+            scale = kwargs[:scale]
+            field_hash[:item] = wrap_subtype(item_type, nullable: item_nullable, precision: precision, scale: scale, &block)
+          else
+            field_hash[:item] = wrap_subtype(item_type, nullable: item_nullable, &block)
+          end
         when :map
           # user must specify key:, value:
           key_type = kwargs[:key]
@@ -86,14 +94,41 @@ module Parquet
           # Pass key_nullable and value_nullable if provided, otherwise use true as default
           key_nullable = kwargs[:key_nullable].nil? ? true : !!kwargs[:key_nullable]
           value_nullable = kwargs[:value_nullable].nil? ? true : !!kwargs[:value_nullable]
+          
           field_hash[:key] = wrap_subtype(key_type, nullable: key_nullable)
-          field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, &block)
+          
+          # Pass precision and scale if value type is decimal
+          if value_type == :decimal
+            precision = kwargs[:precision]
+            scale = kwargs[:scale]
+            field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, precision: precision, scale: scale, &block)
+          else
+            field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, &block)
+          end
         when :decimal
-          # Store precision and scale for decimal type
-          precision = kwargs[:precision] || 18 # Default precision is 18
-          scale = kwargs[:scale] || 0 # Default scale is 0
-          field_hash[:precision] = precision
-          field_hash[:scale] = scale
+          # Store precision and scale for decimal type according to rules:
+          # 1. When neither precision nor scale is provided, use maximum precision (38)
+          # 2. When only precision is provided, scale defaults to 0
+          # 3. When only scale is provided, use maximum precision (38)
+          # 4. When both are provided, use the provided values
+          
+          if kwargs[:precision].nil? && kwargs[:scale].nil?
+            # No precision or scale provided - use maximum precision
+            field_hash[:precision] = 38
+            field_hash[:scale] = 0
+          elsif kwargs[:precision] && kwargs[:scale].nil?
+            # Precision only - scale defaults to 0
+            field_hash[:precision] = kwargs[:precision]
+            field_hash[:scale] = 0
+          elsif kwargs[:precision].nil? && kwargs[:scale]
+            # Scale only - use maximum precision
+            field_hash[:precision] = 38
+            field_hash[:scale] = kwargs[:scale]
+          else
+            # Both provided
+            field_hash[:precision] = kwargs[:precision]
+            field_hash[:scale] = kwargs[:scale]
+          end
         else
           # primitive type: :int32, :int64, :string, etc.
           # do nothing else special
@@ -157,8 +192,30 @@ module Parquet
         elsif t == :decimal
           # Handle decimal type with precision and scale
           result = { type: t, nullable: nullable, name: "item" }
-          result[:precision] = precision || 18 # Default precision is 18
-          result[:scale] = scale || 2 # Default scale is 2
+          
+          # Follow the same rules as in field() method:
+          # 1. When neither precision nor scale is provided, use maximum precision (38)
+          # 2. When only precision is provided, scale defaults to 0
+          # 3. When only scale is provided, use maximum precision (38)
+          # 4. When both are provided, use the provided values
+          if precision.nil? && scale.nil?
+            # No precision or scale provided - use maximum precision
+            result[:precision] = 38
+            result[:scale] = 0
+          elsif precision && scale.nil?
+            # Precision only - scale defaults to 0
+            result[:precision] = precision
+            result[:scale] = 0
+          elsif precision.nil? && scale
+            # Scale only - use maximum precision
+            result[:precision] = 38
+            result[:scale] = scale
+          else
+            # Both provided
+            result[:precision] = precision
+            result[:scale] = scale
+          end
+          
           result
         else
           # e.g. :int32 => { type: :int32, nullable: true }

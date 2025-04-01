@@ -180,16 +180,48 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
             let precision_val = node_hash.get(Symbol::new("precision"));
             let scale_val = node_hash.get(Symbol::new("scale"));
 
-            let precision: u8 = if let Some(v) = precision_val {
-                u8::try_convert(v).map_err(|_| {
-                    MagnusError::new(
-                        ruby.exception_type_error(),
-                        "Invalid precision value for decimal type, expected a positive integer"
-                            .to_string(),
-                    )
-                })?
-            } else {
-                18 // Default precision
+            // Handle different precision/scale combinations:
+            // 1. When no precision or scale - use max precision (38)
+            // 2. When precision only - use scale 0
+            // 3. When scale only - use max precision (38)
+            let (precision, scale) = match (precision_val, scale_val) {
+                (None, None) => (38, 0),  // Maximum accuracy, scale 0
+                (Some(p), None) => {
+                    // Precision provided, scale defaults to 0
+                    let prec = u8::try_convert(p).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                        )
+                    })?;
+                    (prec, 0)
+                },
+                (None, Some(s)) => {
+                    // Scale provided, precision set to maximum (38)
+                    let scl = i8::try_convert(s).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid scale value for decimal type, expected an integer".to_string(),
+                        )
+                    })?;
+                    (38, scl)
+                },
+                (Some(p), Some(s)) => {
+                    // Both provided
+                    let prec = u8::try_convert(p).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                        )
+                    })?;
+                    let scl = i8::try_convert(s).map_err(|_| {
+                        MagnusError::new(
+                            ruby.exception_type_error(),
+                            "Invalid scale value for decimal type, expected an integer".to_string(),
+                        )
+                    })?;
+                    (prec, scl)
+                }
             };
 
             // Validate precision is in a valid range
@@ -212,17 +244,6 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
                     ),
                 ));
             }
-
-            let scale: i8 = if let Some(v) = scale_val {
-                i8::try_convert(v).map_err(|_| {
-                    MagnusError::new(
-                        ruby.exception_type_error(),
-                        "Invalid scale value for decimal type, expected an integer".to_string(),
-                    )
-                })?
-            } else {
-                0
-            };
 
             Ok(SchemaNode::Primitive {
                 name,
@@ -272,7 +293,7 @@ fn parse_primitive_type(s: &str) -> Option<PrimitiveType> {
         "date" | "date32" => Some(PrimitiveType::Date32),
         "timestamp_millis" | "timestamp_ms" => Some(PrimitiveType::TimestampMillis),
         "timestamp_micros" | "timestamp_us" => Some(PrimitiveType::TimestampMicros),
-        "decimal" => Some(PrimitiveType::Decimal128(18, 2)), // Default precision 18, scale 2
+        "decimal" => Some(PrimitiveType::Decimal128(38, 0)), // Maximum precision, scale 0
         _ => None,
     }
 }

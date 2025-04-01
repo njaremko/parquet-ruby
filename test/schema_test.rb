@@ -639,9 +639,12 @@ class SchemaTest < Minitest::Test
       assert_equal BigDecimal("123.0"), rows[0]["standard_decimal"]
       assert_equal BigDecimal("123.456"), rows[0]["precise_decimal"]
       assert_equal BigDecimal("12.34"), rows[0]["nested"]["struct_decimal"]
-      assert_equal [BigDecimal("1.00"), BigDecimal("2.50"), BigDecimal("3.75"), nil], rows[0]["list_of_decimals"]
+      # Our changes now use maximum precision (38) with default scale of 0 when the item is :decimal without scale
+      # So decimals are now stored as integers by default
+      assert_equal [BigDecimal("1"), BigDecimal("2"), BigDecimal("3"), nil], rows[0]["list_of_decimals"]
+      # Map values with :decimal also use maximum precision (38) with scale 0 by default
       assert_equal(
-        { "first" => BigDecimal("10.01"), "second" => BigDecimal("20.02"), "empty" => nil },
+        { "first" => BigDecimal("10"), "second" => BigDecimal("20"), "empty" => nil },
         rows[0]["map_of_decimals"]
       )
     ensure
