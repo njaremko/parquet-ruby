@@ -177,7 +177,7 @@ class DecimalTest < Minitest::Test
       assert_equal BigDecimal("-0.123"), rows[2]["tiny_dec"]
       assert_equal BigDecimal("-1.234"), rows[2]["std_dec"]
       assert_equal BigDecimal("-9.99999"), rows[2]["special_val"]
-      
+
       # Check scientific notation values
       assert_equal BigDecimal("123"), rows[3]["int_val"]
       assert_equal BigDecimal("1234"), rows[3]["dec_val"]
@@ -676,13 +676,13 @@ class DecimalTest < Minitest::Test
       test_data = [
         [BigDecimal("123.45"), BigDecimal("123.45")],
         [BigDecimal("1.2345"), BigDecimal("1.2345")],
-        [BigDecimal("1.00"), BigDecimal("1")] 
+        [BigDecimal("1.00"), BigDecimal("1")]
       ]
 
       # Schema with different scale specifications
       schema = [
-        { "decimal_scale_2" => "decimal(5,2)" },  # 123.45 stored as 12345 with scale 2
-        { "decimal_scale_4" => "decimal(6,4)" }   # 123.45 stored as 1234500 with scale 4 
+        { "decimal_scale_2" => "decimal(5,2)" }, # 123.45 stored as 12345 with scale 2
+        { "decimal_scale_4" => "decimal(6,4)" } # 123.45 stored as 1234500 with scale 4
       ]
 
       Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
@@ -704,9 +704,153 @@ class DecimalTest < Minitest::Test
       assert_in_delta rows[1]["decimal_scale_2"].to_f, rows[1]["decimal_scale_4"].to_f, 0.01
 
       # Third row - values that represent the same number with different representations
-      assert_equal BigDecimal("1.00"), rows[2]["decimal_scale_2"] 
+      assert_equal BigDecimal("1.00"), rows[2]["decimal_scale_2"]
       assert_equal BigDecimal("1"), rows[2]["decimal_scale_4"]
       assert_equal rows[2]["decimal_scale_2"], rows[2]["decimal_scale_4"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_large_integer_decimals
+    temp_path = "test/decimal_large_integers.parquet"
+    begin
+      # Test data with large integer values that would typically use negative scales
+      test_data = [
+        [BigDecimal("1234500"), BigDecimal("9900000")],
+        [BigDecimal("1000"), BigDecimal("10000")],
+        [BigDecimal("-5000"), BigDecimal("-2500000")]
+      ]
+
+      # Schema with precision but scale 0 to handle large integers
+      schema = [
+        { "large_integer1" => "decimal(10,0)" }, # Large integer with no decimal points
+        { "large_integer2" => "decimal(10,0)" } # Another large integer value
+      ]
+
+      Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify data
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.size
+
+      # First row - check that large integer values are preserved
+      assert_equal BigDecimal("1234500"), rows[0]["large_integer1"]
+      assert_equal BigDecimal("9900000"), rows[0]["large_integer2"]
+
+      # Second row
+      assert_equal BigDecimal("1000"), rows[1]["large_integer1"]
+      assert_equal BigDecimal("10000"), rows[1]["large_integer2"]
+
+      # Third row - with negative values
+      assert_equal BigDecimal("-5000"), rows[2]["large_integer1"]
+      assert_equal BigDecimal("-2500000"), rows[2]["large_integer2"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_mixed_precision_decimals
+    temp_path = "test/decimal_mixed_precision.parquet"
+    begin
+      # Test data with values using different precisions
+      test_data = [
+        [BigDecimal("123.45"), BigDecimal("67890"), BigDecimal("0.00123")],
+        [BigDecimal("456.78"), BigDecimal("12345"), BigDecimal("0.00456")],
+        [BigDecimal("-789.01"), BigDecimal("-98765"), BigDecimal("-0.00789")]
+      ]
+
+      # Schema with mixed scale specifications, all positive
+      schema = [
+        { "decimal_medium" => "decimal(10,2)" }, # Medium precision (divide by 100)
+        { "decimal_integer" => "decimal(10,0)" }, # Integer precision (no division)
+        { "decimal_high" => "decimal(10,5)" } # High precision (divide by 100000)
+      ]
+
+      Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify data
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.size
+
+      # First row - verify different precisions are handled correctly
+      assert_equal BigDecimal("123.45"), rows[0]["decimal_medium"] # Medium precision
+      assert_equal BigDecimal("67890"), rows[0]["decimal_integer"] # Integer precision
+      assert_equal BigDecimal("0.00123"), rows[0]["decimal_high"] # High precision
+
+      # Second row
+      assert_equal BigDecimal("456.78"), rows[1]["decimal_medium"]
+      assert_equal BigDecimal("12345"), rows[1]["decimal_integer"]
+      assert_equal BigDecimal("0.00456"), rows[1]["decimal_high"]
+
+      # Third row - with negative values
+      assert_equal BigDecimal("-789.01"), rows[2]["decimal_medium"]
+      assert_equal BigDecimal("-98765"), rows[2]["decimal_integer"]
+      assert_equal BigDecimal("-0.00789"), rows[2]["decimal_high"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_varied_precision_decimals
+    temp_path = "test/decimal_varied_precision.parquet"
+    begin
+      # Test data with values using varied precisions, but within safe limits
+      test_data = [
+        [BigDecimal("1.23"), BigDecimal("987654"), BigDecimal("0.0000123")],
+        [BigDecimal("4.56"), BigDecimal("123456"), BigDecimal("0.0000456")],
+        [BigDecimal("-7.89"), BigDecimal("-987654"), BigDecimal("-0.0000789")]
+      ]
+
+      # Schema with varied precision specifications
+      schema = [
+        { "decimal_normal" => "decimal(10,2)" }, # Normal precision
+        { "decimal_large" => "decimal(10,0)" }, # Integer precision, no scale
+        { "decimal_tiny" => "decimal(10,7)" } # Higher precision
+      ]
+
+      Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify data
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.size
+
+      # First row - verify varied precision differences are handled correctly
+      assert_equal BigDecimal("1.23"), rows[0]["decimal_normal"] # Normal precision
+      assert_equal BigDecimal("987654"), rows[0]["decimal_large"] # Integer value
+      assert_equal BigDecimal("0.0000123"), rows[0]["decimal_tiny"] # Small value
+
+      # Second row
+      assert_equal BigDecimal("4.56"), rows[1]["decimal_normal"]
+      assert_equal BigDecimal("123456"), rows[1]["decimal_large"]
+      assert_equal BigDecimal("0.0000456"), rows[1]["decimal_tiny"]
+
+      # Third row - with negative values
+      assert_equal BigDecimal("-7.89"), rows[2]["decimal_normal"]
+      assert_equal BigDecimal("-987654"), rows[2]["decimal_large"]
+      assert_equal BigDecimal("-0.0000789"), rows[2]["decimal_tiny"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
+
+  def test_negative_scale_error_message
+    # This test captures the current error message for negative scales
+    temp_file = Tempfile.new("negative_scale_test")
+    temp_path = temp_file.path
+    temp_file.close
+
+    begin
+      schema = [{ "negative_scale" => "decimal(10,-2)" }]
+      test_data = [[BigDecimal("12345")]]
+
+      error = assert_raises(RuntimeError) { Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path) }
+
+      # Print the actual error message for debugging
+      puts "Error when using negative scale: #{error.message}"
+
+      # Assert that the error contains this specific message about invalid scale
+      assert_match(/Invalid DECIMAL scale: -2/, error.message, "Error should mention that scale -2 is invalid")
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
