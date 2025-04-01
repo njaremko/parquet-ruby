@@ -2,8 +2,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use super::*;
-use arrow_array::builder::*;
 use arrow_array::builder::MapFieldNames;
+use arrow_array::builder::*;
 use arrow_schema::{DataType, Field, Fields, TimeUnit};
 use jiff::tz::{Offset, TimeZone};
 use magnus::{RArray, RString, TryConvert};
@@ -368,15 +368,17 @@ fn create_arrow_builder_for_type(
         ParquetSchemaType::Primitive(PrimitiveType::Decimal128(precision, scale)) => {
             // Create a Decimal128Builder with specific precision and scale
             let builder = Decimal128Builder::with_capacity(cap);
-            
+
             // Set precision and scale for the decimal and return the new builder
-            let builder_with_precision = builder.with_precision_and_scale(*precision, *scale).map_err(|e| {
-                MagnusError::new(
-                    magnus::exception::runtime_error(),
-                    format!("Failed to set precision and scale: {}", e),
-                )
-            })?;
-            
+            let builder_with_precision = builder
+                .with_precision_and_scale(*precision, *scale)
+                .map_err(|e| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Failed to set precision and scale: {}", e),
+                    )
+                })?;
+
             Ok(Box::new(builder_with_precision))
         }
         ParquetSchemaType::Primitive(PrimitiveType::String) => {
@@ -857,7 +859,7 @@ fn fill_builder(
 
             for val in values {
                 match val {
-                    ParquetValue::Decimal128(d) => typed_builder.append_value(*d),
+                    ParquetValue::Decimal128(d, _scale) => typed_builder.append_value(*d),
                     ParquetValue::Float64(f) => {
                         // Scale the float to the desired precision and scale
                         let scaled_value = (*f * 10_f64.powi(*scale as i32)) as i128;
@@ -1161,7 +1163,7 @@ fn fill_builder(
                                             )
                                         })?
                                         .append_value(bytes),
-                                    ParquetValue::Decimal128(x) => typed_builder
+                                    ParquetValue::Decimal128(x, _scale) => typed_builder
                                         .field_builder::<Decimal128Builder>(i)
                                         .ok_or_else(|| {
                                             MagnusError::new(

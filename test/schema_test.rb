@@ -247,7 +247,7 @@ class SchemaTest < Minitest::Test
         "John Doe",
         true,
         95.5,
-        "123.45", # Decimal value
+        BigDecimal("123.45"), # Decimal value
         Time.now,
         %w[ruby parquet],
         { "version" => "1.0", "env" => "test" },

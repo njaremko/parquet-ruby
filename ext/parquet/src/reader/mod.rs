@@ -1,6 +1,7 @@
 mod common;
 mod parquet_column_reader;
 mod parquet_row_reader;
+mod unified;
 use std::{fs::File, rc::Rc};
 
 use magnus::{value::ReprValue, Error as MagnusError, Ruby, Value};

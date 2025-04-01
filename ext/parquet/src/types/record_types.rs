@@ -5,7 +5,31 @@ use parquet::data_type::AsBytes;
 
 use super::*;
 
-static LOADED_BIGDECIMAL: OnceLock<bool> = OnceLock::new();
+pub static LOADED_BIGDECIMAL: OnceLock<bool> = OnceLock::new();
+
+/// Format decimal value with appropriate scale for BigDecimal conversion
+/// Handles positive and negative scales correctly for i8 scale
+pub fn format_decimal_with_i8_scale<T: std::fmt::Display>(value: T, scale: i8) -> String {
+    if scale >= 0 {
+        // Positive scale means divide (move decimal point left)
+        format!("{}e-{}", value, scale)
+    } else {
+        // Negative scale means multiply (move decimal point right)
+        format!("{}e{}", value, -scale)
+    }
+}
+
+/// Format decimal value with appropriate scale for BigDecimal conversion
+/// Handles positive and negative scales correctly for i32 scale
+pub fn format_decimal_with_i32_scale<T: std::fmt::Display>(value: T, scale: i32) -> String {
+    if scale >= 0 {
+        // Positive scale means divide (move decimal point left)
+        format!("{}e-{}", value, scale)
+    } else {
+        // Negative scale means multiply (move decimal point right)
+        format!("{}e{}", value, -scale)
+    }
+}
 
 #[derive(Debug)]
 pub enum RowRecord<S: BuildHasher + Default> {
@@ -207,17 +231,17 @@ impl TryIntoValue for ParquetField {
                 let value = match d {
                     Decimal::Int32 { value, scale, .. } => {
                         let unscaled = i32::from_be_bytes(value);
-                        format!("{}e-{}", unscaled, scale)
+                        format_decimal_with_i32_scale(unscaled, scale)
                     }
                     Decimal::Int64 { value, scale, .. } => {
                         let unscaled = i64::from_be_bytes(value);
-                        format!("{}e-{}", unscaled, scale)
+                        format_decimal_with_i32_scale(unscaled, scale)
                     }
                     Decimal::Bytes { value, scale, .. } => {
                         // value is a byte array containing the bytes for an i128 value in big endian order
                         let casted = value.as_bytes()[..16].try_into()?;
                         let unscaled = i128::from_be_bytes(casted);
-                        format!("{}e-{}", unscaled, scale)
+                        format_decimal_with_i32_scale(unscaled, scale)
                     }
                 };
 

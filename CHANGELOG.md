@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.5
+- More improvements to decimal support
+
 ## 0.5.4
 - Fix an inconsistency in how precision and scale defaults were treated when writing parquet
 

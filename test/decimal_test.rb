@@ -668,4 +668,47 @@ class DecimalTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_decimal_comparison_with_different_scales
+    temp_path = "test/decimal_scale_comparison.parquet"
+    begin
+      # Test data with different scales for same values
+      test_data = [
+        [BigDecimal("123.45"), BigDecimal("123.45")],
+        [BigDecimal("1.2345"), BigDecimal("1.2345")],
+        [BigDecimal("1.00"), BigDecimal("1")] 
+      ]
+
+      # Schema with different scale specifications
+      schema = [
+        { "decimal_scale_2" => "decimal(5,2)" },  # 123.45 stored as 12345 with scale 2
+        { "decimal_scale_4" => "decimal(6,4)" }   # 123.45 stored as 1234500 with scale 4 
+      ]
+
+      Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
+
+      # Read back and verify data
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal 3, rows.size
+
+      # First row - same value with different scales should compare equal
+      assert_equal BigDecimal("123.45"), rows[0]["decimal_scale_2"]
+      assert_equal BigDecimal("123.45"), rows[0]["decimal_scale_4"]
+      assert_equal rows[0]["decimal_scale_2"], rows[0]["decimal_scale_4"]
+
+      # Second row - values may be represented differently based on scale
+      assert_equal BigDecimal("1.23"), rows[1]["decimal_scale_2"] # Only 2 decimal places retained
+      assert_equal BigDecimal("1.2345"), rows[1]["decimal_scale_4"] # All 4 decimal places retained
+      # Test the equals implementation allowing different scales
+      # Note: We use assert_in_delta for the equality check, as the values might be slightly different due to rounding
+      assert_in_delta rows[1]["decimal_scale_2"].to_f, rows[1]["decimal_scale_4"].to_f, 0.01
+
+      # Third row - values that represent the same number with different representations
+      assert_equal BigDecimal("1.00"), rows[2]["decimal_scale_2"] 
+      assert_equal BigDecimal("1"), rows[2]["decimal_scale_4"]
+      assert_equal rows[2]["decimal_scale_2"], rows[2]["decimal_scale_4"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
 end
