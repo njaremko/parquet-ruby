@@ -308,43 +308,170 @@ schema = Parquet::Schema.define do
     field :description, :string
   end
 
-  # Nested lists
+  # Nested lists (list of lists of strings)
   field :nested_lists, :list, item: :list do
-    field :item, :string  # For nested lists, inner item must be named 'item'
+    field :item, :string  # REQUIRED: Inner item field MUST be named 'item' for nested lists
   end
 
   # Map of lists
   field :map_of_lists, :map, key: :string, value: :list do
-    field :item, :int32  # For list items in maps, item must be named 'item'
+    field :item, :int32  # REQUIRED: List items in maps MUST be named 'item'
   end
 end
 
-### Decimal Precision Rules
+### Nested Lists
 
-When working with decimal fields, the following rules apply for precision and scale:
+When working with nested lists (a list of lists), there are specific requirements:
+
+1. Using the Schema DSL:
+```ruby
+# A list of lists of strings
+field :nested_lists, :list, item: :list do
+  field :item, :string  # For nested lists, inner item MUST be named 'item'
+end
+```
+
+2. Using hash-based schema format:
+```ruby
+# A list of lists of integers
+{ "nested_numbers" => "list<list<int32>>" }
+```
+
+The data for nested lists is structured as an array of arrays:
+```ruby
+# Data for the nested_lists field
+[["a", "b"], ["c", "d", "e"], []]  # Last one is an empty inner list
+```
+
+### Decimal Data Type
+
+Parquet supports decimal numbers with configurable precision and scale, which is essential for financial applications where exact decimal representation is critical. The library seamlessly converts between Ruby's `BigDecimal` and Parquet's decimal type.
+
+#### Decimal Precision and Scale
+
+When working with decimal fields, you need to understand two key parameters:
+
+- **Precision**: The total number of significant digits (both before and after the decimal point)
+- **Scale**: The number of digits after the decimal point
+
+The rules for defining decimals are:
 
 ```ruby
 # No precision/scale specified - uses maximum precision (38) with scale 0
-field :amount1, :decimal
+field :amount1, :decimal  # Equivalent to INTEGER with 38 digits
 
 # Only precision specified - scale defaults to 0
-field :amount2, :decimal, precision: 10
+field :amount2, :decimal, precision: 10  # 10 digits, no decimal places
 
 # Only scale specified - uses maximum precision (38)
-field :amount3, :decimal, scale: 2
+field :amount3, :decimal, scale: 2  # 38 digits with 2 decimal places
 
 # Both precision and scale specified
-field :amount4, :decimal, precision: 10, scale: 2
+field :amount4, :decimal, precision: 10, scale: 2  # 10 digits with 2 decimal places
 ```
 
-The rules are:
-1. When neither precision nor scale is provided, uses maximum precision (38) with scale 0
-2. When only precision is provided, scale defaults to 0
-3. When only scale is provided, uses maximum precision (38)
-4. When both are provided, uses the provided values
+#### Financial Data Example
 
-# Sample data with nested structures
+Here's a practical example for a financial application:
+
 ```ruby
+require "parquet"
+require "bigdecimal"
+
+# Schema for financial transactions
+schema = Parquet::Schema.define do
+  field :transaction_id, :string, nullable: false
+  field :timestamp, :timestamp_millis, nullable: false
+  field :amount, :decimal, precision: 12, scale: 2  # Supports up to 10^10 with 2 decimal places
+  field :balance, :decimal, precision: 16, scale: 2  # Larger precision for running balances
+  field :currency, :string
+  field :exchange_rate, :decimal, precision: 10, scale: 6  # 6 decimal places for forex rates
+  field :fee, :decimal, precision: 8, scale: 2, nullable: true  # Optional fee
+  field :category, :string
+end
+
+# Sample financial data
+transactions = [
+  [
+    "T-12345",
+    Time.now,
+    BigDecimal("1256.99"),       # amount (directly using BigDecimal)
+    BigDecimal("10250.25"),      # balance
+    "USD",
+    BigDecimal("1.0"),           # exchange_rate
+    BigDecimal("2.50"),          # fee
+    "Groceries"
+  ],
+  [
+    "T-12346",
+    Time.now - 86400,            # yesterday
+    BigDecimal("-89.50"),        # negative amount for withdrawal
+    BigDecimal("10160.75"),      # updated balance
+    "USD",
+    BigDecimal("1.0"),           # exchange_rate
+    nil,                         # no fee
+    "Transportation"
+  ],
+  [
+    "T-12347",
+    Time.now - 172800,           # two days ago
+    BigDecimal("250.00"),        # amount
+    BigDecimal("10410.75"),      # balance
+    "EUR",                       # different currency
+    BigDecimal("1.05463"),       # exchange_rate
+    BigDecimal("1.75"),          # fee
+    "Entertainment"
+  ]
+]
+
+# Write financial data to Parquet file
+Parquet.write_rows(transactions.each, schema: schema, write_to: "financial_data.parquet")
+
+# Read back transactions
+Parquet.each_row("financial_data.parquet") do |transaction|
+  # Access decimal fields as BigDecimal objects
+  puts "Transaction: #{transaction['transaction_id']}"
+  puts "  Amount: #{transaction['currency']} #{transaction['amount']}"
+  puts "  Balance: $#{transaction['balance']}"
+  puts "  Fee: #{transaction['fee'] || 'No fee'}"
+
+  # You can perform precise decimal calculations
+  if transaction['currency'] != 'USD'
+    usd_amount = transaction['amount'] * transaction['exchange_rate']
+    puts "  USD Equivalent: $#{usd_amount.round(2)}"
+  end
+end
+```
+
+#### Decimal Type Storage Considerations
+
+Parquet optimizes storage based on the precision:
+- For precision ≤ 9: Uses 4-byte INT32
+- For precision ≤ 18: Uses 8-byte INT64
+- For precision ≤ 38: Uses 16-byte BYTE_ARRAY
+
+Choose appropriate precision and scale for your data to optimize storage while ensuring adequate range:
+
+```ruby
+# Banking examples
+field :account_balance, :decimal, precision: 16, scale: 2   # Up to 14 digits before decimal point
+field :interest_rate, :decimal, precision: 8, scale: 6      # Rate with 6 decimal places (e.g., 0.015625)
+
+# E-commerce examples
+field :product_price, :decimal, precision: 10, scale: 2     # Product price
+field :shipping_weight, :decimal, precision: 6, scale: 3    # Weight in kg with 3 decimal places
+
+# Analytics examples
+field :conversion_rate, :decimal, precision: 5, scale: 4    # Rate like 0.0123
+field :daily_revenue, :decimal, precision: 14, scale: 2     # Daily revenue with 2 decimal places
+```
+
+### Sample Data with Nested Structures
+
+Here's an example showing how to use the schema defined earlier with sample data:
+
+```ruby
+# Sample data with nested structures
 data = [
   [
     1,                            # id
@@ -368,7 +495,7 @@ data = [
       "feature1" => { "count" => 5, "description" => "Main feature" },
       "feature2" => { "count" => 3, "description" => "Secondary feature" }
     },
-    [["a", "b"], ["c", "d", "e"]],  # nested_lists
+    [["a", "b"], ["c", "d", "e"]],  # nested_lists (a list of lists of strings)
     {                                # map_of_lists
       "group1" => [1, 2, 3],
       "group2" => [4, 5, 6]
