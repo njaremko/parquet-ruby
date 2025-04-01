@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.4
+- Fix an inconsistency in how precision and scale defaults were treated when writing parquet
+
 ## 0.5.3
 - _Actually_ fix support for Ruby 3.1
 - Add support for decimal type

@@ -58,7 +58,7 @@ module Parquet
       #   - `key:, value:` if type == :map
       #   - `key_nullable:, value_nullable:` controls nullability of map keys/values (default: true)
       #   - `format:` if you want to store some format string
-      #   - `precision:, scale:` if type == :decimal (precision defaults to 18, scale to 2)
+      #   - `precision:, scale:` if type == :decimal (precision defaults to 38, scale to 0)
       #   - `nullable:` default to true if not specified
       def field(name, type, nullable: true, **kwargs, &block)
         field_hash = { name: name.to_s, type: type, nullable: !!nullable }
@@ -77,12 +77,18 @@ module Parquet
           raise ArgumentError, "list field `#{name}` requires `item:` type" unless item_type
           # Pass item_nullable if provided, otherwise use true as default
           item_nullable = kwargs[:item_nullable].nil? ? true : !!kwargs[:item_nullable]
-          
+
           # Pass precision and scale if type is decimal
           if item_type == :decimal
             precision = kwargs[:precision]
             scale = kwargs[:scale]
-            field_hash[:item] = wrap_subtype(item_type, nullable: item_nullable, precision: precision, scale: scale, &block)
+            field_hash[:item] = wrap_subtype(
+              item_type,
+              nullable: item_nullable,
+              precision: precision,
+              scale: scale,
+              &block
+            )
           else
             field_hash[:item] = wrap_subtype(item_type, nullable: item_nullable, &block)
           end
@@ -94,14 +100,20 @@ module Parquet
           # Pass key_nullable and value_nullable if provided, otherwise use true as default
           key_nullable = kwargs[:key_nullable].nil? ? true : !!kwargs[:key_nullable]
           value_nullable = kwargs[:value_nullable].nil? ? true : !!kwargs[:value_nullable]
-          
+
           field_hash[:key] = wrap_subtype(key_type, nullable: key_nullable)
-          
+
           # Pass precision and scale if value type is decimal
           if value_type == :decimal
             precision = kwargs[:precision]
             scale = kwargs[:scale]
-            field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, precision: precision, scale: scale, &block)
+            field_hash[:value] = wrap_subtype(
+              value_type,
+              nullable: value_nullable,
+              precision: precision,
+              scale: scale,
+              &block
+            )
           else
             field_hash[:value] = wrap_subtype(value_type, nullable: value_nullable, &block)
           end
@@ -111,7 +123,7 @@ module Parquet
           # 2. When only precision is provided, scale defaults to 0
           # 3. When only scale is provided, use maximum precision (38)
           # 4. When both are provided, use the provided values
-          
+
           if kwargs[:precision].nil? && kwargs[:scale].nil?
             # No precision or scale provided - use maximum precision
             field_hash[:precision] = 38
@@ -192,7 +204,7 @@ module Parquet
         elsif t == :decimal
           # Handle decimal type with precision and scale
           result = { type: t, nullable: nullable, name: "item" }
-          
+
           # Follow the same rules as in field() method:
           # 1. When neither precision nor scale is provided, use maximum precision (38)
           # 2. When only precision is provided, scale defaults to 0
@@ -215,7 +227,7 @@ module Parquet
             result[:precision] = precision
             result[:scale] = scale
           end
-          
+
           result
         else
           # e.g. :int32 => { type: :int32, nullable: true }

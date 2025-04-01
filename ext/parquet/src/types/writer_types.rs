@@ -101,31 +101,48 @@ impl FromStr for ParquetSchemaType<'_> {
         // Check if it's a decimal type with precision and scale
         if let Some(decimal_params) = s.strip_prefix("decimal(").and_then(|s| s.strip_suffix(")")) {
             let parts: Vec<&str> = decimal_params.split(',').collect();
-            if parts.len() != 2 {
+
+            // Handle both single parameter (precision only) and two parameters (precision and scale)
+            if parts.len() == 1 {
+                // Only precision provided, scale defaults to 0
+                let precision = parts[0].trim().parse::<u8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid precision value in decimal type: {}", parts[0]),
+                    )
+                })?;
+
+                return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(
+                    precision, 0,
+                )));
+            } else if parts.len() == 2 {
+                // Both precision and scale provided
+                let precision = parts[0].trim().parse::<u8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid precision value in decimal type: {}", parts[0]),
+                    )
+                })?;
+
+                let scale = parts[1].trim().parse::<i8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid scale value in decimal type: {}", parts[1]),
+                    )
+                })?;
+
+                return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(
+                    precision, scale,
+                )));
+            } else {
                 return Err(MagnusError::new(
                     magnus::exception::runtime_error(),
                     format!(
-                        "Invalid decimal format. Expected 'decimal(precision,scale)', got '{}'",
+                        "Invalid decimal format. Expected 'decimal(precision)' or 'decimal(precision,scale)', got '{}'",
                         s
                     ),
                 ));
             }
-
-            let precision = parts[0].trim().parse::<u8>().map_err(|_| {
-                MagnusError::new(
-                    magnus::exception::runtime_error(),
-                    format!("Invalid precision value in decimal type: {}", parts[0]),
-                )
-            })?;
-
-            let scale = parts[1].trim().parse::<i8>().map_err(|_| {
-                MagnusError::new(
-                    magnus::exception::runtime_error(),
-                    format!("Invalid scale value in decimal type: {}", parts[1]),
-                )
-            })?;
-
-            return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(precision, scale)));
         }
 
         // Handle primitive types
@@ -146,7 +163,9 @@ impl FromStr for ParquetSchemaType<'_> {
             "date32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Date32)),
             "timestamp_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis)),
             "timestamp_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros)),
-            "decimal" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(18, 2))), // Default precision 18, scale 2
+            "decimal" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(
+                38, 0,
+            ))),
             "list" => Ok(ParquetSchemaType::List(Box::new(ListField {
                 item_type: ParquetSchemaType::Primitive(PrimitiveType::String),
                 format: None,

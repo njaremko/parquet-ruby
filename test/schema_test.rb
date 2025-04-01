@@ -316,13 +316,14 @@ class SchemaTest < Minitest::Test
     begin
       # Convert BigDecimal to formatted strings with exact decimal places
       # to avoid scientific notation that could cause parsing issues
-      data = [%w[123.45 9876.54321 -999.99], %w[0.01 1234567.89 -0.001]].each
+      data = [%w[123.45 9876.54321 -999.99 1234567890], %w[0.01 1234567.89 -0.001 9876543210]].each
 
       # Schema with different precisions and scales
       schema = [
         { "decimal_5_2" => "decimal(5,2)" },
         { "decimal_10_5" => "decimal(10,5)" },
-        { "negative_decimal" => "decimal(5,2)" }
+        { "negative_decimal" => "decimal(5,2)" },
+        { "decimal_10" => "decimal(10)" } # Testing decimal with precision only, scale defaults to 0
       ]
 
       Parquet.write_rows(data, schema: schema, write_to: temp_path)
@@ -335,11 +336,13 @@ class SchemaTest < Minitest::Test
       assert_equal BigDecimal("123.45"), rows[0]["decimal_5_2"]
       assert_equal BigDecimal("9876.54321"), rows[0]["decimal_10_5"]
       assert_equal BigDecimal("-999.99"), rows[0]["negative_decimal"]
+      assert_equal BigDecimal("1234567890"), rows[0]["decimal_10"] # Integer value with scale 0
 
       # Second row
       assert_equal BigDecimal("0.01"), rows[1]["decimal_5_2"]
       assert_equal BigDecimal("1234567.89"), rows[1]["decimal_10_5"]
       assert_equal BigDecimal("0.00"), rows[1]["negative_decimal"] # Scale is 2, so -0.001 becomes 0.00
+      assert_equal BigDecimal("9876543210"), rows[1]["decimal_10"] # Integer value with scale 0
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -605,7 +608,7 @@ class SchemaTest < Minitest::Test
       Parquet::Schema.define do
         field "id", :int32
         field "name", :string
-        field "standard_decimal", :decimal # Uses default precision 18, scale 2
+        field "standard_decimal", :decimal
         field "precise_decimal", :decimal, precision: 9, scale: 3 # Specifies precision and scale
         field "nested", :struct do
           field "struct_decimal", :decimal, precision: 5, scale: 2
@@ -660,7 +663,7 @@ class SchemaTest < Minitest::Test
     schema =
       Parquet::Schema.define do
         field "id", :int32
-        field "standard_decimal", :decimal # Uses default precision 18, scale 2
+        field "standard_decimal", :decimal
         field "high_precision", :decimal, precision: 38, scale: 10
         field "zero_scale", :decimal, precision: 10, scale: 0
       end
