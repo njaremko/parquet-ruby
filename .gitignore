@@ -16,3 +16,5 @@ test/*.parquet
 .cursorrules
 CLAUDE.md
 .mcp.json
+arrow-rs
+magnus
