@@ -964,19 +964,20 @@ class SchemaTest < Minitest::Test
   end
 
   def test_schema_with_timestamp_string
+    format = "%Y-%m-%dT%H:%M:%S.%f"
     # Define a schema with a timestamp field that uses a custom format
     schema =
       Parquet::Schema.define do
         field :id, :int64, nullable: false
-        field :event_time, :string, format: "ISO8601" # Custom timestamp format indicator
+        field :event_time, :timestamp_millis, format: format # ISO8601 format with milliseconds, no timezone
         field :description, :string
       end
 
     # Create test data with ISO8601 formatted timestamps
     data = [
-      [1, "2024-07-10T17:09:28-04:00", "Login"],
-      [2, "2024-07-10T17:30:00-04:00", "Logout"],
-      [3, "2024-07-11T09:15:45+00:00", "Purchase"]
+      [1, "2024-07-10T17:09:28.123", "Login"],
+      [2, "2024-07-10T17:30:00.321", "Logout"],
+      [3, "2024-07-11T09:15:45.543", "Purchase"]
     ]
 
     # Verify the schema structure
@@ -985,8 +986,8 @@ class SchemaTest < Minitest::Test
 
     # Check the timestamp field specifically
     timestamp_field = schema[:fields].find { |f| f[:name] == "event_time" }
-    assert_equal :string, timestamp_field[:type]
-    assert_equal "ISO8601", timestamp_field[:format]
+    assert_equal :timestamp_millis, timestamp_field[:type]
+    assert_equal format, timestamp_field[:format]
     assert timestamp_field[:nullable]
 
     # Test writing and reading with this schema
@@ -996,17 +997,19 @@ class SchemaTest < Minitest::Test
       Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
 
       # Read the data back
-      result = Parquet.read(temp_path).to_a
+      result = Parquet.each_row(temp_path).to_a
 
       # Verify the data was preserved correctly
       assert_equal 3, result.length
-      assert_equal "2024-07-10T17:09:28-04:00", result[0]["event_time"]
-      assert_equal "2024-07-11T09:15:45+00:00", result[2]["event_time"]
+      assert_equal Time.parse("2024-07-10T17:09:28.123+00:00"), result[0]["event_time"]
+      assert_equal Time.parse("2024-07-11T09:15:45.543+00:00"), result[2]["event_time"]
 
       # Verify the format metadata was preserved
       metadata = Parquet.metadata(temp_path)
+
       event_time_field = metadata["schema"]["fields"].find { |f| f["name"] == "event_time" }
-      assert_equal "ISO8601", event_time_field["format"]
+      assert_equal "Timestamp { is_adjusted_to_u_t_c: false, unit: MILLIS(MilliSeconds) }",
+                   event_time_field["logical_type"]
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

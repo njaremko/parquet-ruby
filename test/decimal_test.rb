@@ -846,9 +846,6 @@ class DecimalTest < Minitest::Test
 
       error = assert_raises(RuntimeError) { Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path) }
 
-      # Print the actual error message for debugging
-      puts "Error when using negative scale: #{error.message}"
-
       # Assert that the error contains this specific message about invalid scale
       assert_match(/Invalid DECIMAL scale: -2/, error.message, "Error should mention that scale -2 is invalid")
     ensure
