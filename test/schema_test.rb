@@ -962,4 +962,53 @@ class SchemaTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_schema_with_timestamp_string
+    # Define a schema with a timestamp field that uses a custom format
+    schema =
+      Parquet::Schema.define do
+        field :id, :int64, nullable: false
+        field :event_time, :string, format: "ISO8601" # Custom timestamp format indicator
+        field :description, :string
+      end
+
+    # Create test data with ISO8601 formatted timestamps
+    data = [
+      [1, "2024-07-10T17:09:28-04:00", "Login"],
+      [2, "2024-07-10T17:30:00-04:00", "Logout"],
+      [3, "2024-07-11T09:15:45+00:00", "Purchase"]
+    ]
+
+    # Verify the schema structure
+    assert_equal :struct, schema[:type]
+    assert_equal 3, schema[:fields].length
+
+    # Check the timestamp field specifically
+    timestamp_field = schema[:fields].find { |f| f[:name] == "event_time" }
+    assert_equal :string, timestamp_field[:type]
+    assert_equal "ISO8601", timestamp_field[:format]
+    assert timestamp_field[:nullable]
+
+    # Test writing and reading with this schema
+    temp_path = "test/timestamp_schema_test.parquet"
+    begin
+      # Write test data to file
+      Parquet.write_rows(data.each, schema: schema, write_to: temp_path)
+
+      # Read the data back
+      result = Parquet.read(temp_path).to_a
+
+      # Verify the data was preserved correctly
+      assert_equal 3, result.length
+      assert_equal "2024-07-10T17:09:28-04:00", result[0]["event_time"]
+      assert_equal "2024-07-11T09:15:45+00:00", result[2]["event_time"]
+
+      # Verify the format metadata was preserved
+      metadata = Parquet.metadata(temp_path)
+      event_time_field = metadata["schema"]["fields"].find { |f| f["name"] == "event_time" }
+      assert_equal "ISO8601", event_time_field["format"]
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
 end
