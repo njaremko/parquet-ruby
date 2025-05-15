@@ -238,10 +238,32 @@ impl TryIntoValue for ParquetField {
                         format_decimal_with_i32_scale(unscaled, scale)
                     }
                     Decimal::Bytes { value, scale, .. } => {
-                        // value is a byte array containing the bytes for an i128 value in big endian order
-                        let casted = value.as_bytes()[..16].try_into()?;
-                        let unscaled = i128::from_be_bytes(casted);
-                        format_decimal_with_i32_scale(unscaled, scale)
+                        match value.len() {
+                            4 => {
+                                // value is a byte array containing the bytes for an i32 value in big endian order
+                                let casted = value.as_bytes()[..4].try_into()?;
+                                let unscaled = i32::from_be_bytes(casted);
+                                format_decimal_with_i32_scale(unscaled, scale)
+                            }
+                            8 => {
+                                // value is a byte array containing the bytes for an i64 value in big endian order
+                                let casted = value.as_bytes()[..8].try_into()?;
+                                let unscaled = i64::from_be_bytes(casted);
+                                format_decimal_with_i32_scale(unscaled, scale)
+                            }
+                            16 => {
+                                // value is a byte array containing the bytes for an i128 value in big endian order
+                                let casted = value.as_bytes()[..16].try_into()?;
+                                let unscaled = i128::from_be_bytes(casted);
+                                format_decimal_with_i32_scale(unscaled, scale)
+                            }
+                            _ => {
+                                unimplemented!(
+                                    "Unsupported decimal byte array size: {}",
+                                    value.len()
+                                );
+                            }
+                        }
                     }
                 };
 

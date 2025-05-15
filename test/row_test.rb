@@ -8,6 +8,10 @@ require "csv"
 require "bigdecimal"
 
 class RowTest < Minitest::Test
+  def test_asdf
+    puts Parquet.each_row("/Users/njaremko/Downloads/data_0_0_0_with_types.snappy.parquet", result_type: :array).to_a
+  end
+
   def test_each_row
     rows = []
     Parquet.each_row("test/data.parquet") { |row| rows << row }

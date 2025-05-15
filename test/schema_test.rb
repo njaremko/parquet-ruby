@@ -929,7 +929,7 @@ class SchemaTest < Minitest::Test
         metadata = Parquet.metadata(io)
 
         # Verify basic metadata
-        assert_equal "parquet-rs version 54.2.0", metadata["created_by"]
+        assert_equal "parquet-rs version 55.1.0", metadata["created_by"]
         assert_instance_of Hash, metadata["schema"]
         assert_instance_of Array, metadata["schema"]["fields"]
         assert_equal 5, metadata["schema"]["fields"].length
@@ -955,7 +955,7 @@ class SchemaTest < Minitest::Test
       stringio = StringIO.new(file_content)
 
       metadata = Parquet.metadata(stringio)
-      assert_equal "parquet-rs version 54.2.0", metadata["created_by"]
+      assert_equal "parquet-rs version 55.1.0", metadata["created_by"]
       assert_equal 5, metadata["schema"]["fields"].length
       assert_equal 3, metadata["row_groups"][0]["num_rows"]
     ensure

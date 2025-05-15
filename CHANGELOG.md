@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.6
+- Upgrade rust arrow and parquet libraries to 55.1.0
+- Improve support for byte array encoding of decimal values
+  - Only supported 128 bit integer encoding, now we support 32, 64, and 128 bit encoding.
+
 ## 0.5.5
 - More improvements to decimal support
 
