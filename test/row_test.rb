@@ -9,7 +9,8 @@ require "bigdecimal"
 
 class RowTest < Minitest::Test
   def test_asdf
-    puts Parquet.each_row("/Users/njaremko/Downloads/data_0_0_0_with_types.snappy.parquet", result_type: :array).to_a
+    parsed = Parquet.each_row("test/snowflake_export.parquet", result_type: :array).to_a
+    assert_equal 1, parsed.length
   end
 
   def test_each_row

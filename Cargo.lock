@@ -64,6 +64,7 @@ dependencies = [
 [[package]]
 name = "arrow-array"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "ahash",
  "arrow-buffer",
@@ -78,6 +79,7 @@ dependencies = [
 [[package]]
 name = "arrow-buffer"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "bytes",
  "half",
@@ -87,6 +89,7 @@ dependencies = [
 [[package]]
 name = "arrow-cast"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -105,6 +108,7 @@ dependencies = [
 [[package]]
 name = "arrow-data"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
@@ -115,6 +119,7 @@ dependencies = [
 [[package]]
 name = "arrow-ipc"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -126,10 +131,12 @@ dependencies = [
 [[package]]
 name = "arrow-schema"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 
 [[package]]
 name = "arrow-select"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "ahash",
  "arrow-array",
@@ -842,6 +849,7 @@ dependencies = [
 [[package]]
 name = "parquet"
 version = "55.1.0"
+source = "git+https://github.com/njaremko/arrow-rs?branch=nathan%2Ffix-reading-int32-timestamp-records#f791b78a67cb5d9a0b4ec0fcab80780dcb61c346"
 dependencies = [
  "ahash",
  "arrow-array",

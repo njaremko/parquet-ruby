@@ -11,14 +11,14 @@ rb-sys-env = "^0.2"
 
 [dependencies]
 ahash = "0.8"
-arrow-array = { path = "/Users/njaremko/Development/rust/arrow-rs/arrow-array" }
-arrow-schema = { path = "/Users/njaremko/Development/rust/arrow-rs/arrow-schema" }
+arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-reading-int32-timestamp-records" }
+arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-reading-int32-timestamp-records" }
 bytes = "^1.9"
 either = "1.9"
 itertools = "^0.14"
 jiff = "0.2"
 magnus = { version = "0.7", features = ["rb-sys"] }
-parquet = { path = "/Users/njaremko/Development/rust/arrow-rs/parquet", features = ["json"] }
+parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-reading-int32-timestamp-records", features = ["json"] }
 rand = "0.9"
 rb-sys = "^0.9"
 simdutf8 = "0.1.5"
