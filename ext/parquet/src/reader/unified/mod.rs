@@ -53,7 +53,7 @@ pub fn parse_parquet_unified(
     } = args;
 
     // Initialize the logger if provided
-    let ruby_logger = RubyLogger::new(&ruby, logger.clone())?;
+    let ruby_logger = RubyLogger::new(&ruby, logger)?;
 
     // Clone values for the closure to avoid move issues
     let columns_clone = columns.clone();
@@ -197,7 +197,7 @@ fn process_row_data(
                             headers[i],
                             ParquetField {
                                 field: v.clone(),
-                                converted_type: type_info.converted_type().clone(),
+                                converted_type: type_info.converted_type(),
                                 logical_type: type_info.logical_type().clone(),
                                 strict,
                             },
@@ -223,7 +223,7 @@ fn process_row_data(
                         let type_info = t.get_basic_info();
                         vec.push(ParquetField {
                             field: v.clone(),
-                            converted_type: type_info.converted_type().clone(),
+                            converted_type: type_info.converted_type(),
                             logical_type: type_info.logical_type().clone(),
                             strict,
                         });
