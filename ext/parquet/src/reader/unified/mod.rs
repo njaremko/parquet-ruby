@@ -2,8 +2,8 @@ use crate::header_cache::StringCache;
 use crate::logger::RubyLogger;
 use crate::types::TryIntoValue;
 use crate::{
-    create_column_enumerator, create_row_enumerator, ParquetField, ParquetGemError,
-    ParserResultType, ColumnEnumeratorArgs, RowEnumeratorArgs, RowRecord, ColumnRecord, ParquetValueVec,
+    create_column_enumerator, create_row_enumerator, ColumnEnumeratorArgs, ColumnRecord,
+    ParquetField, ParquetGemError, ParquetValueVec, ParserResultType, RowEnumeratorArgs, RowRecord,
 };
 use ahash::RandomState;
 use either::Either;
@@ -13,10 +13,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use crate::types::ArrayWrapper;
 use super::common::{
     create_batch_reader, handle_block_or_enum, handle_empty_file, open_parquet_source,
 };
+use crate::types::ArrayWrapper;
 
 /// A unified parser configuration that can be used for both row and column parsing
 pub enum ParserType {
@@ -54,10 +54,10 @@ pub fn parse_parquet_unified(
 
     // Initialize the logger if provided
     let ruby_logger = RubyLogger::new(&ruby, logger.clone())?;
-    
+
     // Clone values for the closure to avoid move issues
     let columns_clone = columns.clone();
-    
+
     // Determine if we're handling rows or columns for enumerator creation
     match &parser_type {
         ParserType::Row { strict } => {
@@ -75,13 +75,13 @@ pub fn parse_parquet_unified(
             })? {
                 return Ok(enum_value);
             }
-        },
+        }
         ParserType::Column { batch_size, strict } => {
             // For column-based parsing, log the batch size if present
             if let Some(ref bs) = batch_size {
                 ruby_logger.debug(|| format!("Using batch size: {}", bs))?;
             }
-            
+
             // Handle block or create column enumerator
             if let Some(enum_value) = handle_block_or_enum(&ruby, ruby.block_given(), || {
                 create_column_enumerator(ColumnEnumeratorArgs {
@@ -102,19 +102,34 @@ pub fn parse_parquet_unified(
 
     // Open the Parquet source
     let source = open_parquet_source(ruby.clone(), to_read)?;
-    
+
     // Based on the parser type, handle the data differently
     match parser_type {
         ParserType::Row { strict } => {
             // Handle row-based parsing
-            process_row_data(ruby.clone(), source, &columns, result_type, strict, &ruby_logger)?;
-        },
+            process_row_data(
+                ruby.clone(),
+                source,
+                &columns,
+                result_type,
+                strict,
+                &ruby_logger,
+            )?;
+        }
         ParserType::Column { batch_size, strict } => {
             // Handle column-based parsing
-            process_column_data(ruby.clone(), source, &columns, result_type, batch_size, strict, &ruby_logger)?;
+            process_column_data(
+                ruby.clone(),
+                source,
+                &columns,
+                result_type,
+                batch_size,
+                strict,
+                &ruby_logger,
+            )?;
         }
     }
-    
+
     Ok(ruby.qnil().into_value_with(&ruby))
 }
 
@@ -129,7 +144,7 @@ fn process_row_data(
 ) -> Result<(), ParquetGemError> {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::reader::RowIter as ParquetRowIter;
-    
+
     // Create the row-based reader
     let reader: Box<dyn FileReader> = match source {
         Either::Left(file) => {
@@ -174,8 +189,19 @@ fn process_row_data(
 
                     let mut map =
                         HashMap::with_capacity_and_hasher(headers.len(), RandomState::default());
-                    for (i, (_, v)) in row.get_column_iter().enumerate() {
-                        map.insert(headers[i], ParquetField(v.clone(), strict));
+                    for (i, ((_, v), t)) in
+                        row.get_column_iter().zip(schema.get_fields()).enumerate()
+                    {
+                        let type_info = t.get_basic_info();
+                        map.insert(
+                            headers[i],
+                            ParquetField {
+                                field: v.clone(),
+                                converted_type: type_info.converted_type().clone(),
+                                logical_type: type_info.logical_type().clone(),
+                                strict,
+                            },
+                        );
                     }
                     map
                 })
@@ -193,8 +219,14 @@ fn process_row_data(
                 row.map(|row| {
                     let column_count = row.get_column_iter().count();
                     let mut vec = Vec::with_capacity(column_count);
-                    for (_, v) in row.get_column_iter() {
-                        vec.push(ParquetField(v.clone(), strict));
+                    for ((_, v), t) in row.get_column_iter().zip(schema.get_fields()) {
+                        let type_info = t.get_basic_info();
+                        vec.push(ParquetField {
+                            field: v.clone(),
+                            converted_type: type_info.converted_type().clone(),
+                            logical_type: type_info.logical_type().clone(),
+                            strict,
+                        });
                     }
                     vec
                 })
@@ -309,7 +341,10 @@ fn process_column_data(
 }
 
 /// Helper function to create a projection schema
-fn create_projection_schema(schema: &parquet::schema::types::Type, columns: &[String]) -> parquet::schema::types::Type {
+fn create_projection_schema(
+    schema: &parquet::schema::types::Type,
+    columns: &[String],
+) -> parquet::schema::types::Type {
     if let parquet::schema::types::Type::GroupType { fields, .. } = schema {
         let projected_fields: Vec<std::sync::Arc<parquet::schema::types::Type>> = fields
             .iter()

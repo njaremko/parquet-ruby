@@ -296,4 +296,11 @@ class ComplexTypesTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_uuid_column
+    rows = Parquet.each_row("test/uuid.parquet", result_type: :array).to_a
+    assert_equal 1, rows.size
+
+    assert_equal "15e22a2e-ada2-448d-adf4-4e54fc84c70c", rows[0][0]
+  end
 end

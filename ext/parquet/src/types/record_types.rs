@@ -1,7 +1,10 @@
 use std::sync::OnceLock;
 
 use itertools::Itertools;
-use parquet::data_type::AsBytes;
+use parquet::{
+    basic::{ConvertedType, LogicalType},
+    data_type::AsBytes,
+};
 
 use super::*;
 
@@ -44,7 +47,13 @@ pub enum ColumnRecord<S: BuildHasher + Default> {
 }
 
 #[derive(Debug)]
-pub struct ParquetField(pub Field, pub bool);
+pub struct ParquetField {
+    pub field: Field,
+    #[allow(dead_code)]
+    pub converted_type: ConvertedType,
+    pub logical_type: Option<LogicalType>,
+    pub strict: bool,
+}
 
 impl<S: BuildHasher + Default> TryIntoValue for RowRecord<S> {
     fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
@@ -158,7 +167,7 @@ pub trait TryIntoValue {
 
 impl TryIntoValue for ParquetField {
     fn try_into_value_with(self, handle: &Ruby) -> Result<Value, ParquetGemError> {
-        match self.0 {
+        match self.field {
             Field::Null => Ok(handle.qnil().as_value()),
             Field::Bool(b) => Ok(b.into_value_with(handle)),
             Field::Short(s) => Ok(s.into_value_with(handle)),
@@ -172,7 +181,7 @@ impl TryIntoValue for ParquetField {
             Field::Float(f) => Ok(f.into_value_with(handle)),
             Field::Double(d) => Ok(d.into_value_with(handle)),
             Field::Str(s) => {
-                if self.1 {
+                if self.strict {
                     Ok(simdutf8::basic::from_utf8(s.as_bytes())
                         .map_err(ParquetGemError::Utf8Error)
                         .map(|s| s.into_value_with(handle))?)
@@ -182,7 +191,15 @@ impl TryIntoValue for ParquetField {
                 }
             }
             Field::Byte(b) => Ok(b.into_value_with(handle)),
-            Field::Bytes(b) => Ok(handle.str_from_slice(b.data()).as_value()),
+            Field::Bytes(b) => {
+                if matches!(self.logical_type, Some(parquet::basic::LogicalType::Uuid)) {
+                    let bytes = b.as_bytes();
+                    let uuid = uuid::Uuid::from_slice(bytes)?;
+                    Ok(uuid.to_string().into_value_with(handle))
+                } else {
+                    Ok(handle.str_from_slice(b.data()).as_value())
+                }
+            }
             Field::Date(d) => {
                 let ts = jiff::Timestamp::from_second((d as i64) * 86400)?;
                 let formatted = ts.strftime("%Y-%m-%d").to_string();
@@ -206,7 +223,15 @@ impl TryIntoValue for ParquetField {
                 let elements = list.elements();
                 let ary = handle.ary_new_capa(elements.len());
                 elements.iter().try_for_each(|e| {
-                    ary.push(ParquetField(e.clone(), self.1).try_into_value_with(handle)?)?;
+                    ary.push(
+                        ParquetField {
+                            field: e.clone(),
+                            logical_type: e.to_logical_type(),
+                            converted_type: e.to_converted_type(),
+                            strict: self.strict,
+                        }
+                        .try_into_value_with(handle)?,
+                    )?;
                     Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(ary.into_value_with(handle))
@@ -220,8 +245,20 @@ impl TryIntoValue for ParquetField {
 
                 map.entries().iter().try_for_each(|(k, v)| {
                     hash.aset(
-                        ParquetField(k.clone(), self.1).try_into_value_with(handle)?,
-                        ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
+                        ParquetField {
+                            field: k.clone(),
+                            converted_type: k.to_converted_type(),
+                            logical_type: k.to_logical_type(),
+                            strict: self.strict,
+                        }
+                        .try_into_value_with(handle)?,
+                        ParquetField {
+                            field: v.clone(),
+                            converted_type: v.to_converted_type(),
+                            logical_type: v.to_logical_type(),
+                            strict: self.strict,
+                        }
+                        .try_into_value_with(handle)?,
                     )?;
                     Ok::<_, ParquetGemError>(())
                 })?;
@@ -278,12 +315,126 @@ impl TryIntoValue for ParquetField {
                 row.get_column_iter().try_for_each(|(k, v)| {
                     hash.aset(
                         k.clone().into_value_with(handle),
-                        ParquetField(v.clone(), self.1).try_into_value_with(handle)?,
+                        ParquetField {
+                            field: v.clone(),
+                            converted_type: v.to_converted_type(),
+                            logical_type: v.to_logical_type(),
+                            strict: self.strict,
+                        }
+                        .try_into_value_with(handle)?,
                     )?;
                     Ok::<_, ParquetGemError>(())
                 })?;
                 Ok(hash.into_value_with(handle))
             }
         }
+    }
+}
+
+trait ToTypeInfo {
+    fn to_converted_type(&self) -> ConvertedType;
+    fn to_logical_type(&self) -> Option<LogicalType>;
+}
+
+impl ToTypeInfo for &parquet::record::Field {
+    fn to_converted_type(&self) -> ConvertedType {
+        match self {
+            Field::Null => ConvertedType::NONE,
+            Field::Bool(_) => ConvertedType::INT_8,
+            Field::Byte(_) => ConvertedType::INT_8,
+            Field::Short(_) => ConvertedType::INT_16,
+            Field::Int(_) => ConvertedType::INT_32,
+            Field::Long(_) => ConvertedType::INT_64,
+            Field::UByte(_) => ConvertedType::UINT_8,
+            Field::UShort(_) => ConvertedType::UINT_16,
+            Field::UInt(_) => ConvertedType::UINT_32,
+            Field::ULong(_) => ConvertedType::UINT_64,
+            Field::Float16(_) => ConvertedType::NONE,
+            Field::Float(_) => ConvertedType::NONE,
+            Field::Double(_) => ConvertedType::NONE,
+            Field::Decimal(_) => ConvertedType::DECIMAL,
+            Field::Str(_) => ConvertedType::UTF8,
+            Field::Bytes(_) => ConvertedType::LIST,
+            Field::Date(_) => ConvertedType::DATE,
+            Field::TimestampMillis(_) => ConvertedType::TIMESTAMP_MILLIS,
+            Field::TimestampMicros(_) => ConvertedType::TIMESTAMP_MICROS,
+            Field::Group(_) => ConvertedType::NONE,
+            Field::ListInternal(_) => ConvertedType::LIST,
+            Field::MapInternal(_) => ConvertedType::MAP,
+        }
+    }
+    fn to_logical_type(&self) -> Option<LogicalType> {
+        Some(match self {
+            Field::Null => LogicalType::Unknown,
+            Field::Bool(_) => LogicalType::Integer {
+                bit_width: 1,
+                is_signed: false,
+            },
+            Field::Byte(_) => LogicalType::Integer {
+                bit_width: 8,
+                is_signed: false,
+            },
+            Field::Short(_) => LogicalType::Integer {
+                bit_width: 16,
+                is_signed: true,
+            },
+            Field::Int(_) => LogicalType::Integer {
+                bit_width: 32,
+                is_signed: true,
+            },
+            Field::Long(_) => LogicalType::Integer {
+                bit_width: 64,
+                is_signed: true,
+            },
+            Field::UByte(_) => LogicalType::Integer {
+                bit_width: 8,
+                is_signed: false,
+            },
+            Field::UShort(_) => LogicalType::Integer {
+                bit_width: 16,
+                is_signed: false,
+            },
+            Field::UInt(_) => LogicalType::Integer {
+                bit_width: 32,
+                is_signed: false,
+            },
+            Field::ULong(_) => LogicalType::Integer {
+                bit_width: 64,
+                is_signed: false,
+            },
+            Field::Float16(_) => LogicalType::Float16,
+            Field::Float(_) => LogicalType::Decimal {
+                scale: 7,
+                precision: 7,
+            },
+            Field::Double(_) => LogicalType::Decimal {
+                scale: 15,
+                precision: 15,
+            },
+            Field::Decimal(decimal) => LogicalType::Decimal {
+                scale: decimal.scale(),
+                precision: decimal.precision(),
+            },
+            Field::Str(_) => LogicalType::String,
+            Field::Bytes(b) => {
+                if b.data().len() == 16 && uuid::Uuid::from_slice(b.as_bytes()).is_ok() {
+                    LogicalType::Uuid
+                } else {
+                    LogicalType::Unknown
+                }
+            }
+            Field::Date(_) => LogicalType::Date,
+            Field::TimestampMillis(_) => LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::basic::TimeUnit::MILLIS(parquet::format::MilliSeconds {}),
+            },
+            Field::TimestampMicros(_) => LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::basic::TimeUnit::MICROS(parquet::format::MicroSeconds {}),
+            },
+            Field::Group(_) => LogicalType::Unknown,
+            Field::ListInternal(_) => LogicalType::List,
+            Field::MapInternal(_) => LogicalType::Map,
+        })
     }
 }
