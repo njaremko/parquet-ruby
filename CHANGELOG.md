@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.7
+- Merged a fix into upstream, so updating pinned arrow commit to `apache/arrow-rs#main` for now
+- Match `SecureRandom.uuid` formatting when returning UUIDs
+  - We used to return byte strings
+
 ## 0.5.6
 - Upgrade rust arrow and parquet libraries to 55.1.0
 - Improve support for byte array encoding of decimal values
