@@ -61,6 +61,8 @@ pub enum ParquetGemError {
     Jiff(#[from] jiff::Error),
     #[error("Failed to cast slice to array: {0}")]
     InvalidDecimal(#[from] TryFromSliceError),
+    #[error("Failed to parse UUID: {0}")]
+    UuidError(#[from] uuid::Error),
 }
 
 #[derive(Debug)]
