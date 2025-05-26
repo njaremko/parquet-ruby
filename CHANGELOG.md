@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.8
+- Upstreamed another fix, but it can't release until July, so pinning to my feature branch again
+- Fix parsing of TIME millis and TIME micros.
+
 ## 0.5.7
 - Merged a fix into upstream, so updating pinned arrow commit to `apache/arrow-rs#main` for now
 - Match `SecureRandom.uuid` formatting when returning UUIDs

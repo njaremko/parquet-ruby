@@ -205,6 +205,13 @@ impl TryIntoValue for ParquetField {
                 let formatted = ts.strftime("%Y-%m-%d").to_string();
                 Ok(formatted.into_value_with(handle))
             }
+            Field::TimeMillis(ts) => {
+                let ts = jiff::Timestamp::from_millisecond(ts as i64)?;
+                let time_class = handle.class_time();
+                Ok(time_class
+                    .funcall::<_, _, Value>("parse", (ts.to_string(),))?
+                    .into_value_with(handle))
+            }
             Field::TimestampMillis(ts) => {
                 let ts = jiff::Timestamp::from_millisecond(ts)?;
                 let time_class = handle.class_time();
@@ -212,7 +219,7 @@ impl TryIntoValue for ParquetField {
                     .funcall::<_, _, Value>("parse", (ts.to_string(),))?
                     .into_value_with(handle))
             }
-            Field::TimestampMicros(ts) => {
+            Field::TimestampMicros(ts) | Field::TimeMicros(ts) => {
                 let ts = jiff::Timestamp::from_microsecond(ts)?;
                 let time_class = handle.class_time();
                 Ok(time_class
@@ -356,6 +363,8 @@ impl ToTypeInfo for &parquet::record::Field {
             Field::Str(_) => ConvertedType::UTF8,
             Field::Bytes(_) => ConvertedType::LIST,
             Field::Date(_) => ConvertedType::DATE,
+            Field::TimeMillis(_) => ConvertedType::TIME_MILLIS,
+            Field::TimeMicros(_) => ConvertedType::TIMESTAMP_MICROS,
             Field::TimestampMillis(_) => ConvertedType::TIMESTAMP_MILLIS,
             Field::TimestampMicros(_) => ConvertedType::TIMESTAMP_MICROS,
             Field::Group(_) => ConvertedType::NONE,
@@ -424,6 +433,14 @@ impl ToTypeInfo for &parquet::record::Field {
                 }
             }
             Field::Date(_) => LogicalType::Date,
+            Field::TimeMillis(_) => LogicalType::Time {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::basic::TimeUnit::MILLIS(parquet::format::MilliSeconds {}),
+            },
+            Field::TimeMicros(_) => LogicalType::Time {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::basic::TimeUnit::MICROS(parquet::format::MicroSeconds {}),
+            },
             Field::TimestampMillis(_) => LogicalType::Timestamp {
                 is_adjusted_to_u_t_c: true,
                 unit: parquet::basic::TimeUnit::MILLIS(parquet::format::MilliSeconds {}),
