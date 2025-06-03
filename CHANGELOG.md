@@ -1,34 +1,46 @@
 # Changelog
 
+## 0.5.9
+
+- Fix handling of all possible byte array lengths used for decimal value representation
+
 ## 0.5.8
+
 - Upstreamed another fix, but it can't release until July, so pinning to my feature branch again
 - Fix parsing of TIME millis and TIME micros.
 
 ## 0.5.7
+
 - Merged a fix into upstream, so updating pinned arrow commit to `apache/arrow-rs#main` for now
 - Match `SecureRandom.uuid` formatting when returning UUIDs
   - We used to return byte strings
 
 ## 0.5.6
+
 - Upgrade rust arrow and parquet libraries to 55.1.0
 - Improve support for byte array encoding of decimal values
   - Only supported 128 bit integer encoding, now we support 32, 64, and 128 bit encoding.
 
 ## 0.5.5
+
 - More improvements to decimal support
 
 ## 0.5.4
+
 - Fix an inconsistency in how precision and scale defaults were treated when writing parquet
 
 ## 0.5.3
+
 - _Actually_ fix support for Ruby 3.1
 - Add support for decimal type
 - Add support for reading metadata from parquet files
 
 ## 0.5.2
+
 - Fix support for Ruby 3.1
 
 ## 0.5.1
+
 - Revert a change Arc usage, it was pointless.
 
 ## 0.5.0
@@ -36,6 +48,7 @@
 ### New Features & Enhancements
 
 1. **Schema DSL for Complex Data Types**
+
    - Introduced a **new DSL** (Domain-Specific Language) for defining Parquet schemas in Ruby.
    - You can now describe **structs**, **lists**, and **maps** in a more expressive way:
      ```ruby
@@ -69,6 +82,7 @@
    - This DSL supports nested (`struct` within `struct`, `list` of `struct`, etc.) and required/optional fields (`nullable: true`), making it easier to handle complex Parquet schemas.
 
 2. **Writing Maps, Structs, and Lists**
+
    - The gem now supports **nested data** writes for:
      - **Maps** (`map<keyType, valueType>`), including map of primitives or map of nested types.
      - **Lists** (`list<T>`), including lists of structs or lists of primitives.
@@ -77,6 +91,7 @@
    - Reading these complex types (`each_row`, `each_column`) has been updated as well, so lists and maps yield the expected Ruby arrays and hashes.
 
 3. **Logger Integration**
+
    - Added support for passing in a **Ruby logger** object for the gem’s internal logging.
    - The gem checks for an optional `logger:` keyword argument in methods and will use it if provided.
    - We'll respect the level returned by `logger.level` otherwise you can also override the log level with the environment variable **`PARQUET_GEM_LOG_LEVEL`** (e.g., `export PARQUET_GEM_LOG_LEVEL=debug`).

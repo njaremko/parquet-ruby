@@ -94,6 +94,12 @@ class DecimalTest < Minitest::Test
     end
   end
 
+  def test_decimal_parse_3_bytes
+    x = Parquet.each_row("test/3-byte-decimal.parquet", result_type: :array).to_a
+    assert_equal BigDecimal("123.45"), x[0][7]
+    assert_equal BigDecimal("123.45"), x[0][8]
+  end
+
   def test_decimal_precision_scale_edge_cases
     temp_path = "test/decimal_edge_cases_advanced.parquet"
     begin

@@ -34,6 +34,93 @@ pub fn format_decimal_with_i32_scale<T: std::fmt::Display>(value: T, scale: i32)
     }
 }
 
+/// Convert arbitrary-length big-endian byte array to decimal string
+/// Supports byte arrays from 1 to 16 bytes in length
+fn bytes_to_decimal(bytes: &[u8], scale: i32) -> Result<String, ParquetGemError> {
+    match bytes.len() {
+        0 => Err(ParquetGemError::InvalidDecimal(
+            "Empty byte array for decimal".to_string(),
+        )),
+        1 => {
+            // For 1 byte, use i8
+            let value = bytes[0] as i8;
+            Ok(format_decimal_with_i32_scale(value, scale))
+        }
+        2 => {
+            // For 2 bytes, use i16
+            let mut value: i16 = 0;
+            let is_negative = bytes[0] & 0x80 != 0;
+            
+            for &byte in bytes {
+                value = (value << 8) | (byte as i16);
+            }
+            
+            // Sign extend if negative
+            if is_negative {
+                let shift = 16 - (bytes.len() * 8);
+                value = (value << shift) >> shift;
+            }
+            
+            Ok(format_decimal_with_i32_scale(value, scale))
+        }
+        3..=4 => {
+            // For 3-4 bytes, use i32
+            let mut value: i32 = 0;
+            let is_negative = bytes[0] & 0x80 != 0;
+            
+            for &byte in bytes {
+                value = (value << 8) | (byte as i32);
+            }
+            
+            // Sign extend if negative
+            if is_negative {
+                let shift = 32 - (bytes.len() * 8);
+                value = (value << shift) >> shift;
+            }
+            
+            Ok(format_decimal_with_i32_scale(value, scale))
+        }
+        5..=8 => {
+            // For 5-8 bytes, use i64
+            let mut value: i64 = 0;
+            let is_negative = bytes[0] & 0x80 != 0;
+
+            for &byte in bytes {
+                value = (value << 8) | (byte as i64);
+            }
+
+            // Sign extend if negative
+            if is_negative {
+                let shift = 64 - (bytes.len() * 8);
+                value = (value << shift) >> shift;
+            }
+
+            Ok(format_decimal_with_i32_scale(value, scale))
+        }
+        9..=16 => {
+            // For 9-16 bytes, use i128
+            let mut value: i128 = 0;
+            let is_negative = bytes[0] & 0x80 != 0;
+
+            for &byte in bytes {
+                value = (value << 8) | (byte as i128);
+            }
+
+            // Sign extend if negative
+            if is_negative {
+                let shift = 128 - (bytes.len() * 8);
+                value = (value << shift) >> shift;
+            }
+
+            Ok(format_decimal_with_i32_scale(value, scale))
+        }
+        _ => Err(ParquetGemError::InvalidDecimal(format!(
+            "Unsupported decimal byte array size: {}",
+            bytes.len()
+        ))),
+    }
+}
+
 #[derive(Debug)]
 pub enum RowRecord<S: BuildHasher + Default> {
     Vec(Vec<ParquetField>),
@@ -282,32 +369,7 @@ impl TryIntoValue for ParquetField {
                         format_decimal_with_i32_scale(unscaled, scale)
                     }
                     Decimal::Bytes { value, scale, .. } => {
-                        match value.len() {
-                            4 => {
-                                // value is a byte array containing the bytes for an i32 value in big endian order
-                                let casted = value.as_bytes()[..4].try_into()?;
-                                let unscaled = i32::from_be_bytes(casted);
-                                format_decimal_with_i32_scale(unscaled, scale)
-                            }
-                            8 => {
-                                // value is a byte array containing the bytes for an i64 value in big endian order
-                                let casted = value.as_bytes()[..8].try_into()?;
-                                let unscaled = i64::from_be_bytes(casted);
-                                format_decimal_with_i32_scale(unscaled, scale)
-                            }
-                            16 => {
-                                // value is a byte array containing the bytes for an i128 value in big endian order
-                                let casted = value.as_bytes()[..16].try_into()?;
-                                let unscaled = i128::from_be_bytes(casted);
-                                format_decimal_with_i32_scale(unscaled, scale)
-                            }
-                            _ => {
-                                unimplemented!(
-                                    "Unsupported decimal byte array size: {}",
-                                    value.len()
-                                );
-                            }
-                        }
+                        bytes_to_decimal(value.as_bytes(), scale)?
                     }
                 };
 

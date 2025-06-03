@@ -32,7 +32,6 @@ use arrow_schema::{DataType, TimeUnit};
 use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, Value};
 use parquet::data_type::Decimal;
 use parquet::record::Field;
-use std::array::TryFromSliceError;
 use std::{collections::HashMap, hash::BuildHasher, sync::Arc};
 
 use crate::header_cache::StringCacheKey;
@@ -60,7 +59,7 @@ pub enum ParquetGemError {
     #[error("Jiff error: {0}")]
     Jiff(#[from] jiff::Error),
     #[error("Failed to cast slice to array: {0}")]
-    InvalidDecimal(#[from] TryFromSliceError),
+    InvalidDecimal(String),
     #[error("Failed to parse UUID: {0}")]
     UuidError(#[from] uuid::Error),
 }
