@@ -243,6 +243,7 @@ pub fn parquet_schema_type_to_arrow_data_type(
             PrimitiveType::Float32 => DataType::Float32,
             PrimitiveType::Float64 => DataType::Float64,
             PrimitiveType::Decimal128(precision, scale) => DataType::Decimal128(*precision, *scale),
+            PrimitiveType::Decimal256(precision, scale) => DataType::Decimal256(*precision, *scale),
             PrimitiveType::String => DataType::Utf8,
             PrimitiveType::Binary => DataType::Binary,
             PrimitiveType::Boolean => DataType::Boolean,
@@ -372,6 +373,24 @@ fn create_arrow_builder_for_type(
             // Set precision and scale for the decimal and return the new builder
             let builder_with_precision = builder
                 .with_precision_and_scale(*precision, *scale)
+                .map_err(|e| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Failed to set precision and scale: {}", e),
+                    )
+                })?;
+
+            Ok(Box::new(builder_with_precision))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::Decimal256(precision, scale)) => {
+            // Create a Decimal128Builder since we're truncating Decimal256 to Decimal128
+            let builder = Decimal128Builder::with_capacity(cap);
+
+            // Set precision and scale for the decimal and return the new builder
+            // Note: We use min(precision, 38) since Decimal128 max precision is 38
+            let adjusted_precision = (*precision).min(38);
+            let builder_with_precision = builder
+                .with_precision_and_scale(adjusted_precision, *scale)
                 .map_err(|e| {
                     MagnusError::new(
                         magnus::exception::runtime_error(),
@@ -891,6 +910,47 @@ fn fill_builder(
             }
             Ok(())
         }
+        ParquetSchemaType::Primitive(PrimitiveType::Decimal256(_precision, scale)) => {
+            // We use Decimal128Builder since we're truncating Decimal256 to Decimal128
+            let typed_builder = builder
+                .as_any_mut()
+                .downcast_mut::<Decimal128Builder>()
+                .expect("Builder mismatch: expected Decimal128Builder for Decimal256");
+
+            for val in values {
+                match val {
+                    ParquetValue::Decimal128(d, _scale) => typed_builder.append_value(*d),
+                    ParquetValue::Float64(f) => {
+                        // Scale the float to the desired precision and scale
+                        let scaled_value = (*f * 10_f64.powi(*scale as i32)) as i128;
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Float32(flo) => {
+                        // Scale the float to the desired precision and scale
+                        let scaled_value = (*flo as f64 * 10_f64.powi(*scale as i32)) as i128;
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Int64(i) => {
+                        // Scale the integer to the desired scale
+                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Int32(i) => {
+                        // Scale the integer to the desired scale
+                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
+                        typed_builder.append_value(scaled_value)
+                    }
+                    ParquetValue::Null => typed_builder.append_null(),
+                    other => {
+                        return Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            format!("Expected numeric value for Decimal256, got {:?}", other),
+                        ))
+                    }
+                }
+            }
+            Ok(())
+        }
         ParquetSchemaType::Primitive(PrimitiveType::Boolean) => {
             let typed_builder = builder
                 .as_any_mut()
@@ -1374,6 +1434,15 @@ fn fill_builder(
                                                 MagnusError::new(
                                                     magnus::exception::type_error(),
                                                     "Failed to coerce into Decimal128Builder",
+                                                )
+                                            })?
+                                            .append_null(),
+                                        ParquetSchemaType::Primitive(PrimitiveType::Decimal256(_, _)) => typed_builder
+                                            .field_builder::<Decimal128Builder>(i)
+                                            .ok_or_else(|| {
+                                                MagnusError::new(
+                                                    magnus::exception::type_error(),
+                                                    "Failed to coerce into Decimal128Builder for Decimal256",
                                                 )
                                             })?
                                             .append_null(),

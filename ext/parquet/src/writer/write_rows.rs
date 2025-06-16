@@ -258,6 +258,7 @@ pub fn estimate_value_size(
         | PST::Primitive(PrimitiveType::Float64) => Ok(8),
         PST::Primitive(PrimitiveType::Boolean) => Ok(1),
         PST::Primitive(PrimitiveType::Decimal128(_, _)) => Ok(16),
+        PST::Primitive(PrimitiveType::Decimal256(_, _)) => Ok(32),
         PST::Primitive(PrimitiveType::Date32)
         | PST::Primitive(PrimitiveType::TimestampMillis)
         | PST::Primitive(PrimitiveType::TimestampMicros) => Ok(8),

@@ -145,6 +145,53 @@ impl FromStr for ParquetSchemaType<'_> {
             }
         }
 
+        // Check if it's a decimal256 type with precision and scale
+        if let Some(decimal_params) = s.strip_prefix("decimal256(").and_then(|s| s.strip_suffix(")")) {
+            let parts: Vec<&str> = decimal_params.split(',').collect();
+
+            // Handle both single parameter (precision only) and two parameters (precision and scale)
+            if parts.len() == 1 {
+                // Only precision provided, scale defaults to 0
+                let precision = parts[0].trim().parse::<u8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid precision value in decimal256 type: {}", parts[0]),
+                    )
+                })?;
+
+                return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal256(
+                    precision, 0,
+                )));
+            } else if parts.len() == 2 {
+                // Both precision and scale provided
+                let precision = parts[0].trim().parse::<u8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid precision value in decimal256 type: {}", parts[0]),
+                    )
+                })?;
+
+                let scale = parts[1].trim().parse::<i8>().map_err(|_| {
+                    MagnusError::new(
+                        magnus::exception::runtime_error(),
+                        format!("Invalid scale value in decimal256 type: {}", parts[1]),
+                    )
+                })?;
+
+                return Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal256(
+                    precision, scale,
+                )));
+            } else {
+                return Err(MagnusError::new(
+                    magnus::exception::runtime_error(),
+                    format!(
+                        "Invalid decimal256 format. Expected 'decimal256(precision)' or 'decimal256(precision,scale)', got '{}'",
+                        s
+                    ),
+                ));
+            }
+        }
+
         // Handle primitive types
         match s {
             "int8" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Int8)),
@@ -164,6 +211,9 @@ impl FromStr for ParquetSchemaType<'_> {
             "timestamp_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis)),
             "timestamp_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros)),
             "decimal" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(
+                38, 0,
+            ))),
+            "decimal256" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal256(
                 38, 0,
             ))),
             "list" => Ok(ParquetSchemaType::List(Box::new(ListField {

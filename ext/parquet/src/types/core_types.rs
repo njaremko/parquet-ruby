@@ -108,6 +108,7 @@ pub enum PrimitiveType {
     Float32,
     Float64,
     Decimal128(u8, i8),
+    Decimal256(u8, i8),
     Boolean,
     String,
     Binary,

@@ -161,6 +161,37 @@ class RowTest < Minitest::Test
     assert_equal "2023-01-01 03:00:00 UTC", row["timestamptz_col"].to_s
   end
 
+  def test_roundtrip_time
+    # Prepare data with Time objects
+    times = [
+      Time.utc(2023, 1, 1, 12, 34, 56, 123456),
+      Time.utc(1999, 12, 31, 23, 59, 59, 999999),
+      Time.utc(2020, 2, 29, 0, 0, 0, 0)
+    ]
+    rows = times.map.with_index { |t, i| [i, t] }
+
+    schema = [
+      { "id" => "int64" },
+      { "ts" => "timestamp_micros" }
+    ]
+
+    path = "test/roundtrip_time.parquet"
+    Parquet.write_rows(rows.each, schema: schema, write_to: path)
+
+    read_rows = []
+    Parquet.each_row(path) { |row| read_rows << row }
+
+    assert_equal rows.size, read_rows.size
+    rows.each_with_index do |orig, i|
+      assert_equal orig[0], read_rows[i]["id"]
+      # Allow for microsecond precision, as Parquet stores up to microseconds
+      assert_equal orig[1].utc, read_rows[i]["ts"].utc
+      assert_equal orig[1].usec, read_rows[i]["ts"].usec
+    end
+  ensure
+    File.delete(path) if File.exist?(path)
+  end
+
   def test_empty_table
     rows = []
     Parquet.each_row("test/empty_table.parquet") { |row| rows << row }

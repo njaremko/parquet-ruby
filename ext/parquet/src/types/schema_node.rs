@@ -185,17 +185,18 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
             // 2. When precision only - use scale 0
             // 3. When scale only - use max precision (38)
             let (precision, scale) = match (precision_val, scale_val) {
-                (None, None) => (38, 0),  // Maximum accuracy, scale 0
+                (None, None) => (38, 0), // Maximum accuracy, scale 0
                 (Some(p), None) => {
                     // Precision provided, scale defaults to 0
                     let prec = u8::try_convert(p).map_err(|_| {
                         MagnusError::new(
                             ruby.exception_type_error(),
-                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                            "Invalid precision value for decimal type, expected a positive integer"
+                                .to_string(),
                         )
                     })?;
                     (prec, 0)
-                },
+                }
                 (None, Some(s)) => {
                     // Scale provided, precision set to maximum (38)
                     let scl = i8::try_convert(s).map_err(|_| {
@@ -205,13 +206,14 @@ pub fn parse_schema_node(ruby: &Ruby, node_value: Value) -> Result<SchemaNode, M
                         )
                     })?;
                     (38, scl)
-                },
+                }
                 (Some(p), Some(s)) => {
                     // Both provided
                     let prec = u8::try_convert(p).map_err(|_| {
                         MagnusError::new(
                             ruby.exception_type_error(),
-                            "Invalid precision value for decimal type, expected a positive integer".to_string(),
+                            "Invalid precision value for decimal type, expected a positive integer"
+                                .to_string(),
                         )
                     })?;
                     let scl = i8::try_convert(s).map_err(|_| {
@@ -294,6 +296,7 @@ fn parse_primitive_type(s: &str) -> Option<PrimitiveType> {
         "timestamp_millis" | "timestamp_ms" => Some(PrimitiveType::TimestampMillis),
         "timestamp_micros" | "timestamp_us" => Some(PrimitiveType::TimestampMicros),
         "decimal" => Some(PrimitiveType::Decimal128(38, 0)), // Maximum precision, scale 0
+        "decimal256" => Some(PrimitiveType::Decimal256(38, 0)), // Maximum precision, scale 0
         _ => None,
     }
 }
@@ -320,6 +323,10 @@ pub fn schema_node_to_arrow_field(node: &SchemaNode) -> ArrowField {
                 PrimitiveType::Float64 => ArrowDataType::Float64,
                 PrimitiveType::Decimal128(precision, scale) => {
                     ArrowDataType::Decimal128(*precision, *scale)
+                }
+                PrimitiveType::Decimal256(precision, scale) => {
+                    // We truncate Decimal256 to Decimal128 since Rust doesn't support 256-bit integers
+                    ArrowDataType::Decimal128((*precision).min(38), *scale)
                 }
                 PrimitiveType::Boolean => ArrowDataType::Boolean,
                 PrimitiveType::String => ArrowDataType::Utf8,

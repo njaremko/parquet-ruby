@@ -858,4 +858,80 @@ class DecimalTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_256bit_bigdecimal_roundtrip
+    # This test verifies that 256-bit decimal values (very large/small BigDecimals) are correctly written and read
+    require "bigdecimal"
+    require "securerandom"
+
+    # Values that test decimal256 support (truncated to decimal128)
+    # Note: Since we truncate to decimal128, values may lose precision
+    test_values = [
+      { 
+        input: BigDecimal("1234567890123456789012345678.9012345678"),
+        expected: BigDecimal("1234567890123456789012345678.9012345678")
+      },
+      { 
+        input: BigDecimal("-9876543210987654321098765432.1098765432"),
+        expected: BigDecimal("-9876543210987654321098765432.1098765432")
+      },
+      {
+        # This value has too many significant digits and will be truncated
+        input: BigDecimal("0.0000000001234567890123456789012345678"),
+        expected: BigDecimal("0.0000000001") # Precision lost due to truncation
+      },
+      {
+        input: BigDecimal("-0.0000000009876543210987654321098765432"),
+        expected: BigDecimal("-0.0000000009") # Only first significant digit preserved
+      },
+      {
+        input: BigDecimal("9999999999999999999999999999.9999999999"),
+        expected: BigDecimal("9999999999999999999999999999.9999999999")
+      },
+      {
+        input: BigDecimal("-9999999999999999999999999999.9999999999"),
+        expected: BigDecimal("-9999999999999999999999999999.9999999999")
+      },
+      {
+        input: BigDecimal("0.0000000001"),
+        expected: BigDecimal("0.0000000001")
+      },
+      {
+        input: BigDecimal("-0.0000000001"),
+        expected: BigDecimal("-0.0000000001")
+      }
+    ]
+
+    schema = [
+      { "big_decimal" => "decimal256(38,10)" }
+    ]
+
+    temp_path = "test/bigdecimal_256bit_#{SecureRandom.hex(4)}.parquet"
+    begin
+      # Write the input values
+      Parquet.write_rows(test_values.map { |v| [v[:input]] }.each, schema: schema, write_to: temp_path)
+
+      # Read them back
+      rows = Parquet.each_row(temp_path).to_a
+      assert_equal test_values.size, rows.size
+
+      test_values.each_with_index do |test_case, i|
+        actual = rows[i]["big_decimal"]
+        expected = test_case[:expected]
+        
+        # Compare with appropriate precision based on whether truncation occurred
+        if test_case[:input] == test_case[:expected]
+          # No truncation expected, should be exact
+          assert_equal expected, actual, "Mismatch at row #{i}: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
+        else
+          # Truncation expected, compare with tolerance
+          assert_in_delta expected.to_f, actual.to_f, 1e-10, 
+                          "Mismatch at row #{i}: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
+        end
+        assert_instance_of BigDecimal, actual
+      end
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+  end
 end

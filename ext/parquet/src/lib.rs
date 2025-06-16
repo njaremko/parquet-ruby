@@ -19,6 +19,9 @@ use writer::write_rows;
 /// Initializes the Ruby extension and defines methods.
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
+    // Require 'time' for Time.parse method
+    ruby.require("time")?;
+    
     let module = ruby.define_module("Parquet")?;
     module.define_module_function("metadata", magnus::method!(reader::parse_metadata, -1))?;
     module.define_module_function("each_row", magnus::method!(parse_parquet_rows, -1))?;

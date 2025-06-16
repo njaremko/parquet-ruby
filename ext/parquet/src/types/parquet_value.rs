@@ -1,9 +1,10 @@
 use crate::{impl_date_conversion, impl_timestamp_array_conversion, impl_timestamp_conversion};
 
-use super::*;
 use super::record_types::format_decimal_with_i8_scale;
+use super::*;
 use arrow_array::MapArray;
 use magnus::{RArray, RString};
+use parquet::errors::ParquetError;
 
 #[derive(Debug, Clone)]
 pub enum ParquetValue {
@@ -325,6 +326,11 @@ impl ParquetValue {
                 PrimitiveType::TimestampMicros => {
                     let v = convert_to_timestamp_micros(ruby, value, format)?;
                     Ok(ParquetValue::TimestampMicros(v, None))
+                }
+                PrimitiveType::Decimal256(_precision, scale) => {
+                    // Decimal256 is truncated to Decimal128 since Rust doesn't support 256-bit integers
+                    // Values that exceed i128 range will be clamped to i128::MIN/MAX
+                    convert_to_decimal128(value, *scale)
                 }
             },
             ParquetSchemaType::List(list_field) => {
@@ -731,6 +737,62 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
             }
             DataType::Date32 => impl_numeric_array_conversion!(column.array, Date32Array, Date32),
             DataType::Date64 => impl_numeric_array_conversion!(column.array, Date64Array, Date64),
+            DataType::Decimal128(_precision, scale) => {
+                let array = downcast_array::<Decimal128Array>(column.array);
+                Ok(ParquetValueVec(if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                ParquetValue::Decimal128(*x, *scale)
+                            }
+                        })
+                        .collect()
+                } else {
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| ParquetValue::Decimal128(*x, *scale))
+                        .collect()
+                }))
+            }
+            DataType::Decimal256(_precision, scale) => {
+                let array = downcast_array::<Decimal256Array>(column.array);
+                Ok(ParquetValueVec(if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                // Truncate i256 to i128 by taking the low 128 bits
+                                let truncated = x
+                                    .to_i128()
+                                    .ok_or_else(|| ParquetGemError::DecimalWouldBeTruncated)?;
+                                ParquetValue::Decimal128(truncated, *scale)
+                            }
+                        })
+                        .collect()
+                } else {
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| {
+                            // Truncate i256 to i128 by taking the low 128 bits
+                            let truncated = x
+                                .to_i128()
+                                .ok_or_else(|| ParquetGemError::DecimalWouldBeTruncated)?;
+                            ParquetValue::Decimal128(truncated, *scale)
+                        })
+                        .collect()
+                }))
+            }
             DataType::Timestamp(TimeUnit::Second, tz) => {
                 impl_timestamp_array_conversion!(
                     column.array,

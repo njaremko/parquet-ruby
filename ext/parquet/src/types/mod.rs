@@ -23,10 +23,11 @@ pub use writer_types::*;
 // Common imports used across the module
 use arrow_array::cast::downcast_array;
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Float16Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, NullArray, StringArray,
-    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
+    Float16Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    ListArray, NullArray, StringArray, StructArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
+    UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_schema::{DataType, TimeUnit};
 use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, Value};
@@ -62,6 +63,8 @@ pub enum ParquetGemError {
     InvalidDecimal(String),
     #[error("Failed to parse UUID: {0}")]
     UuidError(#[from] uuid::Error),
+    #[error("Decimals larger than 128 bits are not supported")]
+    DecimalWouldBeTruncated,
 }
 
 #[derive(Debug)]
