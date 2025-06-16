@@ -197,6 +197,9 @@ fn arrow_data_type_to_parquet_schema_type(dt: &DataType) -> Result<ParquetSchema
         DataType::Decimal128(precision, scale) => Ok(PST::Primitive(PrimitiveType::Decimal128(
             *precision, *scale,
         ))),
+        DataType::Decimal256(precision, scale) => Ok(PST::Primitive(PrimitiveType::Decimal256(
+            *precision, *scale,
+        ))),
         DataType::Date32 => Ok(PST::Primitive(PrimitiveType::Date32)),
         DataType::Date64 => {
             // Our code typically uses Date32 or Timestamp for 64. But Arrow has Date64

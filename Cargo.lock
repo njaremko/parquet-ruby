@@ -842,6 +842,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "bytes",
  "either",

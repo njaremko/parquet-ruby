@@ -22,6 +22,19 @@ pub fn format_decimal_with_i8_scale<T: std::fmt::Display>(value: T, scale: i8) -
     }
 }
 
+/// Format i256 decimal value with appropriate scale for BigDecimal conversion
+/// Uses bytes conversion to preserve full precision
+pub fn format_i256_decimal_with_scale(
+    value: arrow_buffer::i256,
+    scale: i8,
+) -> Result<String, ParquetGemError> {
+    // Convert i256 to big-endian bytes
+    let bytes = value.to_be_bytes();
+
+    // Use the existing bytes_to_decimal function which handles full precision
+    bytes_to_decimal(&bytes, scale as i32)
+}
+
 /// Format decimal value with appropriate scale for BigDecimal conversion
 /// Handles positive and negative scales correctly for i32 scale
 pub fn format_decimal_with_i32_scale<T: std::fmt::Display>(value: T, scale: i32) -> String {

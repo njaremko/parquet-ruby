@@ -1,6 +1,6 @@
 use crate::{impl_date_conversion, impl_timestamp_array_conversion, impl_timestamp_conversion};
 
-use super::record_types::format_decimal_with_i8_scale;
+use super::record_types::{format_decimal_with_i8_scale, format_i256_decimal_with_scale};
 use super::*;
 use arrow_array::MapArray;
 use magnus::{RArray, RString};
@@ -24,6 +24,7 @@ pub enum ParquetValue {
     Date32(i32),
     Date64(i64),
     Decimal128(i128, i8),
+    Decimal256(arrow_buffer::i256, i8),
     TimestampSecond(i64, Option<Arc<str>>),
     TimestampMillis(i64, Option<Arc<str>>),
     TimestampMicros(i64, Option<Arc<str>>),
@@ -94,6 +95,15 @@ impl PartialEq for ParquetValue {
                     a_val == b_val
                 }
             }
+            (ParquetValue::Decimal256(a, scale_a), ParquetValue::Decimal256(b, scale_b)) => {
+                if scale_a == scale_b {
+                    // Same scale, compare directly
+                    a == b
+                } else {
+                    // TODO: Implement decimal256 comparison
+                    todo!("decimal256 comparison");
+                }
+            }
             (ParquetValue::TimestampSecond(a, _), ParquetValue::TimestampSecond(b, _)) => a == b,
             (ParquetValue::TimestampMillis(a, _), ParquetValue::TimestampMillis(b, _)) => a == b,
             (ParquetValue::TimestampMicros(a, _), ParquetValue::TimestampMicros(b, _)) => a == b,
@@ -127,6 +137,10 @@ impl std::hash::Hash for ParquetValue {
             ParquetValue::Date32(d) => d.hash(state),
             ParquetValue::Date64(d) => d.hash(state),
             ParquetValue::Decimal128(d, scale) => {
+                d.hash(state);
+                scale.hash(state);
+            }
+            ParquetValue::Decimal256(d, scale) => {
                 d.hash(state);
                 scale.hash(state);
             }
@@ -181,6 +195,17 @@ impl TryIntoValue for ParquetValue {
 
                 // Format with proper scaling based on the sign of scale
                 let value = format_decimal_with_i8_scale(d, scale);
+
+                let kernel = handle.module_kernel();
+                Ok(kernel.funcall::<_, _, Value>("BigDecimal", (value,))?)
+            }
+            ParquetValue::Decimal256(d, scale) => {
+                // Load the bigdecimal gem if it's not already loaded
+                LOADED_BIGDECIMAL.get_or_init(|| handle.require("bigdecimal").unwrap_or_default());
+
+                // Format with proper scaling based on the sign of scale
+                // Use specialized function to preserve full precision
+                let value = format_i256_decimal_with_scale(d, scale)?;
 
                 let kernel = handle.module_kernel();
                 Ok(kernel.funcall::<_, _, Value>("BigDecimal", (value,))?)
@@ -292,9 +317,21 @@ impl ParquetValue {
                 }
                 PrimitiveType::Decimal128(_precision, scale) => {
                     if value.is_kind_of(ruby.class_string()) {
-                        convert_to_decimal128(value, *scale)
+                        convert_to_decimal(value, *scale)
                     } else if let Ok(s) = value.funcall::<_, _, RString>("to_s", ()) {
-                        convert_to_decimal128(s.as_value(), *scale)
+                        convert_to_decimal(s.as_value(), *scale)
+                    } else {
+                        Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            "Expected a string for a decimal type",
+                        ))
+                    }
+                }
+                PrimitiveType::Decimal256(_precision, scale) => {
+                    if value.is_kind_of(ruby.class_string()) {
+                        convert_to_decimal(value, *scale)
+                    } else if let Ok(s) = value.funcall::<_, _, RString>("to_s", ()) {
+                        convert_to_decimal(s.as_value(), *scale)
                     } else {
                         Err(MagnusError::new(
                             magnus::exception::type_error(),
@@ -325,11 +362,6 @@ impl ParquetValue {
                 PrimitiveType::TimestampMicros => {
                     let v = convert_to_timestamp_micros(ruby, value, format)?;
                     Ok(ParquetValue::TimestampMicros(v, None))
-                }
-                PrimitiveType::Decimal256(_precision, scale) => {
-                    // Decimal256 is truncated to Decimal128 since Rust doesn't support 256-bit integers
-                    // Values that exceed i128 range will be clamped to i128::MIN/MAX
-                    convert_to_decimal128(value, *scale)
                 }
             },
             ParquetSchemaType::List(list_field) => {
@@ -430,8 +462,14 @@ impl ParquetValue {
         }
     }
 }
+
+enum ParsedDecimal {
+    Int128(i128),
+    Int256(arrow_buffer::i256),
+}
+
 /// Unified helper to parse a decimal string and apply scaling
-fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, MagnusError> {
+fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<ParsedDecimal, MagnusError> {
     let s = input_str.trim();
 
     // 1. Handle scientific notation case (e.g., "0.12345e3")
@@ -450,12 +488,9 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
             )
         })?;
 
-        // Limit exponent to reasonable range to prevent overflow
+        // For very large exponents, we'll need to use BigInt
         if exp_val.abs() > 38 {
-            return Err(MagnusError::new(
-                magnus::exception::range_error(),
-                format!("Exponent {} is out of range for decimal value '{}'. Must be between -38 and 38.", exp_val, s),
-            ));
+            return parse_large_decimal_with_bigint(s, input_scale);
         }
 
         // Handle the base part which might contain a decimal point
@@ -465,30 +500,23 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
 
             let base_scale = base.len() - decimal_pos - 1;
 
-            let base_val = base_without_point.parse::<i128>().map_err(|e| {
-                MagnusError::new(
-                    magnus::exception::type_error(),
-                    format!(
-                        "Failed to parse base '{}' in scientific notation '{}': {}",
-                        base, s, e
-                    ),
-                )
-            })?;
-
-            (base_val, base_scale as i32)
+            // Try to parse as i128 first
+            match base_without_point.parse::<i128>() {
+                Ok(v) => (v, base_scale as i32),
+                Err(_) => {
+                    // Value too large for i128, use BigInt
+                    return parse_large_decimal_with_bigint(s, input_scale);
+                }
+            }
         } else {
             // No decimal point in base
-            let base_val = base.parse::<i128>().map_err(|e| {
-                MagnusError::new(
-                    magnus::exception::type_error(),
-                    format!(
-                        "Failed to parse base '{}' in scientific notation '{}': {}",
-                        base, s, e
-                    ),
-                )
-            })?;
-
-            (base_val, 0)
+            match base.parse::<i128>() {
+                Ok(v) => (v, 0),
+                Err(_) => {
+                    // Value too large for i128, use BigInt
+                    return parse_large_decimal_with_bigint(s, input_scale);
+                }
+            }
         };
 
         // Calculate the effective scale: base_scale - exp_val
@@ -500,12 +528,14 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
                 // Need to multiply to increase scale
                 let scale_diff = (input_scale as i32 - effective_scale) as u32;
                 if scale_diff > 38 {
-                    return Err(MagnusError::new(
-                        magnus::exception::range_error(),
-                        format!("Scale adjustment too large ({}) for decimal value '{}'. Consider using a smaller scale.", scale_diff, s),
-                    ));
+                    return parse_large_decimal_with_bigint(s, input_scale);
                 }
-                Ok(base_val * 10_i128.pow(scale_diff))
+
+                // Check for overflow
+                match base_val.checked_mul(10_i128.pow(scale_diff)) {
+                    Some(v) => Ok(ParsedDecimal::Int128(v)),
+                    None => parse_large_decimal_with_bigint(s, input_scale),
+                }
             }
             std::cmp::Ordering::Greater => {
                 // Need to divide to decrease scale
@@ -516,9 +546,9 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
                         format!("Scale adjustment too large ({}) for decimal value '{}'. Consider using a larger scale.", scale_diff, s),
                     ));
                 }
-                Ok(base_val / 10_i128.pow(scale_diff))
+                Ok(ParsedDecimal::Int128(base_val / 10_i128.pow(scale_diff)))
             }
-            std::cmp::Ordering::Equal => Ok(base_val),
+            std::cmp::Ordering::Equal => Ok(ParsedDecimal::Int128(base_val)),
         }
     }
     // 2. Handle decimal point in the string (e.g., "123.456")
@@ -529,16 +559,14 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
         // Calculate the actual scale from the decimal position
         let actual_scale = s.len() - decimal_pos - 1;
 
-        // Parse the string without decimal point as i128
-        let v = s_without_point.parse::<i128>().map_err(|e| {
-            MagnusError::new(
-                magnus::exception::type_error(),
-                format!(
-                    "Failed to parse decimal string '{}' (without decimal point: '{}'): {}",
-                    s, s_without_point, e
-                ),
-            )
-        })?;
+        // Try to parse as i128 first
+        let v = match s_without_point.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => {
+                // Value too large for i128, use BigInt
+                return parse_large_decimal_with_bigint(s, input_scale);
+            }
+        };
 
         // Scale the value if needed based on the difference between
         // the actual scale and the requested scale
@@ -547,12 +575,14 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
                 // Need to multiply to increase scale
                 let scale_diff = (input_scale - actual_scale as i8) as u32;
                 if scale_diff > 38 {
-                    return Err(MagnusError::new(
-                        magnus::exception::range_error(),
-                        format!("Scale adjustment too large ({}) for decimal value '{}'. Consider using a smaller scale.", scale_diff, s),
-                    ));
+                    return parse_large_decimal_with_bigint(s, input_scale);
                 }
-                Ok(v * 10_i128.pow(scale_diff))
+
+                // Check for overflow
+                match v.checked_mul(10_i128.pow(scale_diff)) {
+                    Some(v) => Ok(ParsedDecimal::Int128(v)),
+                    None => parse_large_decimal_with_bigint(s, input_scale),
+                }
             }
             std::cmp::Ordering::Greater => {
                 // Need to divide to decrease scale
@@ -563,30 +593,25 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
                         format!("Scale adjustment too large ({}) for decimal value '{}'. Consider using a larger scale.", scale_diff, s),
                     ));
                 }
-                Ok(v / 10_i128.pow(scale_diff))
+                Ok(ParsedDecimal::Int128(v / 10_i128.pow(scale_diff)))
             }
-            std::cmp::Ordering::Equal => Ok(v),
+            std::cmp::Ordering::Equal => Ok(ParsedDecimal::Int128(v)),
         }
     }
     // 3. Plain integer value (e.g., "12345")
     else {
-        // No decimal point, parse as i128 and scale appropriately
-        let v = s.parse::<i128>().map_err(|e| {
-            MagnusError::new(
-                magnus::exception::type_error(),
-                format!("Failed to parse integer string '{}' as decimal: {}", s, e),
-            )
-        })?;
+        // No decimal point, try to parse as i128 first
+        let v = match s.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => {
+                // Value too large for i128, use BigInt
+                return parse_large_decimal_with_bigint(s, input_scale);
+            }
+        };
 
         // Apply scale - make sure it's reasonable
         if input_scale > 38 {
-            return Err(MagnusError::new(
-                magnus::exception::range_error(),
-                format!(
-                    "Scale {} is too large for decimal value '{}'. Must be ≤ 38.",
-                    input_scale, s
-                ),
-            ));
+            return parse_large_decimal_with_bigint(s, input_scale);
         } else if input_scale < -38 {
             return Err(MagnusError::new(
                 magnus::exception::range_error(),
@@ -599,15 +624,153 @@ fn parse_decimal_string(input_str: &str, input_scale: i8) -> Result<i128, Magnus
 
         // Apply positive scale (multiply)
         if input_scale >= 0 {
-            Ok(v * 10_i128.pow(input_scale as u32))
+            match v.checked_mul(10_i128.pow(input_scale as u32)) {
+                Some(v) => Ok(ParsedDecimal::Int128(v)),
+                None => parse_large_decimal_with_bigint(s, input_scale),
+            }
         } else {
             // Apply negative scale (divide)
-            Ok(v / 10_i128.pow((-input_scale) as u32))
+            Ok(ParsedDecimal::Int128(
+                v / 10_i128.pow((-input_scale) as u32),
+            ))
         }
     }
 }
 
-fn convert_to_decimal128(value: Value, scale: i8) -> Result<ParquetValue, MagnusError> {
+/// Parse large decimal values using BigInt when they would overflow i128
+fn parse_large_decimal_with_bigint(s: &str, input_scale: i8) -> Result<ParsedDecimal, MagnusError> {
+    use num::BigInt;
+    use std::str::FromStr;
+
+    // Parse the input string as a BigInt
+    let bigint = if let Some(e_pos) = s.to_lowercase().find('e') {
+        // Handle scientific notation
+        let base = &s[0..e_pos];
+        let exp = &s[e_pos + 1..];
+
+        let exp_val = exp.parse::<i32>().map_err(|e| {
+            MagnusError::new(
+                magnus::exception::type_error(),
+                format!("Failed to parse exponent '{}': {}", exp, e),
+            )
+        })?;
+
+        // Parse base as BigInt
+        let base_bigint = if let Some(decimal_pos) = base.find('.') {
+            let mut base_without_point = base.to_string();
+            base_without_point.remove(decimal_pos);
+            let base_scale = base.len() - decimal_pos - 1;
+
+            let bigint = BigInt::from_str(&base_without_point).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse decimal base '{}': {}", base, e),
+                )
+            })?;
+
+            // Adjust for the decimal point
+            let effective_exp = exp_val - base_scale as i32;
+
+            if effective_exp > 0 {
+                bigint * BigInt::from(10).pow(effective_exp as u32)
+            } else if effective_exp < 0 {
+                bigint / BigInt::from(10).pow((-effective_exp) as u32)
+            } else {
+                bigint
+            }
+        } else {
+            let bigint = BigInt::from_str(base).map_err(|e| {
+                MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse decimal base '{}': {}", base, e),
+                )
+            })?;
+
+            if exp_val > 0 {
+                bigint * BigInt::from(10).pow(exp_val as u32)
+            } else if exp_val < 0 {
+                bigint / BigInt::from(10).pow((-exp_val) as u32)
+            } else {
+                bigint
+            }
+        };
+
+        base_bigint
+    } else if let Some(decimal_pos) = s.find('.') {
+        // Handle decimal point
+        let mut s_without_point = s.to_string();
+        s_without_point.remove(decimal_pos);
+
+        let actual_scale = s.len() - decimal_pos - 1;
+        let bigint = BigInt::from_str(&s_without_point).map_err(|e| {
+            MagnusError::new(
+                magnus::exception::type_error(),
+                format!("Failed to parse decimal string '{}': {}", s, e),
+            )
+        })?;
+
+        // Adjust for scale difference
+        let scale_diff = actual_scale as i8 - input_scale;
+
+        if scale_diff > 0 {
+            bigint / BigInt::from(10).pow(scale_diff as u32)
+        } else if scale_diff < 0 {
+            bigint * BigInt::from(10).pow((-scale_diff) as u32)
+        } else {
+            bigint
+        }
+    } else {
+        // Plain integer
+        let bigint = BigInt::from_str(s).map_err(|e| {
+            MagnusError::new(
+                magnus::exception::type_error(),
+                format!("Failed to parse integer string '{}': {}", s, e),
+            )
+        })?;
+
+        if input_scale > 0 {
+            bigint * BigInt::from(10).pow(input_scale as u32)
+        } else if input_scale < 0 {
+            bigint / BigInt::from(10).pow((-input_scale) as u32)
+        } else {
+            bigint
+        }
+    };
+
+    // Convert BigInt to bytes and then to i256
+    let bytes = bigint.to_signed_bytes_le();
+
+    if bytes.len() <= 16 {
+        // Fits in i128
+        let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+            [0xff; 16]
+        } else {
+            [0; 16]
+        };
+        buf[..bytes.len()].copy_from_slice(&bytes);
+
+        Ok(ParsedDecimal::Int128(i128::from_le_bytes(buf)))
+    } else if bytes.len() <= 32 {
+        // Fits in i256
+        let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+            [0xff; 32]
+        } else {
+            [0; 32]
+        };
+        buf[..bytes.len()].copy_from_slice(&bytes);
+
+        Ok(ParsedDecimal::Int256(arrow_buffer::i256::from_le_bytes(
+            buf,
+        )))
+    } else {
+        Err(MagnusError::new(
+            magnus::exception::range_error(),
+            format!("Decimal value '{}' is too large to fit in 256 bits", s),
+        ))
+    }
+}
+
+fn convert_to_decimal(value: Value, scale: i8) -> Result<ParquetValue, MagnusError> {
     // Get the decimal string based on the type of value
     let s = if unsafe { value.classname() } == "BigDecimal" {
         value
@@ -619,7 +782,10 @@ fn convert_to_decimal128(value: Value, scale: i8) -> Result<ParquetValue, Magnus
 
     // Use our unified parser to convert the string to a decimal value with scaling
     match parse_decimal_string(&s, scale) {
-        Ok(decimal_value) => Ok(ParquetValue::Decimal128(decimal_value, scale)),
+        Ok(decimal_value) => match decimal_value {
+            ParsedDecimal::Int128(v) => Ok(ParquetValue::Decimal128(v, scale)),
+            ParsedDecimal::Int256(v) => Ok(ParquetValue::Decimal256(v, scale)),
+        },
         Err(e) => Err(MagnusError::new(
             magnus::exception::type_error(),
             format!(
@@ -761,32 +927,26 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
             }
             DataType::Decimal256(_precision, scale) => {
                 let array = downcast_array::<Decimal256Array>(column.array);
-                if array.is_nullable() {
-                    let mut out = Vec::with_capacity(array.len());
-                    for (i, x) in array.values().iter().enumerate() {
-                        if array.is_null(i) {
-                            out.push(ParquetValue::Null);
-                        } else {
-                            // Truncate i256 to i128 by taking the low 128 bits
-                            let truncated = match x.to_i128() {
-                                Some(val) => val,
-                                None => return Err(ParquetGemError::DecimalWouldBeTruncated),
-                            };
-                            out.push(ParquetValue::Decimal128(truncated, *scale));
-                        }
-                    }
-                    Ok(ParquetValueVec(out))
+                Ok(ParquetValueVec(if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                ParquetValue::Decimal256(*x, *scale)
+                            }
+                        })
+                        .collect()
                 } else {
-                    let mut out = Vec::with_capacity(array.len());
-                    for x in array.values().iter() {
-                        let truncated = match x.to_i128() {
-                            Some(val) => val,
-                            None => return Err(ParquetGemError::DecimalWouldBeTruncated),
-                        };
-                        out.push(ParquetValue::Decimal128(truncated, *scale));
-                    }
-                    Ok(ParquetValueVec(out))
-                }
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| ParquetValue::Decimal256(*x, *scale))
+                        .collect()
+                }))
             }
             DataType::Timestamp(TimeUnit::Second, tz) => {
                 impl_timestamp_array_conversion!(

@@ -12,6 +12,7 @@ rb-sys-env = "^0.2"
 [dependencies]
 ahash = "0.8"
 arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-time" }
+arrow-buffer = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-time" }
 arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan/fix-time" }
 bytes = "^1.9"
 either = "1.9"

@@ -951,4 +951,44 @@ class DecimalTest < Minitest::Test
       assert_equal BigDecimal("12345678901234567901234567890.123401234567890"), value
     end
   end
+
+  # TODO, writing is bad, so roundtrip is not good
+  # def test_write_and_read_decimal256
+  #   require "bigdecimal"
+  #   require "securerandom"
+  #   schema = [
+  #     { "amount" => "decimal256(70,12)" }
+  #   ]
+
+  #   # Values that fit in 128 bits and those that require 256 bits
+  #   test_values = [
+  #     BigDecimal("1234567824232342342342422342901234567890.123456789012"),
+  #     BigDecimal("-9876543212323423423423423423409876543210.987654321098"),
+  #     BigDecimal("0.000000000001"),
+  #     BigDecimal("345345.999999999999"),
+  #     BigDecimal("-345345.999999999999"),
+  #     BigDecimal("1E+25"),
+  #     BigDecimal("-1E+25"),
+  #     BigDecimal("0")
+  #   ]
+
+  #   temp_path = "test/decimal256_write_#{SecureRandom.hex(4)}.parquet"
+  #   begin
+  #     # Write the values
+  #     Parquet.write_rows(test_values.map { |v| [v] }.each, schema: schema, write_to: temp_path)
+
+  #     # Read them back
+  #     rows = Parquet.each_row(temp_path).to_a
+  #     assert_equal test_values.size, rows.size
+
+  #     test_values.each_with_index do |expected, i|
+  #       actual = rows[i]["amount"]
+  #       assert_instance_of BigDecimal, actual, "Row #{i} value is not a BigDecimal"
+  #       # Compare with high precision
+  #       assert_in_delta expected.to_f, actual.to_f, 1e-12, "Row #{i} mismatch: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
+  #     end
+  #   ensure
+  #     File.delete(temp_path) if File.exist?(temp_path)
+  #   end
+  # end
 end

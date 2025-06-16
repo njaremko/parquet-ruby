@@ -325,8 +325,7 @@ pub fn schema_node_to_arrow_field(node: &SchemaNode) -> ArrowField {
                     ArrowDataType::Decimal128(*precision, *scale)
                 }
                 PrimitiveType::Decimal256(precision, scale) => {
-                    // We truncate Decimal256 to Decimal128 since Rust doesn't support 256-bit integers
-                    ArrowDataType::Decimal128((*precision).min(38), *scale)
+                    ArrowDataType::Decimal256(*precision, *scale)
                 }
                 PrimitiveType::Boolean => ArrowDataType::Boolean,
                 PrimitiveType::String => ArrowDataType::Utf8,

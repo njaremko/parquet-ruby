@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.10
+
+- Ability to write decimal256 values (stored correctly in Parquet files)
+- Limited ability to read decimal256 values (currently truncated due to arrow-rs limitation)
+
 ## 0.5.9
 
 - Fix handling of all possible byte array lengths used for decimal value representation
