@@ -115,126 +115,75 @@ fn bytes_to_decimal(bytes: &[u8], scale: i32) -> Result<String, ParquetGemError>
             Ok(format_decimal_with_i32_scale(value, scale))
         }
         17..=32 => {
-            // For 17-32 bytes, treat as a signed 256-bit integer in big-endian, left-padded as needed.
-            // Do not use BigInt.
-
-            if bytes.len() > 32 {
-                return Err(ParquetGemError::InvalidDecimal(format!(
-                    "Decimal byte array too large: {} bytes (maximum 32 bytes for 256 bits)",
-                    bytes.len()
-                )));
-            }
-
-            // Pad to 32 bytes (big-endian, left pad)
-            let mut buf = [0u8; 32];
-            let offset = 32 - bytes.len();
-            buf[offset..].copy_from_slice(bytes);
-
-            // Determine sign from the first byte of the input (not the padded buffer)
+            // For 17-32 bytes, we need arbitrary precision handling
+            // Check if the number is negative (MSB of first byte)
             let is_negative = bytes[0] & 0x80 != 0;
 
-            // If negative, sign-extend the padding bytes
             if is_negative {
-                for b in &mut buf[..offset] {
-                    *b = 0xFF;
+                // For negative numbers, we need to compute two's complement
+                // First, invert all bits
+                let mut inverted = Vec::with_capacity(bytes.len());
+                for &byte in bytes {
+                    inverted.push(!byte);
                 }
-            }
 
-            // Now buf is a 32-byte two's complement signed integer, big-endian
+                // Then add 1
+                let mut carry = 1u8;
+                for i in (0..inverted.len()).rev() {
+                    let (sum, new_carry) = inverted[i].overflowing_add(carry);
+                    inverted[i] = sum;
+                    carry = if new_carry { 1 } else { 0 };
+                }
 
-            // Helper: convert [u8; 32] two's complement to absolute value and sign
-            fn twos_complement_to_abs(buf: &[u8; 32]) -> (bool, [u8; 32]) {
-                let negative = buf[0] & 0x80 != 0;
-                if !negative {
-                    (false, *buf)
-                } else {
-                    // Two's complement: invert and add 1
-                    let mut out = [0u8; 32];
-                    let mut carry = true;
-                    for (i, b) in buf.iter().rev().enumerate() {
-                        let inv = !b;
-                        let (val, c) = if carry {
-                            inv.overflowing_add(1)
-                        } else {
-                            (inv, false)
-                        };
-                        out[31 - i] = val;
-                        carry = c;
+                // Convert to decimal string
+                let mut result = String::new();
+                let mut remainder = inverted;
+
+                // Repeatedly divide by 10 to get decimal digits
+                while !remainder.iter().all(|&b| b == 0) {
+                    let mut carry = 0u16;
+                    for i in 0..remainder.len() {
+                        let temp = (carry << 8) | (remainder[i] as u16);
+                        remainder[i] = (temp / 10) as u8;
+                        carry = temp % 10;
                     }
-                    (true, out)
+                    result.push_str(&carry.to_string());
                 }
-            }
 
-            let (negative, abs_bytes) = twos_complement_to_abs(&buf);
-
-            // Helper: divide a 256-bit unsigned integer by u64, returning quotient and remainder
-            fn div_rem_u256_by_u64(n: &[u8; 32], divisor: u64) -> ([u8; 32], u64) {
-                let mut quotient = [0u8; 32];
-                let mut rem: u128 = 0;
-                for (i, &b) in n.iter().enumerate() {
-                    rem = (rem << 8) | (b as u128);
-                    let q = rem / (divisor as u128);
-                    rem = rem % (divisor as u128);
-                    quotient[i] = q as u8;
-                }
-                (quotient, rem as u64)
-            }
-
-            // Helper: check if a 256-bit value is zero
-            fn is_zero_u256(n: &[u8; 32]) -> bool {
-                n.iter().all(|&b| b == 0)
-            }
-
-            // Convert 10^scale to u64 (safe for scale <= 18)
-            let pow10 = 10u64.checked_pow(scale as u32).ok_or_else(|| {
-                ParquetGemError::InvalidDecimal(format!(
-                    "Decimal scale too large for 256-bit decimal: {}",
-                    scale
-                ))
-            })?;
-
-            // Get integer part and fractional remainder
-            let (int_bytes, rem) = div_rem_u256_by_u64(&abs_bytes, pow10);
-
-            // Convert integer part to decimal string
-            let mut int_digits = Vec::new();
-            let mut tmp = int_bytes;
-            while !is_zero_u256(&tmp) {
-                let (q, r) = div_rem_u256_by_u64(&tmp, 10);
-                int_digits.push((r as u8) + b'0');
-                tmp = q;
-            }
-            if int_digits.is_empty() {
-                int_digits.push(b'0');
-            }
-            int_digits.reverse();
-            let int_str = String::from_utf8(int_digits).unwrap();
-
-            // Convert fractional part to decimal string, left pad with zeros if needed
-            let mut frac_digits = vec![b'0'; scale as usize];
-            let mut frac = rem;
-            for i in (0..scale as usize).rev() {
-                frac_digits[i] = ((frac % 10) as u8) + b'0';
-                frac /= 10;
-            }
-            let frac_str = String::from_utf8(frac_digits).unwrap();
-
-            // Compose the final string
-            let result = if scale == 0 {
-                if negative {
-                    format!("-{}", int_str)
+                // The digits are in reverse order
+                if result.is_empty() {
+                    result = "0".to_string();
                 } else {
-                    int_str
+                    result = result.chars().rev().collect();
                 }
+
+                // Add negative sign and format with scale
+                Ok(format_decimal_with_i32_scale(format!("-{}", result), scale))
             } else {
-                if negative {
-                    format!("-{}.{}", int_str, frac_str)
-                } else {
-                    format!("{}.{}", int_str, frac_str)
-                }
-            };
+                // For positive numbers, direct conversion
+                let mut result = String::new();
+                let mut remainder = bytes.to_vec();
 
-            Ok(result)
+                // Repeatedly divide by 10 to get decimal digits
+                while !remainder.iter().all(|&b| b == 0) {
+                    let mut carry = 0u16;
+                    for i in 0..remainder.len() {
+                        let temp = (carry << 8) | (remainder[i] as u16);
+                        remainder[i] = (temp / 10) as u8;
+                        carry = temp % 10;
+                    }
+                    result.push_str(&carry.to_string());
+                }
+
+                // The digits are in reverse order
+                if result.is_empty() {
+                    result = "0".to_string();
+                } else {
+                    result = result.chars().rev().collect();
+                }
+
+                Ok(format_decimal_with_i32_scale(result, scale))
+            }
         }
         _ => Err(ParquetGemError::InvalidDecimal(format!(
             "Unsupported decimal byte array size: {} (maximum 32 bytes)",

@@ -4,7 +4,6 @@ use super::record_types::format_decimal_with_i8_scale;
 use super::*;
 use arrow_array::MapArray;
 use magnus::{RArray, RString};
-use parquet::errors::ParquetError;
 
 #[derive(Debug, Clone)]
 pub enum ParquetValue {
@@ -762,36 +761,32 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
             }
             DataType::Decimal256(_precision, scale) => {
                 let array = downcast_array::<Decimal256Array>(column.array);
-                Ok(ParquetValueVec(if array.is_nullable() {
-                    array
-                        .values()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, x)| {
-                            if array.is_null(i) {
-                                ParquetValue::Null
-                            } else {
-                                // Truncate i256 to i128 by taking the low 128 bits
-                                let truncated = x
-                                    .to_i128()
-                                    .ok_or_else(|| ParquetGemError::DecimalWouldBeTruncated)?;
-                                ParquetValue::Decimal128(truncated, *scale)
-                            }
-                        })
-                        .collect()
-                } else {
-                    array
-                        .values()
-                        .iter()
-                        .map(|x| {
+                if array.is_nullable() {
+                    let mut out = Vec::with_capacity(array.len());
+                    for (i, x) in array.values().iter().enumerate() {
+                        if array.is_null(i) {
+                            out.push(ParquetValue::Null);
+                        } else {
                             // Truncate i256 to i128 by taking the low 128 bits
-                            let truncated = x
-                                .to_i128()
-                                .ok_or_else(|| ParquetGemError::DecimalWouldBeTruncated)?;
-                            ParquetValue::Decimal128(truncated, *scale)
-                        })
-                        .collect()
-                }))
+                            let truncated = match x.to_i128() {
+                                Some(val) => val,
+                                None => return Err(ParquetGemError::DecimalWouldBeTruncated),
+                            };
+                            out.push(ParquetValue::Decimal128(truncated, *scale));
+                        }
+                    }
+                    Ok(ParquetValueVec(out))
+                } else {
+                    let mut out = Vec::with_capacity(array.len());
+                    for x in array.values().iter() {
+                        let truncated = match x.to_i128() {
+                            Some(val) => val,
+                            None => return Err(ParquetGemError::DecimalWouldBeTruncated),
+                        };
+                        out.push(ParquetValue::Decimal128(truncated, *scale));
+                    }
+                    Ok(ParquetValueVec(out))
+                }
             }
             DataType::Timestamp(TimeUnit::Second, tz) => {
                 impl_timestamp_array_conversion!(
