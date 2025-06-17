@@ -384,13 +384,11 @@ fn create_arrow_builder_for_type(
         }
         ParquetSchemaType::Primitive(PrimitiveType::Decimal256(precision, scale)) => {
             // Create a Decimal128Builder since we're truncating Decimal256 to Decimal128
-            let builder = Decimal128Builder::with_capacity(cap);
+            let builder = Decimal256Builder::with_capacity(cap);
 
             // Set precision and scale for the decimal and return the new builder
-            // Note: We use min(precision, 38) since Decimal128 max precision is 38
-            let adjusted_precision = (*precision).min(38);
             let builder_with_precision = builder
-                .with_precision_and_scale(adjusted_precision, *scale)
+                .with_precision_and_scale(*precision, *scale)
                 .map_err(|e| {
                     MagnusError::new(
                         magnus::exception::runtime_error(),
@@ -911,34 +909,174 @@ fn fill_builder(
             Ok(())
         }
         ParquetSchemaType::Primitive(PrimitiveType::Decimal256(_precision, scale)) => {
-            // We use Decimal128Builder since we're truncating Decimal256 to Decimal128
             let typed_builder = builder
                 .as_any_mut()
-                .downcast_mut::<Decimal128Builder>()
-                .expect("Builder mismatch: expected Decimal128Builder for Decimal256");
+                .downcast_mut::<Decimal256Builder>()
+                .expect("Builder mismatch: expected Decimal256Builder for Decimal256");
 
             for val in values {
                 match val {
-                    ParquetValue::Decimal128(d, _scale) => typed_builder.append_value(*d),
+                    ParquetValue::Decimal256(d, _scale) => typed_builder.append_value(*d),
+                    ParquetValue::Decimal128(d, _scale) => {
+                        // Convert i128 to i256
+                        typed_builder.append_value(arrow_buffer::i256::from_i128(*d))
+                    }
                     ParquetValue::Float64(f) => {
                         // Scale the float to the desired precision and scale
-                        let scaled_value = (*f * 10_f64.powi(*scale as i32)) as i128;
-                        typed_builder.append_value(scaled_value)
+                        // For large values, use BigInt to avoid overflow
+                        let scaled = *f * 10_f64.powi(*scale as i32);
+                        if scaled >= i128::MIN as f64 && scaled <= i128::MAX as f64 {
+                            let scaled_value = scaled as i128;
+                            typed_builder.append_value(arrow_buffer::i256::from_i128(scaled_value))
+                        } else {
+                            // Use BigInt for values that don't fit in i128
+                            use num::{BigInt, FromPrimitive};
+                            let bigint = BigInt::from_f64(scaled).ok_or_else(|| {
+                                MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!("Failed to convert float {} to BigInt", f),
+                                )
+                            })?;
+                            let bytes = bigint.to_signed_bytes_le();
+                            if bytes.len() <= 32 {
+                                let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+                                    [0xff; 32]
+                                } else {
+                                    [0; 32]
+                                };
+                                buf[..bytes.len()].copy_from_slice(&bytes);
+                                typed_builder.append_value(arrow_buffer::i256::from_le_bytes(buf))
+                            } else {
+                                return Err(MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!(
+                                        "Float value {} scaled to {} is too large for Decimal256",
+                                        f, scaled
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     ParquetValue::Float32(flo) => {
                         // Scale the float to the desired precision and scale
-                        let scaled_value = (*flo as f64 * 10_f64.powi(*scale as i32)) as i128;
-                        typed_builder.append_value(scaled_value)
+                        let scaled = (*flo as f64) * 10_f64.powi(*scale as i32);
+                        if scaled >= i128::MIN as f64 && scaled <= i128::MAX as f64 {
+                            let scaled_value = scaled as i128;
+                            typed_builder.append_value(arrow_buffer::i256::from_i128(scaled_value))
+                        } else {
+                            // Use BigInt for values that don't fit in i128
+                            use num::{BigInt, FromPrimitive};
+                            let bigint = BigInt::from_f64(scaled).ok_or_else(|| {
+                                MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!("Failed to convert float {} to BigInt", flo),
+                                )
+                            })?;
+                            let bytes = bigint.to_signed_bytes_le();
+                            if bytes.len() <= 32 {
+                                let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+                                    [0xff; 32]
+                                } else {
+                                    [0; 32]
+                                };
+                                buf[..bytes.len()].copy_from_slice(&bytes);
+                                typed_builder.append_value(arrow_buffer::i256::from_le_bytes(buf))
+                            } else {
+                                return Err(MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!(
+                                        "Float value {} scaled is too large for Decimal256",
+                                        flo
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     ParquetValue::Int64(i) => {
                         // Scale the integer to the desired scale
-                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
-                        typed_builder.append_value(scaled_value)
+                        let base = arrow_buffer::i256::from_i128(*i as i128);
+                        if *scale <= 38 {
+                            // Can use i128 multiplication for scale <= 38
+                            let scale_factor =
+                                arrow_buffer::i256::from_i128(10_i128.pow(*scale as u32));
+                            match base.checked_mul(scale_factor) {
+                                Some(scaled) => typed_builder.append_value(scaled),
+                                None => {
+                                    return Err(MagnusError::new(
+                                        magnus::exception::type_error(),
+                                        format!(
+                                            "Integer {} scaled by {} overflows Decimal256",
+                                            i, scale
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // For very large scales, use BigInt
+                            use num::BigInt;
+                            let bigint = BigInt::from(*i) * BigInt::from(10).pow(*scale as u32);
+                            let bytes = bigint.to_signed_bytes_le();
+                            if bytes.len() <= 32 {
+                                let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+                                    [0xff; 32]
+                                } else {
+                                    [0; 32]
+                                };
+                                buf[..bytes.len()].copy_from_slice(&bytes);
+                                typed_builder.append_value(arrow_buffer::i256::from_le_bytes(buf))
+                            } else {
+                                return Err(MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!(
+                                        "Integer {} scaled by {} is too large for Decimal256",
+                                        i, scale
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     ParquetValue::Int32(i) => {
                         // Scale the integer to the desired scale
-                        let scaled_value = (*i as i128) * 10_i128.pow(*scale as u32);
-                        typed_builder.append_value(scaled_value)
+                        let base = arrow_buffer::i256::from_i128(*i as i128);
+                        if *scale <= 38 {
+                            // Can use i128 multiplication for scale <= 38
+                            let scale_factor =
+                                arrow_buffer::i256::from_i128(10_i128.pow(*scale as u32));
+                            match base.checked_mul(scale_factor) {
+                                Some(scaled) => typed_builder.append_value(scaled),
+                                None => {
+                                    return Err(MagnusError::new(
+                                        magnus::exception::type_error(),
+                                        format!(
+                                            "Integer {} scaled by {} overflows Decimal256",
+                                            i, scale
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // For very large scales, use BigInt
+                            use num::BigInt;
+                            let bigint = BigInt::from(*i) * BigInt::from(10).pow(*scale as u32);
+                            let bytes = bigint.to_signed_bytes_le();
+                            if bytes.len() <= 32 {
+                                let mut buf = if bigint.sign() == num::bigint::Sign::Minus {
+                                    [0xff; 32]
+                                } else {
+                                    [0; 32]
+                                };
+                                buf[..bytes.len()].copy_from_slice(&bytes);
+                                typed_builder.append_value(arrow_buffer::i256::from_le_bytes(buf))
+                            } else {
+                                return Err(MagnusError::new(
+                                    magnus::exception::type_error(),
+                                    format!(
+                                        "Integer {} scaled by {} is too large for Decimal256",
+                                        i, scale
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     ParquetValue::Null => typed_builder.append_null(),
                     other => {
@@ -1232,6 +1370,15 @@ fn fill_builder(
                                             )
                                         })?
                                         .append_value(*x),
+                                    ParquetValue::Decimal256(x, _scale) => typed_builder
+                                        .field_builder::<Decimal256Builder>(i)
+                                        .ok_or_else(|| {
+                                            MagnusError::new(
+                                                magnus::exception::type_error(),
+                                                "Failed to coerce into Decimal256Builder",
+                                            )
+                                        })?
+                                        .append_value(*x),
                                     ParquetValue::Date32(x) => typed_builder
                                         .field_builder::<Date32Builder>(i)
                                         .ok_or_else(|| {
@@ -1438,11 +1585,11 @@ fn fill_builder(
                                             })?
                                             .append_null(),
                                         ParquetSchemaType::Primitive(PrimitiveType::Decimal256(_, _)) => typed_builder
-                                            .field_builder::<Decimal128Builder>(i)
+                                            .field_builder::<Decimal256Builder>(i)
                                             .ok_or_else(|| {
                                                 MagnusError::new(
                                                     magnus::exception::type_error(),
-                                                    "Failed to coerce into Decimal128Builder for Decimal256",
+                                                    "Failed to coerce into Decimal256Builder for Decimal256",
                                                 )
                                             })?
                                             .append_null(),

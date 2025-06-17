@@ -15,6 +15,7 @@ test/*.parquet
 *.txt
 .cursorrules
 CLAUDE.md
-.mcp.json
+.mcp.json*
 arrow-rs
 magnus
+generate.py

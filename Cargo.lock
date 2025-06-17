@@ -126,6 +126,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "flatbuffers",
+ "lz4_flex",
 ]
 
 [[package]]
@@ -842,6 +843,8 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "arrow-array",
+ "arrow-buffer",
+ "arrow-ipc",
  "arrow-schema",
  "bytes",
  "either",

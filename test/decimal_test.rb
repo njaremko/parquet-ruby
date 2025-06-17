@@ -867,11 +867,11 @@ class DecimalTest < Minitest::Test
     # Values that test decimal256 support (truncated to decimal128)
     # Note: Since we truncate to decimal128, values may lose precision
     test_values = [
-      { 
+      {
         input: BigDecimal("1234567890123456789012345678.9012345678"),
         expected: BigDecimal("1234567890123456789012345678.9012345678")
       },
-      { 
+      {
         input: BigDecimal("-9876543210987654321098765432.1098765432"),
         expected: BigDecimal("-9876543210987654321098765432.1098765432")
       },
@@ -918,14 +918,14 @@ class DecimalTest < Minitest::Test
       test_values.each_with_index do |test_case, i|
         actual = rows[i]["big_decimal"]
         expected = test_case[:expected]
-        
+
         # Compare with appropriate precision based on whether truncation occurred
         if test_case[:input] == test_case[:expected]
           # No truncation expected, should be exact
           assert_equal expected, actual, "Mismatch at row #{i}: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
         else
           # Truncation expected, compare with tolerance
-          assert_in_delta expected.to_f, actual.to_f, 1e-10, 
+          assert_in_delta expected.to_f, actual.to_f, 1e-10,
                           "Mismatch at row #{i}: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
         end
         assert_instance_of BigDecimal, actual
@@ -934,4 +934,61 @@ class DecimalTest < Minitest::Test
       File.delete(temp_path) if File.exist?(temp_path)
     end
   end
+
+  def test_parse_big_decimal_fixture
+    # This fixture should contain a column "amount" with decimal values
+    fixture_path = File.expand_path("big-decimal.parquet", __dir__)
+    assert File.exist?(fixture_path), "Fixture file not found: #{fixture_path}"
+
+    rows = Parquet.each_row(fixture_path).to_a
+    refute_empty rows, "No rows parsed from big-decimal.parquet"
+
+    # Check that the column exists and values are BigDecimal
+    rows.each_with_index do |row, i|
+      assert row.key?("big_decimal_value"), "Row #{i} missing 'big_decimal_value' column"
+      value = row["big_decimal_value"]
+      assert_instance_of BigDecimal, value, "Row #{i} 'big_decimal_value' is not a BigDecimal"
+      assert_equal BigDecimal("12345678901234567901234567890.123401234567890"), value
+    end
+  end
+
+  # TODO, writing is bad, so roundtrip is not good
+  # def test_write_and_read_decimal256
+  #   require "bigdecimal"
+  #   require "securerandom"
+  #   schema = [
+  #     { "amount" => "decimal256(70,12)" }
+  #   ]
+
+  #   # Values that fit in 128 bits and those that require 256 bits
+  #   test_values = [
+  #     BigDecimal("1234567824232342342342422342901234567890.123456789012"),
+  #     BigDecimal("-9876543212323423423423423423409876543210.987654321098"),
+  #     BigDecimal("0.000000000001"),
+  #     BigDecimal("345345.999999999999"),
+  #     BigDecimal("-345345.999999999999"),
+  #     BigDecimal("1E+25"),
+  #     BigDecimal("-1E+25"),
+  #     BigDecimal("0")
+  #   ]
+
+  #   temp_path = "test/decimal256_write_#{SecureRandom.hex(4)}.parquet"
+  #   begin
+  #     # Write the values
+  #     Parquet.write_rows(test_values.map { |v| [v] }.each, schema: schema, write_to: temp_path)
+
+  #     # Read them back
+  #     rows = Parquet.each_row(temp_path).to_a
+  #     assert_equal test_values.size, rows.size
+
+  #     test_values.each_with_index do |expected, i|
+  #       actual = rows[i]["amount"]
+  #       assert_instance_of BigDecimal, actual, "Row #{i} value is not a BigDecimal"
+  #       # Compare with high precision
+  #       assert_in_delta expected.to_f, actual.to_f, 1e-12, "Row #{i} mismatch: expected #{expected.to_s("F")}, got #{actual.to_s("F")}"
+  #     end
+  #   ensure
+  #     File.delete(temp_path) if File.exist?(temp_path)
+  #   end
+  # end
 end

@@ -55,6 +55,10 @@ pub enum ParquetGemError {
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow_schema::ArrowError),
+    #[error("Arrow IPC error: {0}")]
+    ArrowIpc(String),
+    #[error("Unknown file format")]
+    UnknownFormat,
     #[error("UTF-8 error: {0}")]
     Utf8Error(#[from] simdutf8::basic::Utf8Error),
     #[error("Jiff error: {0}")]

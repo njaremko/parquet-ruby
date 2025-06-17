@@ -44,7 +44,7 @@ class ErrorTest < Minitest::Test
 
     error = assert_raises(RuntimeError) { Parquet.each_row(non_parquet_path).to_a }
 
-    assert_match(/Failed to open file|Invalid Parquet/, error.message)
+    assert_match(/Failed to open file|Invalid Parquet|Unknown file format/, error.message)
   ensure
     File.delete(non_parquet_path) if File.exist?(non_parquet_path)
   end
