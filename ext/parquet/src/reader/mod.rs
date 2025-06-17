@@ -1,4 +1,6 @@
+mod arrow_reader;
 mod common;
+mod format_detector;
 mod parquet_column_reader;
 mod parquet_row_reader;
 mod unified;
@@ -188,7 +190,10 @@ pub fn parse_metadata(_rb_self: Value, args: &[Value]) -> Result<Value, MagnusEr
     if args.len() != 1 {
         return Err(MagnusError::new(
             magnus::exception::arg_error(),
-            format!("metadata expects exactly 1 argument (file path or IO-like object), got {}", args.len()),
+            format!(
+                "metadata expects exactly 1 argument (file path or IO-like object), got {}",
+                args.len()
+            ),
         ));
     }
 

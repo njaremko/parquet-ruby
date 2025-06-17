@@ -4,6 +4,7 @@
 
 - Ability to write decimal256 values (stored correctly in Parquet files)
 - Limited ability to read decimal256 values (currently truncated due to arrow-rs limitation)
+- Added ability to read arrow IPC files
 
 ## 0.5.9
 

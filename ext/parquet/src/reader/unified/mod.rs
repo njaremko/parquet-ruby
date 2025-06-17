@@ -13,8 +13,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
+use super::arrow_reader::{
+    process_arrow_column_data, process_arrow_file_column_data, process_arrow_row_data,
+};
 use super::common::{
-    create_batch_reader, handle_block_or_enum, handle_empty_file, open_parquet_source,
+    create_batch_reader, handle_block_or_enum, handle_empty_file, open_data_source, DataSource,
 };
 use crate::types::ArrayWrapper;
 
@@ -100,33 +103,98 @@ pub fn parse_parquet_unified(
         }
     }
 
-    // Open the Parquet source
-    let source = open_parquet_source(ruby.clone(), to_read)?;
+    // Open the data source and detect format
+    let source = open_data_source(ruby.clone(), to_read, &ruby_logger)?;
 
-    // Based on the parser type, handle the data differently
-    match parser_type {
-        ParserType::Row { strict } => {
-            // Handle row-based parsing
+    // Based on the source format and parser type, handle the data differently
+    match (source, &parser_type) {
+        (DataSource::Parquet(reader), ParserType::Row { strict }) => {
+            // Handle Parquet row-based parsing
             process_row_data(
                 ruby.clone(),
-                source,
+                reader,
                 &columns,
                 result_type,
-                strict,
+                *strict,
                 &ruby_logger,
             )?;
         }
-        ParserType::Column { batch_size, strict } => {
-            // Handle column-based parsing
+        (DataSource::Parquet(reader), ParserType::Column { batch_size, strict }) => {
+            // Handle Parquet column-based parsing
             process_column_data(
                 ruby.clone(),
-                source,
+                reader,
                 &columns,
                 result_type,
-                batch_size,
-                strict,
+                *batch_size,
+                *strict,
                 &ruby_logger,
             )?;
+        }
+        (DataSource::Arrow(reader), ParserType::Row { strict }) => {
+            // Handle Arrow row-based parsing
+            match reader {
+                Either::Left(file) => {
+                    // For seekable files, use FileReader which handles IPC file format
+                    use arrow_ipc::reader::FileReader;
+                    let file_reader = FileReader::try_new(file, None)
+                        .map_err(|e| ParquetGemError::ArrowIpc(e.to_string()))?;
+
+                    use super::arrow_reader::process_arrow_file_row_data;
+                    process_arrow_file_row_data(
+                        ruby.clone(),
+                        file_reader,
+                        &columns,
+                        result_type,
+                        *strict,
+                        &ruby_logger,
+                    )?;
+                }
+                Either::Right(readable) => {
+                    use arrow_ipc::reader::StreamReader;
+                    let stream_reader = StreamReader::try_new(readable, None)
+                        .map_err(|e| ParquetGemError::ArrowIpc(e.to_string()))?;
+                    process_arrow_row_data(
+                        ruby.clone(),
+                        stream_reader,
+                        &columns,
+                        result_type,
+                        *strict,
+                        &ruby_logger,
+                    )?;
+                }
+            }
+        }
+        (DataSource::Arrow(reader), ParserType::Column { batch_size, strict }) => {
+            // Handle Arrow column-based parsing
+            match reader {
+                Either::Left(file) => {
+                    // For seekable files, we can use the optimized FileReader
+                    process_arrow_file_column_data(
+                        ruby.clone(),
+                        file,
+                        &columns,
+                        result_type,
+                        *batch_size,
+                        *strict,
+                        &ruby_logger,
+                    )?;
+                }
+                Either::Right(readable) => {
+                    use arrow_ipc::reader::StreamReader;
+                    let stream_reader = StreamReader::try_new(readable, None)
+                        .map_err(|e| ParquetGemError::ArrowIpc(e.to_string()))?;
+                    process_arrow_column_data(
+                        ruby.clone(),
+                        stream_reader,
+                        &columns,
+                        result_type,
+                        *batch_size,
+                        *strict,
+                        &ruby_logger,
+                    )?;
+                }
+            }
         }
     }
 
