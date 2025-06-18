@@ -230,6 +230,16 @@ fn arrow_data_type_to_parquet_schema_type(dt: &DataType) -> Result<ParquetSchema
                 "TimestampNanos not supported, please adjust your schema or code.",
             ))
         }
+        DataType::Time32(TimeUnit::Millisecond) => Ok(PST::Primitive(PrimitiveType::TimeMillis)),
+        DataType::Time64(TimeUnit::Microsecond) => Ok(PST::Primitive(PrimitiveType::TimeMicros)),
+        DataType::Time32(_) => Err(MagnusError::new(
+            magnus::exception::runtime_error(),
+            "Time32 only supports millisecond unit",
+        )),
+        DataType::Time64(_) => Err(MagnusError::new(
+            magnus::exception::runtime_error(),
+            "Time64 only supports microsecond unit",
+        )),
         DataType::Utf8 => Ok(PST::Primitive(PrimitiveType::String)),
         DataType::Binary => Ok(PST::Primitive(PrimitiveType::Binary)),
         DataType::LargeUtf8 => {

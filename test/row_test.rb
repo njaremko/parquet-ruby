@@ -192,6 +192,74 @@ class RowTest < Minitest::Test
     File.delete(path) if File.exist?(path)
   end
 
+  def test_roundtrip_time_with_timezone
+    path = "test/roundtrip_time_tz.parquet"
+
+    # Prepare data with Time objects in different timezones
+    times = [
+      Time.new(2023, 1, 1, 12, 34, 56.123456, "+09:00"),  # Tokyo time
+      Time.new(2023, 1, 1, 12, 34, 56.123456, "-05:00"),  # EST
+      Time.new(2023, 1, 1, 12, 34, 56.123456, "+05:30"),  # India (with minutes)
+      Time.new(2023, 1, 1, 12, 34, 56.123456, "UTC"),     # UTC
+    ]
+    rows = times.map.with_index { |t, i| [i, t] }
+
+    schema = [
+      { "id" => "int64" },
+      { "ts" => "timestamp_micros" }
+    ]
+
+    Parquet.write_rows(rows.each, schema: schema, write_to: path)
+
+    read_rows = []
+    Parquet.each_row(path) { |row| read_rows << row }
+
+    assert_equal rows.size, read_rows.size
+    rows.each_with_index do |orig, i|
+      assert_equal orig[0], read_rows[i]["id"]
+      # Timestamps should be equivalent (same instant in time)
+      assert_equal orig[1].to_i, read_rows[i]["ts"].to_i
+      assert_equal orig[1].usec, read_rows[i]["ts"].usec
+    end
+  ensure
+    File.delete(path) if path && File.exist?(path)
+  end
+
+  def test_timestamp_string_parsing_with_timezone
+    # Test parsing timestamp strings with timezone information
+    rows = [
+      [1, "2023-01-01T12:34:56+09:00"],          # ISO8601 with timezone
+      [2, "2023-01-01T12:34:56.123456-05:00"],   # ISO8601 with microseconds and timezone
+      [3, "2023-01-01T12:34:56Z"],               # ISO8601 with Z (UTC)
+    ]
+
+    schema = [
+      { "id" => "int64" },
+      { "ts" => "timestamp_micros" }
+    ]
+
+    path = "test/timestamp_string_tz.parquet"
+    Parquet.write_rows(rows.each, schema: schema, write_to: path)
+
+    read_rows = []
+    Parquet.each_row(path) { |row| read_rows << row }
+
+    assert_equal 3, read_rows.size
+
+    # Verify the timestamps were parsed correctly
+    # Row 1: Tokyo time should be 03:34:56 UTC
+    assert_equal "2023-01-01 03:34:56 UTC", read_rows[0]["ts"].utc.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    # Row 2: EST time should be 17:34:56 UTC
+    assert_equal "2023-01-01 17:34:56 UTC", read_rows[1]["ts"].utc.strftime("%Y-%m-%d %H:%M:%S %Z")
+    assert_equal 123456, read_rows[1]["ts"].usec
+
+    # Row 3: Already UTC
+    assert_equal "2023-01-01 12:34:56 UTC", read_rows[2]["ts"].utc.strftime("%Y-%m-%d %H:%M:%S %Z")
+  ensure
+    File.delete(path) if File.exist?(path)
+  end
+
   def test_empty_table
     rows = []
     Parquet.each_row("test/empty_table.parquet") { |row| rows << row }
@@ -407,5 +475,55 @@ class RowTest < Minitest::Test
     assert_equal row_count, count
   ensure
     File.delete("test/large.parquet") if File.exist?("test/large.parquet")
+  end
+
+  def test_time_types
+    path = "test/time_types.parquet"
+
+    # Create test data with time values
+    rows = [
+      [1, Time.new(2023, 1, 1, 9, 30, 45), Time.new(2023, 1, 1, 14, 15, 30.123456)],
+      [2, Time.new(2023, 1, 1, 10, 45, 0), Time.new(2023, 1, 1, 15, 30, 45.789012)],
+      [3, Time.new(2023, 1, 1, 12, 0, 15), Time.new(2023, 1, 1, 16, 45, 0.456789)],
+    ]
+
+    schema = [
+      { "id" => "int32" },
+      { "time_ms" => "time_millis" },
+      { "time_us" => "time_micros" }
+    ]
+
+    # Write the data
+    Parquet.write_rows(rows.each, schema: schema, write_to: path)
+
+    # Read the data back
+    read_rows = []
+    Parquet.each_row(path) { |row| read_rows << row }
+
+    assert_equal rows.size, read_rows.size
+
+    rows.each_with_index do |(id, time_ms, time_us), i|
+      assert_equal id, read_rows[i]["id"]
+
+      # For time_millis, we expect the time of day in milliseconds
+      read_time_ms = read_rows[i]["time_ms"]
+      assert_kind_of Time, read_time_ms
+      assert_equal time_ms.hour, read_time_ms.hour
+      assert_equal time_ms.min, read_time_ms.min
+      assert_equal time_ms.sec, read_time_ms.sec
+      # Millisecond precision
+      assert_in_delta time_ms.usec / 1000, read_time_ms.usec / 1000, 1
+
+      # For time_micros, we expect the time of day in microseconds
+      read_time_us = read_rows[i]["time_us"]
+      assert_kind_of Time, read_time_us
+      assert_equal time_us.hour, read_time_us.hour
+      assert_equal time_us.min, read_time_us.min
+      assert_equal time_us.sec, read_time_us.sec
+      # Microsecond precision
+      assert_equal time_us.usec, read_time_us.usec
+    end
+  ensure
+    File.unlink(path) if path && File.exist?(path)
   end
 end

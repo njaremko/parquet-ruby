@@ -250,6 +250,8 @@ pub fn parquet_schema_type_to_arrow_data_type(
             PrimitiveType::Date32 => DataType::Date32,
             PrimitiveType::TimestampMillis => DataType::Timestamp(TimeUnit::Millisecond, None),
             PrimitiveType::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
+            PrimitiveType::TimeMillis => DataType::Time32(TimeUnit::Millisecond),
+            PrimitiveType::TimeMicros => DataType::Time64(TimeUnit::Microsecond),
         },
         // For a List<T>, create a standard List in Arrow with nullable items
         ParquetSchemaType::List(list_field) => {
@@ -415,6 +417,12 @@ fn create_arrow_builder_for_type(
         }
         ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros) => {
             Ok(Box::new(TimestampMicrosecondBuilder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::TimeMillis) => {
+            Ok(Box::new(Time32MillisecondBuilder::with_capacity(cap)))
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::TimeMicros) => {
+            Ok(Box::new(Time64MicrosecondBuilder::with_capacity(cap)))
         }
         ParquetSchemaType::List(list_field) => {
             // For a list, we create a ListBuilder whose child builder is determined by item_type.
@@ -1165,6 +1173,44 @@ fn fill_builder(
             }
             Ok(())
         }
+        ParquetSchemaType::Primitive(PrimitiveType::TimeMillis) => {
+            let typed_builder = builder
+                .as_any_mut()
+                .downcast_mut::<Time32MillisecondBuilder>()
+                .expect("Builder mismatch: expected Time32MillisecondBuilder");
+            for val in values {
+                match val {
+                    ParquetValue::TimeMillis(t) => typed_builder.append_value(*t),
+                    ParquetValue::Null => typed_builder.append_null(),
+                    other => {
+                        return Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            format!("Expected TimeMillis, got {:?}", other),
+                        ))
+                    }
+                }
+            }
+            Ok(())
+        }
+        ParquetSchemaType::Primitive(PrimitiveType::TimeMicros) => {
+            let typed_builder = builder
+                .as_any_mut()
+                .downcast_mut::<Time64MicrosecondBuilder>()
+                .expect("Builder mismatch: expected Time64MicrosecondBuilder");
+            for val in values {
+                match val {
+                    ParquetValue::TimeMicros(t) => typed_builder.append_value(*t),
+                    ParquetValue::Null => typed_builder.append_null(),
+                    other => {
+                        return Err(MagnusError::new(
+                            magnus::exception::type_error(),
+                            format!("Expected TimeMicros, got {:?}", other),
+                        ))
+                    }
+                }
+            }
+            Ok(())
+        }
 
         // ------------------
         // NESTED LIST - using helper function
@@ -1433,6 +1479,24 @@ fn fill_builder(
                                             )
                                         })?
                                         .append_value(*x),
+                                    ParquetValue::TimeMillis(x) => typed_builder
+                                        .field_builder::<Time32MillisecondBuilder>(i)
+                                        .ok_or_else(|| {
+                                            MagnusError::new(
+                                                magnus::exception::type_error(),
+                                                "Failed to coerce into Time32MillisecondBuilder",
+                                            )
+                                        })?
+                                        .append_value(*x),
+                                    ParquetValue::TimeMicros(x) => typed_builder
+                                        .field_builder::<Time64MicrosecondBuilder>(i)
+                                        .ok_or_else(|| {
+                                            MagnusError::new(
+                                                magnus::exception::type_error(),
+                                                "Failed to coerce into Time64MicrosecondBuilder",
+                                            )
+                                        })?
+                                        .append_value(*x),
                                     ParquetValue::List(items) => {
                                         let list_builder = typed_builder
                                             .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(i)
@@ -1647,6 +1711,24 @@ fn fill_builder(
                                                 )
                                             })?
                                             .append_null(),
+                                        ParquetSchemaType::Primitive(PrimitiveType::TimeMillis) => typed_builder
+                                            .field_builder::<Time32MillisecondBuilder>(i)
+                                            .ok_or_else(|| {
+                                                MagnusError::new(
+                                                    magnus::exception::type_error(),
+                                                    "Failed to coerce into Time32MillisecondBuilder",
+                                                )
+                                            })?
+                                            .append_null(),
+                                        ParquetSchemaType::Primitive(PrimitiveType::TimeMicros) => typed_builder
+                                            .field_builder::<Time64MicrosecondBuilder>(i)
+                                            .ok_or_else(|| {
+                                                MagnusError::new(
+                                                    magnus::exception::type_error(),
+                                                    "Failed to coerce into Time64MicrosecondBuilder",
+                                                )
+                                            })?
+                                            .append_null(),
                                         ParquetSchemaType::List(_) => typed_builder
                                             .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(i)
                                             .ok_or_else(|| {
@@ -1742,4 +1824,126 @@ pub fn convert_ruby_array_to_arrow(
         parquet_values.push(parquet_value);
     }
     convert_parquet_values_to_arrow(parquet_values, type_)
+}
+
+pub fn convert_to_time_millis(
+    ruby: &Ruby,
+    value: Value,
+    format: Option<&str>,
+) -> Result<i32, MagnusError> {
+    if value.is_kind_of(ruby.class_time()) {
+        // Extract time components
+        let hour = i32::try_convert(value.funcall::<_, _, Value>("hour", ())?)?;
+        let min = i32::try_convert(value.funcall::<_, _, Value>("min", ())?)?;
+        let sec = i32::try_convert(value.funcall::<_, _, Value>("sec", ())?)?;
+        let usec = i32::try_convert(value.funcall::<_, _, Value>("usec", ())?)?;
+
+        // Convert to milliseconds since midnight
+        Ok(hour * 3600000 + min * 60000 + sec * 1000 + usec / 1000)
+    } else if value.is_kind_of(ruby.class_string()) {
+        let s = String::try_convert(value)?;
+
+        if let Some(fmt) = format {
+            // Parse using the provided format
+            match jiff::civil::Time::strptime(fmt, &s) {
+                Ok(time) => {
+                    let millis = time.hour() as i32 * 3600000
+                        + time.minute() as i32 * 60000
+                        + time.second() as i32 * 1000
+                        + time.millisecond() as i32;
+                    Ok(millis)
+                }
+                Err(e) => Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Failed to parse '{}' with format '{}' as time: {}",
+                        s, fmt, e
+                    ),
+                )),
+            }
+        } else {
+            // Try to parse as standard time format
+            match s.parse::<jiff::civil::Time>() {
+                Ok(time) => {
+                    let millis = time.hour() as i32 * 3600000
+                        + time.minute() as i32 * 60000
+                        + time.second() as i32 * 1000
+                        + time.millisecond() as i32;
+                    Ok(millis)
+                }
+                Err(e) => Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse '{}' as time: {}", s, e),
+                )),
+            }
+        }
+    } else {
+        Err(MagnusError::new(
+            magnus::exception::type_error(),
+            format!("Cannot convert {} to time_millis", unsafe {
+                value.classname()
+            }),
+        ))
+    }
+}
+
+pub fn convert_to_time_micros(
+    ruby: &Ruby,
+    value: Value,
+    format: Option<&str>,
+) -> Result<i64, MagnusError> {
+    if value.is_kind_of(ruby.class_time()) {
+        // Extract time components
+        let hour = i64::try_convert(value.funcall::<_, _, Value>("hour", ())?)?;
+        let min = i64::try_convert(value.funcall::<_, _, Value>("min", ())?)?;
+        let sec = i64::try_convert(value.funcall::<_, _, Value>("sec", ())?)?;
+        let usec = i64::try_convert(value.funcall::<_, _, Value>("usec", ())?)?;
+
+        // Convert to microseconds since midnight
+        Ok(hour * 3600000000 + min * 60000000 + sec * 1000000 + usec)
+    } else if value.is_kind_of(ruby.class_string()) {
+        let s = String::try_convert(value)?;
+
+        if let Some(fmt) = format {
+            // Parse using the provided format
+            match jiff::civil::Time::strptime(fmt, &s) {
+                Ok(time) => {
+                    let micros = time.hour() as i64 * 3600000000
+                        + time.minute() as i64 * 60000000
+                        + time.second() as i64 * 1000000
+                        + time.microsecond() as i64;
+                    Ok(micros)
+                }
+                Err(e) => Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!(
+                        "Failed to parse '{}' with format '{}' as time: {}",
+                        s, fmt, e
+                    ),
+                )),
+            }
+        } else {
+            // Try to parse as standard time format
+            match s.parse::<jiff::civil::Time>() {
+                Ok(time) => {
+                    let micros = time.hour() as i64 * 3600000000
+                        + time.minute() as i64 * 60000000
+                        + time.second() as i64 * 1000000
+                        + time.microsecond() as i64;
+                    Ok(micros)
+                }
+                Err(e) => Err(MagnusError::new(
+                    magnus::exception::type_error(),
+                    format!("Failed to parse '{}' as time: {}", s, e),
+                )),
+            }
+        }
+    } else {
+        Err(MagnusError::new(
+            magnus::exception::type_error(),
+            format!("Cannot convert {} to time_micros", unsafe {
+                value.classname()
+            }),
+        ))
+    }
 }

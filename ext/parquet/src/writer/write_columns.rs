@@ -170,6 +170,12 @@ fn write_columns_impl(ruby: Rc<Ruby>, args: &[Value]) -> Result<(), ParquetGemEr
                                     PrimitiveType::TimestampMicros => {
                                         PST::Primitive(PrimitiveType::TimestampMicros)
                                     }
+                                    PrimitiveType::TimeMillis => {
+                                        PST::Primitive(PrimitiveType::TimeMillis)
+                                    }
+                                    PrimitiveType::TimeMicros => {
+                                        PST::Primitive(PrimitiveType::TimeMicros)
+                                    }
                                     PrimitiveType::Decimal256(precision, scale) => {
                                         PST::Primitive(PrimitiveType::Decimal256(precision, scale))
                                     }

@@ -115,4 +115,6 @@ pub enum PrimitiveType {
     Date32,
     TimestampMillis,
     TimestampMicros,
+    TimeMillis,
+    TimeMicros,
 }

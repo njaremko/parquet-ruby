@@ -295,6 +295,8 @@ fn parse_primitive_type(s: &str) -> Option<PrimitiveType> {
         "date" | "date32" => Some(PrimitiveType::Date32),
         "timestamp_millis" | "timestamp_ms" => Some(PrimitiveType::TimestampMillis),
         "timestamp_micros" | "timestamp_us" => Some(PrimitiveType::TimestampMicros),
+        "time_millis" | "time_ms" => Some(PrimitiveType::TimeMillis),
+        "time_micros" | "time_us" => Some(PrimitiveType::TimeMicros),
         "decimal" => Some(PrimitiveType::Decimal128(38, 0)), // Maximum precision, scale 0
         "decimal256" => Some(PrimitiveType::Decimal256(38, 0)), // Maximum precision, scale 0
         _ => None,
@@ -336,6 +338,12 @@ pub fn schema_node_to_arrow_field(node: &SchemaNode) -> ArrowField {
                 }
                 PrimitiveType::TimestampMicros => {
                     ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None)
+                }
+                PrimitiveType::TimeMillis => {
+                    ArrowDataType::Time32(arrow_schema::TimeUnit::Millisecond)
+                }
+                PrimitiveType::TimeMicros => {
+                    ArrowDataType::Time64(arrow_schema::TimeUnit::Microsecond)
                 }
             };
             ArrowField::new(name, dt, *nullable)

@@ -265,6 +265,7 @@ The following data types are supported in the schema:
 - `boolean`
 - `date32`
 - `timestamp_millis`, `timestamp_micros`
+- `time_millis`, `time_micros`
 
 ### Schema DSL for Complex Data Types
 

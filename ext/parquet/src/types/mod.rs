@@ -25,9 +25,9 @@ use arrow_array::cast::downcast_array;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
     Float16Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-    ListArray, NullArray, StringArray, StructArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
-    UInt32Array, UInt64Array, UInt8Array,
+    ListArray, NullArray, StringArray, StructArray, Time32MillisecondArray, Time64MicrosecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_schema::{DataType, TimeUnit};
 use magnus::{value::ReprValue, Error as MagnusError, IntoValue, Ruby, Value};

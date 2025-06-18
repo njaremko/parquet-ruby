@@ -259,9 +259,11 @@ pub fn estimate_value_size(
         PST::Primitive(PrimitiveType::Boolean) => Ok(1),
         PST::Primitive(PrimitiveType::Decimal128(_, _)) => Ok(16),
         PST::Primitive(PrimitiveType::Decimal256(_, _)) => Ok(32),
-        PST::Primitive(PrimitiveType::Date32)
-        | PST::Primitive(PrimitiveType::TimestampMillis)
-        | PST::Primitive(PrimitiveType::TimestampMicros) => Ok(8),
+        PST::Primitive(PrimitiveType::Date32) => Ok(4), // Date32 is 4 bytes
+        PST::Primitive(PrimitiveType::TimestampMillis)
+        | PST::Primitive(PrimitiveType::TimestampMicros) => Ok(8), // Timestamps are 8 bytes
+        PST::Primitive(PrimitiveType::TimeMillis) => Ok(4), // TimeMillis is 4 bytes
+        PST::Primitive(PrimitiveType::TimeMicros) => Ok(8), // TimeMicros is 8 bytes
         PST::Primitive(PrimitiveType::String) | PST::Primitive(PrimitiveType::Binary) => {
             if let Ok(s) = String::try_convert(value) {
                 // Account for string length plus Rust String's capacity+pointer overhead
