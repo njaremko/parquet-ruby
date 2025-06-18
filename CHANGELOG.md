@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.11
+- Revert arrow reading changes.
+
 ## 0.5.10
 
 - Ability to write decimal256 values (stored correctly in Parquet files)

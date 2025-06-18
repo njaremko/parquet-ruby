@@ -12,81 +12,27 @@ use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, Ruby, Value};
 
 use crate::header_cache::StringCache;
-use crate::logger::RubyLogger;
 use crate::ruby_reader::{RubyReader, ThreadSafeRubyReader};
 use crate::types::{ParquetGemError, TryIntoValue};
 use crate::ColumnRecord;
 
-use super::format_detector::{detect_file_format, detect_format_from_extension, FileFormat};
-
-/// Represents the different data sources we can open
-pub enum DataSource {
-    Parquet(Either<File, ThreadSafeRubyReader>),
-    Arrow(Either<File, ThreadSafeRubyReader>),
-}
-
-/// Opens a data file (Parquet or Arrow) for reading, automatically detecting the format
-pub fn open_data_source(
+/// Opens a parquet file or IO-like object for reading
+///
+/// This function handles both file paths (as strings) and IO-like objects,
+/// returning either a File or a ThreadSafeRubyReader that can be used with
+/// parquet readers.
+pub fn open_parquet_source(
     ruby: Rc<Ruby>,
     to_read: Value,
-    ruby_logger: &RubyLogger,
-) -> Result<DataSource, ParquetGemError> {
+) -> Result<Either<File, ThreadSafeRubyReader>, ParquetGemError> {
     if to_read.is_kind_of(ruby.class_string()) {
         let path_string = to_read.to_r_string()?;
         let file_path = unsafe { path_string.as_str()? };
-
-        // Try to detect format from extension first
-        let format_hint = detect_format_from_extension(file_path);
-
-        let mut file = File::open(file_path).map_err(ParquetGemError::from)?;
-
-        // Detect actual format from file content
-        let format = detect_file_format(&mut file)?;
-
-        // Warn if extension doesn't match content
-        if let Some(hint) = format_hint {
-            if hint != format {
-                ruby_logger.warn(|| {
-                    format!(
-                        "Extension implied format {:?} but actual format is {:?}",
-                        hint, format
-                    )
-                })?;
-            }
-        }
-
-        match format {
-            FileFormat::Parquet => Ok(DataSource::Parquet(Either::Left(file))),
-            FileFormat::Arrow => Ok(DataSource::Arrow(Either::Left(file))),
-        }
+        let file = File::open(file_path).map_err(ParquetGemError::from)?;
+        Ok(Either::Left(file))
     } else {
-        // For IO-like objects, we need to use a temporary file
-        use std::io::{Read, Write};
-        use tempfile::NamedTempFile;
-
-        let mut readable = RubyReader::new(ruby.clone(), to_read)?;
-        let mut temp_file = NamedTempFile::new().map_err(ParquetGemError::from)?;
-
-        // Copy the entire content to the temporary file
-        let mut buffer = vec![0u8; 8192];
-        loop {
-            let bytes_read = readable.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            temp_file.write_all(&buffer[..bytes_read])?;
-        }
-        temp_file.flush()?;
-
-        // Detect format from the temporary file
-        let mut file = temp_file.reopen()?;
-        let format = detect_file_format(&mut file)?;
-
-        // Use the temporary file as the source
-        match format {
-            FileFormat::Parquet => Ok(DataSource::Parquet(Either::Left(file))),
-            FileFormat::Arrow => Ok(DataSource::Arrow(Either::Left(file))),
-        }
+        let readable = ThreadSafeRubyReader::new(RubyReader::new(ruby, to_read)?);
+        Ok(Either::Right(readable))
     }
 }
 
