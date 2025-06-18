@@ -146,7 +146,10 @@ impl FromStr for ParquetSchemaType<'_> {
         }
 
         // Check if it's a decimal256 type with precision and scale
-        if let Some(decimal_params) = s.strip_prefix("decimal256(").and_then(|s| s.strip_suffix(")")) {
+        if let Some(decimal_params) = s
+            .strip_prefix("decimal256(")
+            .and_then(|s| s.strip_suffix(")"))
+        {
             let parts: Vec<&str> = decimal_params.split(',').collect();
 
             // Handle both single parameter (precision only) and two parameters (precision and scale)
@@ -210,6 +213,8 @@ impl FromStr for ParquetSchemaType<'_> {
             "date32" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Date32)),
             "timestamp_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMillis)),
             "timestamp_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimestampMicros)),
+            "time_millis" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimeMillis)),
+            "time_micros" => Ok(ParquetSchemaType::Primitive(PrimitiveType::TimeMicros)),
             "decimal" => Ok(ParquetSchemaType::Primitive(PrimitiveType::Decimal128(
                 38, 0,
             ))),

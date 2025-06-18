@@ -29,6 +29,8 @@ pub enum ParquetValue {
     TimestampMillis(i64, Option<Arc<str>>),
     TimestampMicros(i64, Option<Arc<str>>),
     TimestampNanos(i64, Option<Arc<str>>),
+    TimeMillis(i32),         // Time of day in milliseconds since midnight
+    TimeMicros(i64),         // Time of day in microseconds since midnight
     List(Vec<ParquetValue>), // A list of values (can be empty or have null items)
     // We're not using a separate NilList type anymore - we'll handle nil lists elsewhere
     Map(HashMap<ParquetValue, ParquetValue>),
@@ -108,6 +110,8 @@ impl PartialEq for ParquetValue {
             (ParquetValue::TimestampMillis(a, _), ParquetValue::TimestampMillis(b, _)) => a == b,
             (ParquetValue::TimestampMicros(a, _), ParquetValue::TimestampMicros(b, _)) => a == b,
             (ParquetValue::TimestampNanos(a, _), ParquetValue::TimestampNanos(b, _)) => a == b,
+            (ParquetValue::TimeMillis(a), ParquetValue::TimeMillis(b)) => a == b,
+            (ParquetValue::TimeMicros(a), ParquetValue::TimeMicros(b)) => a == b,
             (ParquetValue::List(a), ParquetValue::List(b)) => a == b,
             (ParquetValue::Null, ParquetValue::Null) => true,
             _ => false,
@@ -160,6 +164,8 @@ impl std::hash::Hash for ParquetValue {
                 ts.hash(state);
                 tz.hash(state);
             }
+            ParquetValue::TimeMillis(t) => t.hash(state),
+            ParquetValue::TimeMicros(t) => t.hash(state),
             ParquetValue::List(l) => l.hash(state),
             ParquetValue::Map(m) => {
                 for (k, v) in m {
@@ -223,6 +229,38 @@ impl TryIntoValue for ParquetValue {
             }
             timestamp @ ParquetValue::TimestampNanos(_, _) => {
                 impl_timestamp_conversion!(timestamp, TimestampNanos, handle)
+            }
+            ParquetValue::TimeMillis(millis) => {
+                // Convert time of day in milliseconds to a Ruby Time object
+                // Use epoch date (1970-01-01) with the given time
+                let total_seconds = millis / 1000;
+                let ms = millis % 1000;
+                let hours = total_seconds / 3600;
+                let minutes = (total_seconds % 3600) / 60;
+                let seconds = total_seconds % 60;
+
+                // Create a Time object for 1970-01-01 with the given time
+                let time_class = handle.class_time();
+                let time = time_class.funcall::<_, _, Value>(
+                    "new",
+                    (1970, 1, 1, hours, minutes, seconds, ms * 1000), // Ruby expects microseconds
+                )?;
+                Ok(time.into_value_with(handle))
+            }
+            ParquetValue::TimeMicros(micros) => {
+                // Convert time of day in microseconds to a Ruby Time object
+                // Use epoch date (1970-01-01) with the given time
+                let total_seconds = micros / 1_000_000;
+                let us = micros % 1_000_000;
+                let hours = total_seconds / 3600;
+                let minutes = (total_seconds % 3600) / 60;
+                let seconds = total_seconds % 60;
+
+                // Create a Time object for 1970-01-01 with the given time
+                let time_class = handle.class_time();
+                let time = time_class
+                    .funcall::<_, _, Value>("new", (1970, 1, 1, hours, minutes, seconds, us))?;
+                Ok(time.into_value_with(handle))
             }
             ParquetValue::List(l) => {
                 // For lists, convert to Ruby array and check for specific cases
@@ -356,12 +394,32 @@ impl ParquetValue {
                     Ok(ParquetValue::Date32(v))
                 }
                 PrimitiveType::TimestampMillis => {
-                    let v = convert_to_timestamp_millis(ruby, value, format)?;
-                    Ok(ParquetValue::TimestampMillis(v, None))
+                    if value.is_kind_of(ruby.class_time()) {
+                        use crate::types::timestamp::ruby_time_to_timestamp_with_tz;
+                        let (v, tz) = ruby_time_to_timestamp_with_tz(value, "millis")?;
+                        Ok(ParquetValue::TimestampMillis(v, tz))
+                    } else {
+                        let v = convert_to_timestamp_millis(ruby, value, format)?;
+                        Ok(ParquetValue::TimestampMillis(v, None))
+                    }
                 }
                 PrimitiveType::TimestampMicros => {
-                    let v = convert_to_timestamp_micros(ruby, value, format)?;
-                    Ok(ParquetValue::TimestampMicros(v, None))
+                    if value.is_kind_of(ruby.class_time()) {
+                        use crate::types::timestamp::ruby_time_to_timestamp_with_tz;
+                        let (v, tz) = ruby_time_to_timestamp_with_tz(value, "micros")?;
+                        Ok(ParquetValue::TimestampMicros(v, tz))
+                    } else {
+                        let v = convert_to_timestamp_micros(ruby, value, format)?;
+                        Ok(ParquetValue::TimestampMicros(v, None))
+                    }
+                }
+                PrimitiveType::TimeMillis => {
+                    let v = convert_to_time_millis(ruby, value, format)?;
+                    Ok(ParquetValue::TimeMillis(v))
+                }
+                PrimitiveType::TimeMicros => {
+                    let v = convert_to_time_micros(ruby, value, format)?;
+                    Ok(ParquetValue::TimeMicros(v))
                 }
             },
             ParquetSchemaType::List(list_field) => {
@@ -979,6 +1037,52 @@ impl<'a> TryFrom<ArrayWrapper<'a>> for ParquetValueVec {
                     TimestampNanos,
                     tz
                 )
+            }
+            DataType::Time32(TimeUnit::Millisecond) => {
+                let array = downcast_array::<Time32MillisecondArray>(column.array);
+                Ok(ParquetValueVec(if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                ParquetValue::TimeMillis(*x)
+                            }
+                        })
+                        .collect()
+                } else {
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| ParquetValue::TimeMillis(*x))
+                        .collect()
+                }))
+            }
+            DataType::Time64(TimeUnit::Microsecond) => {
+                let array = downcast_array::<Time64MicrosecondArray>(column.array);
+                Ok(ParquetValueVec(if array.is_nullable() {
+                    array
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| {
+                            if array.is_null(i) {
+                                ParquetValue::Null
+                            } else {
+                                ParquetValue::TimeMicros(*x)
+                            }
+                        })
+                        .collect()
+                } else {
+                    array
+                        .values()
+                        .iter()
+                        .map(|x| ParquetValue::TimeMicros(*x))
+                        .collect()
+                }))
             }
             DataType::Float16 => {
                 let array = downcast_array::<Float16Array>(column.array);
