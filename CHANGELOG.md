@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.12
+- Add support for TIME_MILLIS and TIME_MICROS
+
 ## 0.5.11
 - Revert arrow reading changes.
 
