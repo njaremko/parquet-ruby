@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use itertools::Itertools;
+use jiff::ToSpan;
 use parquet::{
     basic::{ConvertedType, LogicalType},
     data_type::AsBytes,
@@ -372,8 +373,9 @@ impl TryIntoValue for ParquetField {
                 }
             }
             Field::Date(d) => {
-                let ts = jiff::Timestamp::from_second((d as i64) * 86400)?;
-                let formatted = ts.strftime("%Y-%m-%d").to_string();
+                let epoch = jiff::civil::Date::new(1970, 1, 1)?;
+                let date = epoch.checked_add(d.days()).map_err(ParquetGemError::Jiff)?;
+                let formatted = date.to_string();
                 Ok(formatted.into_value_with(handle))
             }
             Field::TimeMillis(ts) => {
