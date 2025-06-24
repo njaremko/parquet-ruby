@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.13
+- Get rid of assertion preventing reading maps with complex key types
+
 ## 0.5.12
 - Add support for TIME_MILLIS and TIME_MICROS
 
