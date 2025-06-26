@@ -2,11 +2,11 @@
 
 [![Gem Version](https://badge.fury.io/rb/parquet.svg)](https://badge.fury.io/rb/parquet)
 
-This project is a Ruby library wrapping the [parquet-rs](https://github.com/apache/parquet-rs) rust crate.
+This project is a Ruby library wrapping the [`parquet`](https://github.com/apache/arrow-rs/tree/main/parquet) rust crate.
 
 ## Usage
 
-This library provides high-level bindings to parquet-rs with two primary APIs for reading Parquet files: row-wise and column-wise iteration. The column-wise API generally offers better performance, especially when working with subset of columns.
+This library provides high-level bindings to `parquet` with two primary APIs for reading Parquet files: row-wise and column-wise iteration. The column-wise API generally offers better performance, especially when working with subset of columns.
 
 ### Metadata
 
