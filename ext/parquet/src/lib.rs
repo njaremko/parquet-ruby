@@ -1,32 +1,24 @@
+mod adapter_ffi;
 mod allocator;
-mod enumerator;
-pub mod header_cache;
-mod logger;
-mod reader;
-mod ruby_reader;
-mod types;
-mod utils;
-mod writer;
 
-use crate::enumerator::*;
-use crate::reader::*;
-use crate::types::*;
+use magnus::{function, method, Error, Ruby};
 
-use magnus::{Error, Ruby};
-use writer::write_columns;
-use writer::write_rows;
+use crate::adapter_ffi::{each_column, each_row, write_columns, write_rows};
+use parquet_ruby_adapter::metadata::parse_metadata;
 
 /// Initializes the Ruby extension and defines methods.
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
-    // Require 'time' for Time.parse method
     ruby.require("time")?;
-    
+    ruby.require("bigdecimal")?;
+
     let module = ruby.define_module("Parquet")?;
-    module.define_module_function("metadata", magnus::method!(reader::parse_metadata, -1))?;
-    module.define_module_function("each_row", magnus::method!(parse_parquet_rows, -1))?;
-    module.define_module_function("each_column", magnus::method!(parse_parquet_columns, -1))?;
-    module.define_module_function("write_rows", magnus::function!(write_rows, -1))?;
-    module.define_module_function("write_columns", magnus::function!(write_columns, -1))?;
+
+    module.define_module_function("metadata", function!(parse_metadata, 1))?;
+    module.define_module_function("each_row", method!(each_row, -1))?;
+    module.define_module_function("each_column", method!(each_column, -1))?;
+    module.define_module_function("write_rows", function!(write_rows, -1))?;
+    module.define_module_function("write_columns", function!(write_columns, -1))?;
+
     Ok(())
 }

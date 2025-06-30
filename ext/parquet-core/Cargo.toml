@@ -1,0 +1,23 @@
+[package]
+name = "parquet-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+arrow-buffer = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+bytes = "1.5"
+indexmap = "2.2"
+jiff = "0.2"
+num = "0.4.3"
+ordered-float = "5.0.0"
+parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["arrow", "zstd", "lz4", "snap"] }
+rand = "0.9.1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+uuid = { version = "1.0", features = ["v4"] }
+tempfile = "3.8"

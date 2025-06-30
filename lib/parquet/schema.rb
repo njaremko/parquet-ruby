@@ -59,12 +59,31 @@ module Parquet
       #   - `key_nullable:, value_nullable:` controls nullability of map keys/values (default: true)
       #   - `format:` if you want to store some format string
       #   - `precision:, scale:` if type == :decimal (precision defaults to 38, scale to 0)
+      #   - `has_timezone:` if type is timestamp - true means UTC storage (default), false means local/unzoned
+      #   - `timezone:` (DEPRECATED) if type is timestamp - any value means UTC storage
       #   - `nullable:` default to true if not specified
       def field(name, type, nullable: true, **kwargs, &block)
         field_hash = { name: name.to_s, type: type, nullable: !!nullable }
 
         # Possibly store a format if provided
         field_hash[:format] = kwargs[:format] if kwargs.key?(:format)
+        
+        # Handle timezone for timestamp types
+        if [:timestamp_second, :timestamp_millis, :timestamp_micros, :timestamp_nanos].include?(type)
+          # Support new has_timezone parameter (preferred)
+          if kwargs.key?(:has_timezone)
+            # If has_timezone is true, store "UTC" to indicate timezone presence
+            # If explicitly false, don't store timezone (indicates local/unzoned)
+            field_hash[:timezone] = "UTC" if kwargs[:has_timezone]
+          elsif kwargs.key?(:timezone)
+            # Legacy support: any timezone value means UTC storage
+            # Store "UTC" regardless of the actual value to make it clear
+            field_hash[:timezone] = "UTC"
+          else
+            # Default behavior when neither parameter is specified: UTC storage
+            field_hash[:timezone] = "UTC"
+          end
+        end
 
         case type
         when :struct

@@ -1,14 +1,17 @@
 PATH
   remote: .
   specs:
-    parquet (0.5.13)
+    parquet (0.6.0)
       rb_sys (~> 0.9.39)
 
 GEM
   remote: https://rubygems.org/
   specs:
+    benchmark-memory (0.2.0)
+      memory_profiler (~> 1)
     bigdecimal (3.1.5)
     csv (3.3.2)
+    memory_profiler (1.1.0)
     minitest (5.25.4)
     rake (13.2.1)
     rake-compiler (1.2.9)
@@ -22,6 +25,7 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
+  benchmark-memory
   bigdecimal
   csv
   minitest (~> 5.0)

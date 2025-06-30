@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require "tempfile"
+require "date"
 
 require "parquet"
 require "minitest/autorun"
@@ -156,9 +157,9 @@ class RowTest < Minitest::Test
     assert_equal 1_000_000_000_000, row["int64_col"]
     assert_in_delta 3.14, row["float32_col"], 0.0001
     assert_in_delta 3.14159265359, row["float64_col"], 0.0000000001
-    assert_equal "2023-01-01", row["date_col"].to_s
-    assert_equal "2023-01-01 12:00:00 UTC", row["timestamp_col"].to_s
-    assert_equal "2023-01-01 03:00:00 UTC", row["timestamptz_col"].to_s
+    assert_equal Date.new(2023, 1, 1), row["date_col"]
+    assert_equal Time.new(2023, 1, 1, 12, 0, 0, "UTC"), row["timestamp_col"]
+    assert_equal Time.new(2023, 1, 1, 3, 0, 0, "UTC"), row["timestamptz_col"]
   end
 
   def test_roundtrip_time
@@ -489,8 +490,8 @@ class RowTest < Minitest::Test
 
     schema = [
       { "id" => "int32" },
-      { "time_ms" => "time_millis" },
-      { "time_us" => "time_micros" }
+      { "time_ms" => "time32" },
+      { "time_us" => "time64" }
     ]
 
     # Write the data

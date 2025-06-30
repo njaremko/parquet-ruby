@@ -11,6 +11,7 @@ group :development do
   # gem "benchmark-ips", "~> 2.12"
   # gem "polars-df"
   # gem "duckdb"
+  gem "benchmark-memory"
 end
 
 group :test do

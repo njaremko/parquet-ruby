@@ -131,20 +131,20 @@ class DecimalPrecisionTest < Minitest::Test
     assert_equal :decimal, schema[:fields][1][:value][:type]
     assert_equal :decimal, schema[:fields][2][:value][:type]
     assert_equal :decimal, schema[:fields][3][:value][:type]
-    
+
     # Verify precision/scale of map value fields
     # Default values
     assert_equal 38, schema[:fields][0][:value][:precision]
     assert_equal 0, schema[:fields][0][:value][:scale]
-    
+
     # Precision only
     assert_equal 12, schema[:fields][1][:value][:precision]
     assert_equal 0, schema[:fields][1][:value][:scale]
-    
+
     # Scale only
     assert_equal 38, schema[:fields][2][:value][:precision]
     assert_equal 3, schema[:fields][2][:value][:scale]
-    
+
     # Both precision and scale
     assert_equal 20, schema[:fields][3][:value][:precision]
     assert_equal 6, schema[:fields][3][:value][:scale]
@@ -199,26 +199,39 @@ class DecimalPrecisionTest < Minitest::Test
 
       # Verify metadata precision/scale is correctly stored
       metadata = Parquet.metadata(temp_path)
-      
+
       # Find each field in the schema metadata
-      fields = metadata["schema"]["fields"]
-      default_field = fields.find { |f| f["name"] == "default_decimal" }
-      precision_only_field = fields.find { |f| f["name"] == "precision_only" }
-      scale_only_field = fields.find { |f| f["name"] == "scale_only" }
-      both_values_field = fields.find { |f| f["name"] == "both_values" }
-      
+      columns = metadata["schema"]["fields"]
+      default_field = columns.find { |f| f["name"] == "default_decimal" }
+      precision_only_field = columns.find { |f| f["name"] == "precision_only" }
+      scale_only_field = columns.find { |f| f["name"] == "scale_only" }
+      both_values_field = columns.find { |f| f["name"] == "both_values" }
+
       # Verify precision and scale in metadata
-      assert_equal 38, default_field["precision"]
-      assert_equal 0, default_field["scale"]
-      
-      assert_equal 10, precision_only_field["precision"]
-      assert_equal 0, precision_only_field["scale"]
-      
-      assert_equal 38, scale_only_field["precision"]
-      assert_equal 5, scale_only_field["scale"]
-      
-      assert_equal 15, both_values_field["precision"]
-      assert_equal 4, both_values_field["scale"]
+      # Parse from logical_type string like "Decimal { scale: 0, precision: 38 }"
+      def parse_decimal_info(field)
+        if field["logical_type"] =~ /Decimal\s*{\s*scale:\s*(\d+),\s*precision:\s*(\d+)\s*}/
+          { precision: $2.to_i, scale: $1.to_i }
+        else
+          { precision: nil, scale: nil }
+        end
+      end
+
+      default_info = parse_decimal_info(default_field)
+      assert_equal 38, default_info[:precision]
+      assert_equal 0, default_info[:scale]
+
+      precision_only_info = parse_decimal_info(precision_only_field)
+      assert_equal 10, precision_only_info[:precision]
+      assert_equal 0, precision_only_info[:scale]
+
+      scale_only_info = parse_decimal_info(scale_only_field)
+      assert_equal 38, scale_only_info[:precision]
+      assert_equal 5, scale_only_info[:scale]
+
+      both_values_info = parse_decimal_info(both_values_field)
+      assert_equal 15, both_values_info[:precision]
+      assert_equal 4, both_values_info[:scale]
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -228,7 +241,7 @@ class DecimalPrecisionTest < Minitest::Test
     # This test verifies the wrap_subtype method follows the same rules
     # We can't test wrap_subtype directly as it's private, but we can test it indirectly
     # through nested structures that use it
-    
+
     schema =
       Parquet::Schema.define do
         # Test decimal in list
@@ -236,39 +249,39 @@ class DecimalPrecisionTest < Minitest::Test
         field :list_precision, :list, item: :decimal, precision: 8
         field :list_scale, :list, item: :decimal, scale: 3
         field :list_both, :list, item: :decimal, precision: 12, scale: 6
-        
+
         # Test decimal in map
         field :map_default, :map, key: :string, value: :decimal
         field :map_precision, :map, key: :string, value: :decimal, precision: 8
         field :map_scale, :map, key: :string, value: :decimal, scale: 3
         field :map_both, :map, key: :string, value: :decimal, precision: 12, scale: 6
       end
-    
+
     # Check list item decimal values
     assert_equal 38, schema[:fields][0][:item][:precision]
     assert_equal 0, schema[:fields][0][:item][:scale]
-    
+
     # Now with our implementation fix, these should pass
     assert_equal 8, schema[:fields][1][:item][:precision]
     assert_equal 0, schema[:fields][1][:item][:scale]
-    
+
     assert_equal 38, schema[:fields][2][:item][:precision]
     assert_equal 3, schema[:fields][2][:item][:scale]
-    
+
     assert_equal 12, schema[:fields][3][:item][:precision]
     assert_equal 6, schema[:fields][3][:item][:scale]
-    
+
     # Check map value decimal values
     # Maps in the schema have :value property for the value type
     assert_equal 38, schema[:fields][4][:value][:precision]
     assert_equal 0, schema[:fields][4][:value][:scale]
-    
+
     assert_equal 8, schema[:fields][5][:value][:precision]
     assert_equal 0, schema[:fields][5][:value][:scale]
-    
+
     assert_equal 38, schema[:fields][6][:value][:precision]
     assert_equal 3, schema[:fields][6][:value][:scale]
-    
+
     assert_equal 12, schema[:fields][7][:value][:precision]
     assert_equal 6, schema[:fields][7][:value][:scale]
   end

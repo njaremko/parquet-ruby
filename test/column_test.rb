@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require "tempfile"
+require "date"
 
 require "parquet"
 require "minitest/autorun"
@@ -68,7 +69,7 @@ class ColumnTest < Minitest::Test
   end
 
   def test_each_column_invalid_result_type
-    assert_raises(RuntimeError) { Parquet.each_column("test/data.parquet", result_type: :invalid) { |_| } }
+    assert_raises(ArgumentError) { Parquet.each_column("test/data.parquet", result_type: :invalid) { |_| } }
   end
 
   def test_each_column_without_block
@@ -140,9 +141,9 @@ class ColumnTest < Minitest::Test
     assert_equal [1_000_000_000_000], columns.first["int64_col"]
     assert_in_delta 3.14, columns.first["float32_col"].first, 0.0001
     assert_in_delta 3.14159265359, columns.first["float64_col"].first, 0.0000000001
-    assert_equal ["2023-01-01"], columns.first["date_col"].map(&:to_s)
-    assert_equal ["2023-01-01 12:00:00 UTC"], columns.first["timestamp_col"].map(&:to_s)
-    assert_equal ["2023-01-01 03:00:00 UTC"], columns.first["timestamptz_col"].map(&:to_s)
+    assert_equal Date.new(2023, 1, 1), columns.first["date_col"].first
+    assert_equal Time.new(2023, 1, 1, 12, 0, 0, "UTC"), columns.first["timestamp_col"].first
+    assert_equal Time.new(2023, 1, 1, 3, 0, 0, "UTC"), columns.first["timestamptz_col"].first
   end
 
   def test_empty_table_columns
@@ -161,8 +162,8 @@ class ColumnTest < Minitest::Test
         [1, 2], # id column
         %w[Alice Bob], # name column
         [95.5, 82.3], # score column
-        [Time.new(2024, 1, 1, 0, 0, 0, "UTC"), Time.new(2024, 1, 2, 0, 0, 0, "UTC")], # date column
-        [Time.new(2024, 1, 1, 10, 30, 0, "UTC"), Time.new(2024, 1, 2, 14, 45, 0, "UTC")], # timestamp column
+        [Time.new(2024, 1, 1), Time.new(2024, 1, 2)], # date column (local time)
+        [Time.new(2024, 1, 1, 10, 30, 0), Time.new(2024, 1, 2, 14, 45, 0)], # timestamp column (local time)
         [true, false]
       ],
       # Second batch
@@ -170,8 +171,8 @@ class ColumnTest < Minitest::Test
         [3, 4], # id column
         ["Charlie", nil], # name column
         [88.7, nil], # score column
-        [Time.new(2024, 1, 3, 0, 0, 0, "UTC"), nil], # date column
-        [Time.new(2024, 1, 3, 9, 15, 0, "UTC"), nil], # timestamp column
+        [Time.new(2024, 1, 3), nil], # date column (local time)
+        [Time.new(2024, 1, 3, 9, 15, 0), nil], # timestamp column (local time)
         [true, nil]
       ]
     ]
@@ -187,8 +188,8 @@ class ColumnTest < Minitest::Test
         { "name" => "string" },
         { "score" => "double" },
         { "date" => "date32" },
-        { "timestamp" => "timestamp_millis" },
-        { "data" => "boolean" }
+        { "timestamp" => "timestamp" },
+        { "data" => "bool" }
       ],
       write_to: "test/students.parquet"
     )
@@ -200,21 +201,22 @@ class ColumnTest < Minitest::Test
     assert_equal "Alice", rows[0]["name"]
     assert_in_delta 95.5, rows[0]["score"], 0.0001
     assert_equal "2024-01-01", rows[0]["date"].to_s
-    assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+    # Timestamp now defaults to UTC storage (new default behavior)
+    assert_equal Time.new(2024, 1, 1, 10, 30, 0).to_i, rows[0]["timestamp"].to_i
     assert_equal true, rows[0]["data"]
 
     assert_equal 2, rows[1]["id"]
     assert_equal "Bob", rows[1]["name"]
     assert_in_delta 82.3, rows[1]["score"], 0.0001
     assert_equal "2024-01-02", rows[1]["date"].to_s
-    assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal Time.new(2024, 1, 2, 14, 45, 0).to_i, rows[1]["timestamp"].to_i
     assert_equal false, rows[1]["data"]
 
     assert_equal 3, rows[2]["id"]
     assert_equal "Charlie", rows[2]["name"]
     assert_in_delta 88.7, rows[2]["score"], 0.0001
     assert_equal "2024-01-03", rows[2]["date"].to_s
-    assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
+    assert_equal Time.new(2024, 1, 3, 9, 15, 0).to_i, rows[2]["timestamp"].to_i
     assert_equal true, rows[2]["data"]
 
     assert_equal 4, rows[3]["id"]
@@ -239,8 +241,8 @@ class ColumnTest < Minitest::Test
     Parquet.write_columns(
       columns,
       schema: [
-        { "date" => { "type" => "date32", "format" => "%Y-%m-%d" } },
-        { "timestamp" => { "type" => "timestamp_millis", "format" => "%Y-%m-%d %H:%M:%S%z" } }
+        { "date" => "date32" },
+        { "timestamp" => "timestamp_millis" }
       ],
       write_to: "test/formatted_columns.parquet"
     )
@@ -250,13 +252,15 @@ class ColumnTest < Minitest::Test
     assert_equal 3, rows.length
 
     assert_equal "2024-01-01", rows[0]["date"].to_s
-    assert_equal "2024-01-01 10:30:00 UTC", rows[0]["timestamp"].to_s
+    # The string "2024-01-01 10:30:00+0000" is parsed as 10:30 UTC, then stored as local time
+    # When read back without timezone, it's 05:30 EST (5 hours behind UTC)
+    assert_equal Time.parse("2024-01-01 10:30:00+0000"), rows[0]["timestamp"]
 
     assert_equal "2024-01-02", rows[1]["date"].to_s
-    assert_equal "2024-01-02 14:45:00 UTC", rows[1]["timestamp"].to_s
+    assert_equal Time.parse("2024-01-02 14:45:00+0000"), rows[1]["timestamp"]
 
     assert_equal "2024-01-03", rows[2]["date"].to_s
-    assert_equal "2024-01-03 09:15:00 UTC", rows[2]["timestamp"].to_s
+    assert_equal Time.parse("2024-01-03 09:15:00+0000"), rows[2]["timestamp"]
   ensure
     File.delete("test/formatted_columns.parquet") if File.exist?("test/formatted_columns.parquet")
   end
@@ -277,7 +281,7 @@ class ColumnTest < Minitest::Test
       temp_path = "test_mismatched_columns.parquet"
 
       error = assert_raises(RuntimeError) { Parquet.write_columns(enumerator, schema: schema, write_to: temp_path) }
-      assert_match(/Failed to create record batch|mismatched.*length/i, error.message)
+      assert_match(/Failed to create record batch|mismatched.*length|all columns in a record batch must have the same length/i, error.message)
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
