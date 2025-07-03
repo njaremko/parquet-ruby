@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.2
+- Only create header strings once on the rust side
+
 ## 0.6.1
 - Fix regression, handle symbol keys in schema definition when constructing writer
 

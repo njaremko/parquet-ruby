@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use magnus::RString;
+
+static STRING_CACHE: LazyLock<Mutex<HashMap<String, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::with_capacity(100)));
 
 /// A cache for interning strings in the Ruby VM to reduce memory usage
 /// when there are many repeated strings
 #[derive(Debug)]
 pub struct StringCache {
-    /// The actual cache is shared behind an Arc<Mutex> to allow cloning
-    /// while maintaining a single global cache
-    cache: Arc<Mutex<HashMap<String, &'static str>>>,
     enabled: bool,
     hits: Arc<Mutex<usize>>,
     misses: Arc<Mutex<usize>>,
@@ -19,7 +19,6 @@ impl StringCache {
     /// Create a new string cache
     pub fn new(enabled: bool) -> Self {
         Self {
-            cache: Arc::new(Mutex::new(HashMap::new())),
             enabled,
             hits: Arc::new(Mutex::new(0)),
             misses: Arc::new(Mutex::new(0)),
@@ -36,9 +35,9 @@ impl StringCache {
 
         // Try to get or create the interned string
         let result = (|| -> Result<(), String> {
-            let mut cache = self.cache.lock().map_err(|e| e.to_string())?;
+            let mut cache = STRING_CACHE.lock().map_err(|e| e.to_string())?;
 
-            if cache.contains_key(&s) {
+            if cache.contains_key(s.as_str()) {
                 let mut hits = self.hits.lock().map_err(|e| e.to_string())?;
                 *hits += 1;
             } else {
@@ -65,7 +64,7 @@ impl StringCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        let cache_size = self.cache.lock().map(|c| c.len()).unwrap_or(0);
+        let cache_size = STRING_CACHE.lock().map(|c| c.len()).unwrap_or(0);
         let hits = self.hits.lock().map(|h| *h).unwrap_or(0);
         let misses = self.misses.lock().map(|m| *m).unwrap_or(0);
 
@@ -84,7 +83,7 @@ impl StringCache {
 
     /// Clear the cache
     pub fn clear(&mut self) {
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(mut cache) = STRING_CACHE.lock() {
             cache.clear();
         }
         if let Ok(mut hits) = self.hits.lock() {
