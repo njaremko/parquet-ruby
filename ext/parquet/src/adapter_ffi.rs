@@ -1,6 +1,6 @@
 use magnus::scan_args::{get_kwargs, scan_args};
-use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, Ruby, Value};
+use parquet_ruby_adapter::utils::parse_string_or_symbol;
 use parquet_ruby_adapter::{
     logger::RubyLogger, types::ParserResultType, utils::parse_parquet_write_args,
 };
@@ -34,11 +34,14 @@ pub fn each_row(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
     )?;
 
     let result_type: ParserResultType = if let Some(rt_value) = kwargs.optional.0.flatten() {
-        rt_value
-            .to_r_string()?
-            .to_string()?
+        parse_string_or_symbol(&ruby, rt_value)?
+            .ok_or_else(|| {
+                MagnusError::new(magnus::exception::arg_error(), "result_type cannot be nil")
+            })?
             .parse()
-            .map_err(|e| MagnusError::new(ruby.exception_arg_error(), e))?
+            .map_err(|_| {
+                MagnusError::new(magnus::exception::arg_error(), "Invalid result_type value")
+            })?
     } else {
         ParserResultType::Hash
     };
@@ -89,11 +92,14 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
     )?;
 
     let result_type: ParserResultType = if let Some(rt_value) = kwargs.optional.0.flatten() {
-        rt_value
-            .to_r_string()?
-            .to_string()?
+        parse_string_or_symbol(&ruby, rt_value)?
+            .ok_or_else(|| {
+                MagnusError::new(magnus::exception::arg_error(), "result_type cannot be nil")
+            })?
             .parse()
-            .map_err(|e| MagnusError::new(ruby.exception_arg_error(), e))?
+            .map_err(|_| {
+                MagnusError::new(magnus::exception::arg_error(), "Invalid result_type value")
+            })?
     } else {
         ParserResultType::Hash
     };
@@ -101,7 +107,7 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
     let batch_size = if let Some(bs) = kwargs.optional.2.flatten() {
         if bs == 0 {
             return Err(MagnusError::new(
-                ruby.exception_arg_error(),
+                magnus::exception::arg_error(),
                 "batch_size must be greater than 0",
             ));
         }
