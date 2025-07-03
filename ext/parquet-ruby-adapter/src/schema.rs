@@ -2,6 +2,8 @@ use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, RArray, RHash, Ruby, Symbol, TryConvert, Value};
 use parquet_core::{ParquetError, PrimitiveType, Result, Schema, SchemaNode};
 
+use crate::utils::parse_string_or_symbol;
+
 /// Ruby schema builder that converts Ruby hash/array representations to Parquet schemas
 pub struct RubySchemaBuilder;
 
@@ -595,7 +597,7 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value> {
 /// Convert old schema format to new format
 /// Old: [{ "column_name" => "type" }, ...]
 /// New: [{ name: "column_name", type: :type }, ...]
-pub fn convert_legacy_schema(_ruby: &Ruby, schema: RArray) -> Result<RArray> {
+pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray> {
     let new_schema = RArray::new();
 
     for item in schema.into_iter() {
@@ -609,7 +611,12 @@ pub fn convert_legacy_schema(_ruby: &Ruby, schema: RArray) -> Result<RArray> {
             |key: Value,
              value: Value|
              -> std::result::Result<magnus::r_hash::ForEach, MagnusError> {
-                let key_str: String = TryConvert::try_convert(key)?;
+                let key_str: String = parse_string_or_symbol(ruby, key)?.ok_or_else(|| {
+                    MagnusError::new(
+                        magnus::exception::arg_error(),
+                        "Nil keys not allowed in schema",
+                    )
+                })?;
                 let type_str: String = TryConvert::try_convert(value)?;
 
                 new_field.aset(Symbol::new("name"), key_str)?;

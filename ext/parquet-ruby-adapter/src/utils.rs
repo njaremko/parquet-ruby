@@ -122,6 +122,21 @@ pub fn parse_parquet_write_args(
     })
 }
 
+/// Convert a Ruby Value to a String, handling both String and Symbol types
+pub fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String>, MagnusError> {
+    if value.is_nil() {
+        Ok(None)
+    } else if value.is_kind_of(ruby.class_string()) || value.is_kind_of(ruby.class_symbol()) {
+        let stringed = value.to_r_string()?.to_string()?;
+        Ok(Some(stringed))
+    } else {
+        Err(MagnusError::new(
+            magnus::exception::type_error(),
+            "Value must be a String or Symbol",
+        ))
+    }
+}
+
 /// Handle block or enumerator creation
 pub fn handle_block_or_enum<F, T>(
     block_given: bool,

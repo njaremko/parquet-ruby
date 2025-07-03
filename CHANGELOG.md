@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.1
+- Fix regression, handle symbol keys in schema definition when constructing writer
+
 ## 0.6.0
 - Complete rewrite of the underlying rust code
   - Refactored to separate the parquet writing / reading code separate from the Ruby interop
