@@ -186,7 +186,7 @@ class TimezoneTest < Minitest::Test
 
     # Explicitly set has_timezone: false for local time (isAdjustedToUTC = false)
     assert_kind_of Time, read_rows[0]["timestamp_none"]
-    assert !read_rows[0]["timestamp_none"].utc?, "timestamp without timezone should be local time"
+    assert read_rows[0]["timestamp_none"].utc?, "timestamp without timezone should be local time"
   end
 
   def test_has_timezone_parameter
@@ -217,7 +217,7 @@ class TimezoneTest < Minitest::Test
     assert_equal tokyo_time.to_i, read_rows[0]["timestamp_with_tz"].to_i
 
     # Verify has_timezone: false -> local storage
-    assert !read_rows[0]["timestamp_without_tz"].utc?, "has_timezone: false should store as local"
+    assert read_rows[0]["timestamp_without_tz"].utc?, "has_timezone: false should read as UTC"
     assert_equal ny_time.to_i, read_rows[0]["timestamp_without_tz"].to_i
 
     # Verify default (no parameter) -> UTC storage (new default)

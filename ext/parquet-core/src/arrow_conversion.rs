@@ -208,12 +208,14 @@ pub fn arrow_to_parquet_value(
 
             let key_field = map_value
                 .fields()
-                .iter().find(|f| f.name() == "key")
+                .iter()
+                .find(|f| f.name() == "key")
                 .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
 
             let value_field = map_value
                 .fields()
-                .iter().find(|f| f.name() == "value")
+                .iter()
+                .find(|f| f.name() == "value")
                 .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
 
             let mut map_vec = Vec::with_capacity(keys.len());

@@ -780,7 +780,9 @@ class SchemaTest < Minitest::Test
 
       decimal_field = metadata["schema"]["fields"].find { |f| f["name"] == "decimal_val" }
       assert_equal "FIXED_LEN_BYTE_ARRAY", decimal_field["physical_type"]
-      assert_match(/Decimal.*scale:\s*2.*precision:\s*38/, decimal_field["logical_type"])
+      assert_equal "Decimal", decimal_field["logical_type"]["type"]
+      assert_equal 2, decimal_field["logical_type"]["scale"]
+      assert_equal 38, decimal_field["logical_type"]["precision"]
 
       # Test row group metadata
       assert_instance_of Array, metadata["row_groups"]
@@ -853,7 +855,9 @@ class SchemaTest < Minitest::Test
 
       decimal_field = metadata["schema"]["fields"].find { |f| f["name"] == "decimal_val" }
       assert_equal "INT32", decimal_field["physical_type"]
-      assert_match(/Decimal.*scale:\s*2.*precision:\s*4/, decimal_field["logical_type"])
+      assert_equal "Decimal", decimal_field["logical_type"]["type"]
+      assert_equal 2, decimal_field["logical_type"]["scale"]
+      assert_equal 4, decimal_field["logical_type"]["precision"]
 
       # Test row group metadata
       assert_instance_of Array, metadata["row_groups"]
@@ -966,8 +970,9 @@ class SchemaTest < Minitest::Test
       metadata = Parquet.metadata(temp_path)
 
       event_time_field = metadata["schema"]["fields"].find { |f| f["name"] == "event_time" }
-      assert_match(/Timestamp.*unit:\s*Millis|MILLIS/,
-                   event_time_field["logical_type"])
+      assert_equal "Timestamp", event_time_field["logical_type"]["type"]
+      assert_equal true, event_time_field["logical_type"]["is_adjusted_to_utc"]
+      assert_equal "millis", event_time_field["logical_type"]["unit"]
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

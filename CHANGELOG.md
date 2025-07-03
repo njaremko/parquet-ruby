@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0
+- Parse un-adjusted timestamps as UTC, and trust people not to believe it.
+- Improve formatting of logical type returned in `Parquet.metadata`
+
 ## 0.6.2
 - Only create header strings once on the rust side
 - Re-add nanosecond time support

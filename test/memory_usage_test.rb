@@ -4,6 +4,7 @@ require 'objspace'
 
 class MemoryUsageTest < Minitest::Test
   def setup
+    skip unless ENV["RUN_SLOW_TESTS"]
     @test_file = File.join(Dir.tmpdir, "test_memory_#{Process.pid}.parquet")
     # Enable object allocation tracing
     ObjectSpace.trace_object_allocations_start

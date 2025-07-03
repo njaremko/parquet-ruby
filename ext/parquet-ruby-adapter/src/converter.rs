@@ -4,13 +4,14 @@ use indexmap::IndexMap;
 use magnus::r_hash::ForEach;
 use magnus::value::ReprValue;
 use magnus::{
-    Error as MagnusError, IntoValue, Module, RArray, RHash, RString, Ruby, Symbol, TryConvert,
-    Value,
+    kwargs, Error as MagnusError, IntoValue, Module, RArray, RHash, RString, Ruby, Symbol,
+    TryConvert, Value,
 };
 use ordered_float::OrderedFloat;
 use parquet_core::{ParquetError, ParquetValue, Result};
 use std::cell::RefCell;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Ruby value converter
 ///
@@ -1398,7 +1399,10 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
         ParquetValue::Float32(OrderedFloat(f)) => Ok((f as f64).into_value_with(&ruby)),
         ParquetValue::Float64(OrderedFloat(f)) => Ok(f.into_value_with(&ruby)),
         ParquetValue::String(s) => Ok(s.into_value_with(&ruby)),
-        ParquetValue::Uuid(u) => Ok(u.to_string().into_value_with(&ruby)),
+        ParquetValue::Uuid(u) => Ok(u
+            .hyphenated()
+            .encode_lower(&mut Uuid::encode_buffer())
+            .into_value_with(&ruby)),
         ParquetValue::Bytes(b) => Ok(ruby.enc_str_new(&b, ruby.ascii8bit_encoding()).as_value()),
         ParquetValue::Date32(days) => {
             // Convert days since epoch to Date object
@@ -1489,10 +1493,26 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                 .funcall("utc", (year, month, day, hours, minutes, seconds, us))
                 .map_err(|e| ParquetError::Conversion(e.to_string()))
         }
+        ParquetValue::TimeNanos(nanos) => {
+            let time_class = ruby.class_time();
+            let secs = nanos / 1_000_000_000;
+            let nsec = nanos % 1_000_000_000;
+            time_class
+                .funcall(
+                    "at",
+                    (
+                        secs,
+                        nsec,
+                        Symbol::new("nanosecond"),
+                        kwargs!("in" => "UTC"),
+                    ),
+                )
+                .map_err(|e| ParquetError::Conversion(e.to_string()))
+        }
         ParquetValue::TimestampSecond(secs, tz) => {
             let time_class = ruby.class_time();
             let time = time_class
-                .funcall::<_, _, Value>("at", (secs,))
+                .funcall::<_, _, Value>("at", (secs, kwargs!("in" => "UTC")))
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             apply_timezone(time, &tz)
         }
@@ -1501,7 +1521,7 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
             let secs = millis / 1000;
             let usec = (millis % 1000) * 1000; // Convert millisecond remainder to microseconds
             let time = time_class
-                .funcall::<_, _, Value>("at", (secs, usec))
+                .funcall::<_, _, Value>("at", (secs, usec, kwargs!("in" => "UTC")))
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             apply_timezone(time, &tz)
         }
@@ -1510,17 +1530,9 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
             let secs = micros / 1_000_000;
             let usec = micros % 1_000_000; // Already in microseconds
             let time = time_class
-                .funcall::<_, _, Value>("at", (secs, usec))
+                .funcall::<_, _, Value>("at", (secs, usec, kwargs!("in" => "UTC")))
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             apply_timezone(time, &tz)
-        }
-        ParquetValue::TimeNanos(nanos) => {
-            let time_class = ruby.class_time();
-            let secs = nanos / 1_000_000_000;
-            let nsec = nanos % 1_000_000_000;
-            time_class
-                .funcall("at", (secs, nsec, Symbol::new("nanosecond")))
-                .map_err(|e| ParquetError::Conversion(e.to_string()))
         }
         ParquetValue::TimestampNanos(nanos, tz) => {
             let time_class = ruby.class_time();
@@ -1528,7 +1540,15 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
             let nsec = nanos % 1_000_000_000;
             // Use the nanosecond form of Time.at
             let time = time_class
-                .funcall::<_, _, Value>("at", (secs, nsec, Symbol::new("nanosecond")))
+                .funcall::<_, _, Value>(
+                    "at",
+                    (
+                        secs,
+                        nsec,
+                        Symbol::new("nanosecond"),
+                        kwargs!("in" => "UTC"),
+                    ),
+                )
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             apply_timezone(time, &tz)
         }
