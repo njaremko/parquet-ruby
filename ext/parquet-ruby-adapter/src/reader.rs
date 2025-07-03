@@ -2,6 +2,7 @@ use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, IntoValue, RArray, RHash, Ruby, TryConvert, Value};
 use parquet_core::reader::Reader;
 
+use crate::StringCache;
 use crate::{
     converter::parquet_to_ruby,
     io::{RubyIOReader, ThreadSafeRubyIOReader},
@@ -101,6 +102,12 @@ pub fn each_row(
     })?;
     let mut row_count = 0u64;
 
+    let mut cache = StringCache::new(true);
+    let interned_column_names = column_names
+        .iter()
+        .map(|name| cache.intern(name.clone()))
+        .collect::<Vec<_>>();
+
     for row_result in row_iter {
         let row = row_result
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
@@ -120,11 +127,11 @@ pub fn each_row(
             ParserResultType::Hash => {
                 let hash: RHash = ruby.hash_new();
                 for (idx, value) in row.into_iter().enumerate() {
-                    if idx < column_names.len() {
+                    if idx < interned_column_names.len() {
                         let ruby_value = parquet_to_ruby(value).map_err(|e| {
                             MagnusError::new(ruby.exception_runtime_error(), e.to_string())
                         })?;
-                        hash.aset(column_names[idx].as_str(), ruby_value)?;
+                        hash.aset(interned_column_names[idx].as_ref(), ruby_value)?;
                     }
                 }
                 hash.as_value()
