@@ -2,6 +2,9 @@
 
 ## 0.6.2
 - Only create header strings once on the rust side
+- Re-add nanosecond time support
+- Fix regression with UUID parsing
+- Fix regression with complex type parsing
 
 ## 0.6.1
 - Fix regression, handle symbol keys in schema definition when constructing writer
@@ -10,6 +13,8 @@
 - Complete rewrite of the underlying rust code
   - Refactored to separate the parquet writing / reading code separate from the Ruby interop
 - External API remains the same
+- Timezone handling for timestamps is now spec compliant
+- Dates are returned as `Date` objects
 
 ## 0.5.13
 - Get rid of assertion preventing reading maps with complex key types

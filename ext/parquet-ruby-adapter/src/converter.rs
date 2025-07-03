@@ -41,27 +41,6 @@ impl RubyValueConverter {
             .map(|cache| cache.stats())
     }
 
-    /// Convert a Ruby value to ParquetValue with type hint
-    /// This is the primary conversion method that handles all Ruby types
-    pub fn to_parquet_with_type_hint(
-        &mut self,
-        value: Value,
-        type_hint: Option<&parquet_core::PrimitiveType>,
-    ) -> Result<ParquetValue> {
-        // Handle nil values
-        if value.is_nil() {
-            return Ok(ParquetValue::Null);
-        }
-
-        // If we have a type hint, use it to guide conversion
-        if let Some(hint) = type_hint {
-            return self.convert_with_type_hint(value, hint);
-        }
-
-        // Otherwise, infer type from Ruby value
-        self.infer_and_convert(value)
-    }
-
     /// Convert a Ruby value to ParquetValue with schema hint
     /// This handles both primitive and complex types
     pub fn to_parquet_with_schema_hint(
@@ -115,7 +94,7 @@ impl RubyValueConverter {
         use parquet_core::PrimitiveType::*;
 
         // Special handling for UUID format
-        if let (Binary, Some("uuid")) = (type_hint, format) {
+        if let (FixedLenByteArray(16), Some("uuid")) = (type_hint, format) {
             return self.convert_to_uuid_binary(value);
         }
 
@@ -156,6 +135,7 @@ impl RubyValueConverter {
             Date64 => self.convert_to_date64(value, None),
             TimeMillis => self.convert_to_time_millis(value),
             TimeMicros => self.convert_to_time_micros(value),
+            TimeNanos => self.convert_to_time_nanos(value),
             TimestampSecond(schema_tz) => {
                 self.convert_to_timestamp_second_with_tz(value, schema_tz.as_deref())
             }
@@ -484,32 +464,19 @@ impl RubyValueConverter {
 
         // Convert value to string
         let uuid_str: String = value
-            .funcall("to_s", ())
-            .and_then(TryConvert::try_convert)
+            .to_r_string()
+            .map_err(|e: MagnusError| {
+                ParquetError::Conversion(format!("Failed to convert to UUID string: {}", e))
+            })?
+            .to_string()
             .map_err(|e: MagnusError| {
                 ParquetError::Conversion(format!("Failed to convert to UUID string: {}", e))
             })?;
 
-        // Remove hyphens and validate length
-        let clean_uuid = uuid_str.replace('-', "");
-        if clean_uuid.len() != 32 {
-            return Err(ParquetError::Conversion(format!(
-                "Invalid UUID format: expected 32 hex characters (ignoring hyphens), got {}",
-                clean_uuid.len()
-            )));
-        }
-
-        // Parse hex string to bytes
-        let mut bytes = Vec::with_capacity(16);
-        for i in 0..16 {
-            let hex_byte = &clean_uuid[i * 2..i * 2 + 2];
-            let byte = u8::from_str_radix(hex_byte, 16).map_err(|_| {
-                ParquetError::Conversion(format!("Invalid hex character in UUID: {}", hex_byte))
-            })?;
-            bytes.push(byte);
-        }
-
-        Ok(ParquetValue::Bytes(bytes.into()))
+        let parsed = uuid::Uuid::parse_str(&uuid_str)
+            .map_err(|e| ParquetError::Conversion(format!("Failed to parse UUID: {}", e)))?;
+        let bytes = Bytes::copy_from_slice(parsed.as_bytes());
+        Ok(ParquetValue::Bytes(bytes))
     }
 
     fn convert_to_date32(&self, value: Value, date_format: Option<&str>) -> Result<ParquetValue> {
@@ -684,6 +651,38 @@ impl RubyValueConverter {
 
             let micros = (hour * 3600 + min * 60 + sec) * 1_000_000 + nsec / 1000;
             return Ok(ParquetValue::TimeMicros(micros));
+        }
+
+        Err(ParquetError::Conversion(format!(
+            "Cannot convert {} to time_micros",
+            value.class()
+        )))
+    }
+
+    fn convert_to_time_nanos(&self, value: Value) -> Result<ParquetValue> {
+        if value.is_nil() {
+            return Ok(ParquetValue::Null);
+        }
+
+        // Convert to microseconds since midnight
+        let ruby = Ruby::get()
+            .map_err(|_| ParquetError::Conversion("Failed to get Ruby runtime".to_string()))?;
+        if value.is_kind_of(ruby.class_time()) {
+            let hour: i64 = value
+                .funcall("hour", ())
+                .map_err(|e| ParquetError::Conversion(e.to_string()))?;
+            let min: i64 = value
+                .funcall("min", ())
+                .map_err(|e| ParquetError::Conversion(e.to_string()))?;
+            let sec: i64 = value
+                .funcall("sec", ())
+                .map_err(|e| ParquetError::Conversion(e.to_string()))?;
+            let nsec: i64 = value
+                .funcall("nsec", ())
+                .map_err(|e| ParquetError::Conversion(e.to_string()))?;
+
+            let nanos = (hour * 3600 + min * 60 + sec) * 1_000_000_000 + nsec;
+            return Ok(ParquetValue::TimeNanos(nanos));
         }
 
         Err(ParquetError::Conversion(format!(
@@ -1399,21 +1398,8 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
         ParquetValue::Float32(OrderedFloat(f)) => Ok((f as f64).into_value_with(&ruby)),
         ParquetValue::Float64(OrderedFloat(f)) => Ok(f.into_value_with(&ruby)),
         ParquetValue::String(s) => Ok(s.into_value_with(&ruby)),
-        ParquetValue::Bytes(b) => {
-            // Check if this is a UUID (16 bytes)
-            if b.len() == 16 {
-                // Format as UUID string
-                let uuid_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                    b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
-                );
-                Ok(uuid_str.into_value_with(&ruby))
-            } else {
-                // Regular bytes - convert to string
-                Ok(ruby.str_from_slice(&b).as_value())
-            }
-        }
+        ParquetValue::Uuid(u) => Ok(u.to_string().into_value_with(&ruby)),
+        ParquetValue::Bytes(b) => Ok(ruby.enc_str_new(&b, ruby.ascii8bit_encoding()).as_value()),
         ParquetValue::Date32(days) => {
             // Convert days since epoch to Date object
             let _ = ruby.require("date");
@@ -1527,6 +1513,14 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                 .funcall::<_, _, Value>("at", (secs, usec))
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             apply_timezone(time, &tz)
+        }
+        ParquetValue::TimeNanos(nanos) => {
+            let time_class = ruby.class_time();
+            let secs = nanos / 1_000_000_000;
+            let nsec = nanos % 1_000_000_000;
+            time_class
+                .funcall("at", (secs, nsec, Symbol::new("nanosecond")))
+                .map_err(|e| ParquetError::Conversion(e.to_string()))
         }
         ParquetValue::TimestampNanos(nanos, tz) => {
             let time_class = ruby.class_time();

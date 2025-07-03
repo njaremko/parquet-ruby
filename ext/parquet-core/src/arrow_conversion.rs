@@ -7,6 +7,7 @@
 
 use crate::{ParquetError, ParquetValue, Result};
 use arrow_array::{builder::*, Array, ArrayRef, ListArray, MapArray, StructArray};
+use arrow_schema::extension::Uuid as ArrowUuid;
 use arrow_schema::{DataType, Field};
 use bytes::Bytes;
 use indexmap::IndexMap;
@@ -14,7 +15,11 @@ use ordered_float::OrderedFloat;
 use std::sync::Arc;
 
 /// Convert a single value from an Arrow array at the given index to a ParquetValue
-pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<ParquetValue> {
+pub fn arrow_to_parquet_value(
+    field: &Field,
+    array: &dyn Array,
+    index: usize,
+) -> Result<ParquetValue> {
     use arrow_array::*;
 
     if array.is_null(index) {
@@ -72,7 +77,6 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
             let array = downcast_array::<Float64Array>(array)?;
             Ok(ParquetValue::Float64(OrderedFloat(array.value(index))))
         }
-
         // String and binary types
         DataType::Utf8 => {
             let array = downcast_array::<StringArray>(array)?;
@@ -86,9 +90,15 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
         }
         DataType::FixedSizeBinary(_) => {
             let array = downcast_array::<FixedSizeBinaryArray>(array)?;
-            Ok(ParquetValue::Bytes(Bytes::copy_from_slice(
-                array.value(index),
-            )))
+            let value = array.value(index);
+            match field.try_extension_type::<ArrowUuid>() {
+                Ok(_) => {
+                    let uuid = uuid::Uuid::from_slice(value)
+                        .map_err(|e| ParquetError::Conversion(format!("Invalid UUID: {}", e)))?;
+                    Ok(ParquetValue::Uuid(uuid))
+                }
+                Err(_) => Ok(ParquetValue::Bytes(Bytes::copy_from_slice(value))),
+            }
         }
 
         // Date and time types
@@ -140,6 +150,10 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
                 let array = downcast_array::<Time64MicrosecondArray>(array)?;
                 Ok(ParquetValue::TimeMicros(array.value(index)))
             }
+            arrow_schema::TimeUnit::Nanosecond => {
+                let array = downcast_array::<Time64NanosecondArray>(array)?;
+                Ok(ParquetValue::TimeNanos(array.value(index)))
+            }
             _ => Err(ParquetError::Conversion(format!(
                 "Unsupported time64 unit: {:?}",
                 unit
@@ -173,13 +187,13 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
         }
 
         // Complex types
-        DataType::List(_) => {
+        DataType::List(item_field) => {
             let array = downcast_array::<ListArray>(array)?;
             let list_values = array.value(index);
 
             let mut values = Vec::with_capacity(list_values.len());
             for i in 0..list_values.len() {
-                values.push(arrow_to_parquet_value(&list_values, i)?);
+                values.push(arrow_to_parquet_value(item_field, &list_values, i)?);
             }
 
             Ok(ParquetValue::List(values))
@@ -192,10 +206,20 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
             let keys = map_value.column(0);
             let values = map_value.column(1);
 
+            let key_field = map_value
+                .fields()
+                .iter().find(|f| f.name() == "key")
+                .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
+
+            let value_field = map_value
+                .fields()
+                .iter().find(|f| f.name() == "value")
+                .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
+
             let mut map_vec = Vec::with_capacity(keys.len());
             for i in 0..keys.len() {
-                let key = arrow_to_parquet_value(keys, i)?;
-                let value = arrow_to_parquet_value(values, i)?;
+                let key = arrow_to_parquet_value(key_field, keys, i)?;
+                let value = arrow_to_parquet_value(value_field, values, i)?;
                 map_vec.push((key, value));
             }
 
@@ -207,7 +231,7 @@ pub fn arrow_to_parquet_value(array: &dyn Array, index: usize) -> Result<Parquet
             let mut map = IndexMap::new();
             for (col_idx, field) in array.fields().iter().enumerate() {
                 let column = array.column(col_idx);
-                let value = arrow_to_parquet_value(column, index)?;
+                let value = arrow_to_parquet_value(field, column, index)?;
                 map.insert(Arc::from(field.name().as_str()), value);
             }
 
@@ -1108,7 +1132,7 @@ mod tests {
         let array = parquet_values_to_arrow_array(values.clone(), &field).unwrap();
 
         for (i, expected) in values.iter().enumerate() {
-            let actual = arrow_to_parquet_value(array.as_ref(), i).unwrap();
+            let actual = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
             assert_eq!(&actual, expected);
         }
     }

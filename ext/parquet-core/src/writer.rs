@@ -235,6 +235,7 @@ where
             (Date64(_), DataType::Date64) => 8,
             (TimeMillis(_), DataType::Time32(_)) => 4,
             (TimeMicros(_), DataType::Time64(_)) => 8,
+            (TimeNanos(_), DataType::Time64(_)) => 8,
             (TimestampSecond(_, _), DataType::Timestamp(_, _)) => 8,
             (TimestampMillis(_, _), DataType::Timestamp(_, _)) => 8,
             (TimestampMicros(_, _), DataType::Timestamp(_, _)) => 8,
@@ -364,7 +365,9 @@ where
             writer.write(&batch)?;
 
             // Check if we need to flush based on memory usage
-            if writer.in_progress_size() >= self.memory_threshold {
+            if writer.in_progress_size() >= self.memory_threshold
+                || writer.memory_size() >= self.memory_threshold
+            {
                 writer.flush()?;
             }
         } else {
@@ -496,6 +499,7 @@ fn validate_value_against_field(value: &ParquetValue, field: &Field, path: &str)
         (Date64(_), DataType::Date64) => Ok(()),
         (TimeMillis(_), DataType::Time32(_)) => Ok(()),
         (TimeMicros(_), DataType::Time64(_)) => Ok(()),
+        (TimeNanos(_), DataType::Time64(_)) => Ok(()),
         (TimestampSecond(_, _), DataType::Timestamp(_, _)) => Ok(()),
         (TimestampMillis(_, _), DataType::Timestamp(_, _)) => Ok(()),
         (TimestampMicros(_, _), DataType::Timestamp(_, _)) => Ok(()),
@@ -591,10 +595,16 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
             name,
             primitive_type,
             nullable,
-            ..
+            format,
         } => {
             let data_type = primitive_type_to_arrow(primitive_type)?;
-            Ok(Field::new(name, data_type, *nullable))
+            let field = Field::new(name, data_type, *nullable);
+            let extended_field = if format.as_deref() == Some("uuid") {
+                field.with_extension_type(arrow_schema::extension::Uuid)
+            } else {
+                field
+            };
+            Ok(extended_field)
         }
         SchemaNode::List {
             name,
@@ -671,6 +681,7 @@ fn primitive_type_to_arrow(ptype: &crate::PrimitiveType) -> Result<DataType> {
         Date32 => DataType::Date32,
         TimeMillis => DataType::Time32(arrow_schema::TimeUnit::Millisecond),
         TimeMicros => DataType::Time64(arrow_schema::TimeUnit::Microsecond),
+        TimeNanos => DataType::Time64(arrow_schema::TimeUnit::Nanosecond),
         TimestampMillis(tz) => DataType::Timestamp(
             arrow_schema::TimeUnit::Millisecond,
             // PARQUET SPEC: ANY timezone (e.g., "+09:00", "America/New_York") means

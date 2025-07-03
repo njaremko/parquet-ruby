@@ -99,7 +99,7 @@ fn test_decimal256_large_values() {
 
     // Verify roundtrip
     for i in 0..4 {
-        let value = arrow_to_parquet_value(array.as_ref(), i).unwrap();
+        let value = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
         match (i, value) {
             (0, ParquetValue::Decimal256(v, _)) => assert_eq!(v, large_positive.clone()),
             (1, ParquetValue::Decimal256(v, _)) => assert_eq!(v, large_negative.clone()),
@@ -173,7 +173,7 @@ fn test_timestamp_with_timezone() {
 
     // Verify roundtrip preserves timezone
     for i in 0..3 {
-        let value = arrow_to_parquet_value(array.as_ref(), i).unwrap();
+        let value = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
         match value {
             ParquetValue::TimestampMillis(_, Some(tz)) => {
                 assert_eq!(tz.as_ref(), "America/New_York");
@@ -209,7 +209,7 @@ fn test_nested_list_of_lists() {
     assert_eq!(array.len(), 1);
 
     // Verify roundtrip
-    let value = arrow_to_parquet_value(array.as_ref(), 0).unwrap();
+    let value = arrow_to_parquet_value(&outer_field, array.as_ref(), 0).unwrap();
     match value {
         ParquetValue::List(items) => assert_eq!(items.len(), 5),
         _ => panic!("Expected list"),
@@ -357,7 +357,7 @@ fn test_unsupported_arrow_types() {
     )
     .unwrap();
 
-    let result = arrow_to_parquet_value(&array, 0);
+    let result = arrow_to_parquet_value(&Field::new("int", DataType::Int32, false), &array, 0);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

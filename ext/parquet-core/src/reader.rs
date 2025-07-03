@@ -163,8 +163,10 @@ where
                     // Extract values from current row
                     let mut row_values = Vec::with_capacity(batch.num_columns());
 
-                    for column in batch.columns() {
-                        let value = match arrow_to_parquet_value(column, self.current_row) {
+                    let schema = batch.schema();
+                    for (i, column) in batch.columns().iter().enumerate() {
+                        let field = schema.field(i);
+                        let value = match arrow_to_parquet_value(field, column, self.current_row) {
                             Ok(v) => v,
                             Err(e) => return Some(Err(e)),
                         };
@@ -228,12 +230,13 @@ where
                 let mut columns = Vec::with_capacity(batch.num_columns());
 
                 for (idx, column) in batch.columns().iter().enumerate() {
-                    let column_name = self.schema.field(idx).name().to_string();
+                    let field = self.schema.field(idx);
+                    let column_name = field.name().to_string();
 
                     // Convert entire column to ParquetValues
                     let mut values = Vec::with_capacity(column.len());
                     for row_idx in 0..column.len() {
-                        match arrow_to_parquet_value(column, row_idx) {
+                        match arrow_to_parquet_value(field, column, row_idx) {
                             Ok(value) => values.push(value),
                             Err(e) => return Some(Err(e)),
                         }

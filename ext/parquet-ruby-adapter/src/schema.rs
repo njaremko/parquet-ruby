@@ -1,8 +1,9 @@
 use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, RArray, RHash, Ruby, Symbol, TryConvert, Value};
-use parquet_core::{ParquetError, PrimitiveType, Result, Schema, SchemaNode};
+use parquet_core::{ParquetError, PrimitiveType, Schema, SchemaNode};
 
 use crate::utils::parse_string_or_symbol;
+use crate::RubyAdapterError;
 
 /// Ruby schema builder that converts Ruby hash/array representations to Parquet schemas
 pub struct RubySchemaBuilder;
@@ -13,18 +14,18 @@ impl RubySchemaBuilder {
     }
 
     /// Parse a Ruby schema definition (hash) into a SchemaNode
-    fn parse_schema_node(&self, name: String, schema_def: Value) -> Result<SchemaNode> {
+    fn parse_schema_node(
+        &self,
+        name: String,
+        schema_def: Value,
+    ) -> Result<SchemaNode, RubyAdapterError> {
         // If it's a Hash, parse it as a complex type
         if let Ok(hash) = <RHash as TryConvert>::try_convert(schema_def) {
             return self.parse_hash_schema_node(name, hash);
         }
 
         // Otherwise, try to parse as a simple type symbol
-        if let Ok(type_sym) = <Symbol as TryConvert>::try_convert(schema_def) {
-            let type_str = type_sym.name().map_err(|e: MagnusError| {
-                ParquetError::Conversion(format!("Failed to get symbol name: {}", e))
-            })?;
-
+        if let Ok(type_str) = schema_def.to_r_string()?.to_string() {
             // Check if it's a complex type with angle brackets
             if type_str.contains('<') {
                 return self.parse_complex_type_string(name, type_str.to_string(), true);
@@ -40,22 +41,24 @@ impl RubySchemaBuilder {
             });
         }
 
-        Err(ParquetError::Schema(format!(
+        Err(RubyAdapterError::InvalidInput(format!(
             "Expected Hash or Symbol for schema definition, got {}",
             schema_def.class()
         )))
     }
 
     /// Parse a Ruby hash schema node
-    fn parse_hash_schema_node(&self, name: String, hash: RHash) -> Result<SchemaNode> {
+    fn parse_hash_schema_node(
+        &self,
+        name: String,
+        hash: RHash,
+    ) -> Result<SchemaNode, RubyAdapterError> {
         // Get the type field
-        let type_sym: Symbol = hash
-            .fetch::<_, Symbol>(Symbol::new("type"))
+        let type_sym: Value = hash
+            .fetch::<_, Value>(Symbol::new("type"))
             .map_err(|e| ParquetError::Schema(format!("Schema missing 'type' field: {}", e)))?;
 
-        let type_str = type_sym.name().map_err(|e: MagnusError| {
-            ParquetError::Conversion(format!("Failed to get type name: {}", e))
-        })?;
+        let type_str = type_sym.to_r_string()?.to_string()?;
 
         // Get nullable field (default to true)
         let nullable = hash
@@ -142,6 +145,15 @@ impl RubySchemaBuilder {
 
             // Primitive types
             primitive_type => {
+                if format.as_deref() == Some("uuid") {
+                    return Ok(SchemaNode::Primitive {
+                        name,
+                        primitive_type: PrimitiveType::FixedLenByteArray(16),
+                        nullable,
+                        format,
+                    });
+                }
+
                 // Get precision and scale for decimal types
                 let precision = hash
                     .fetch::<_, Value>(Symbol::new("precision"))
@@ -196,7 +208,7 @@ impl RubySchemaBuilder {
         name: String,
         type_str: String,
         nullable: bool,
-    ) -> Result<SchemaNode> {
+    ) -> Result<SchemaNode, RubyAdapterError> {
         if type_str.starts_with("list<") && type_str.ends_with('>') {
             let inner_type = &type_str[5..type_str.len() - 1];
             let item_name = format!("{}_item", name);
@@ -229,7 +241,7 @@ impl RubySchemaBuilder {
             let inner = &type_str[4..type_str.len() - 1];
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
             if parts.len() != 2 {
-                return Err(ParquetError::Schema(format!(
+                return Err(RubyAdapterError::InvalidInput(format!(
                     "Invalid map type: {}",
                     type_str
                 )));
@@ -255,7 +267,7 @@ impl RubySchemaBuilder {
                 }),
             })
         } else {
-            Err(ParquetError::Schema(format!(
+            Err(RubyAdapterError::InvalidInput(format!(
                 "Unknown complex type: {}",
                 type_str
             )))
@@ -263,7 +275,7 @@ impl RubySchemaBuilder {
     }
 
     /// Parse a field definition from a Ruby hash
-    fn parse_field_definition(&self, field_hash: RHash) -> Result<SchemaNode> {
+    fn parse_field_definition(&self, field_hash: RHash) -> Result<SchemaNode, RubyAdapterError> {
         let name: String = field_hash
             .fetch(Symbol::new("name"))
             .map_err(|e| ParquetError::Schema(format!("Field missing 'name': {}", e)))?;
@@ -274,7 +286,7 @@ impl RubySchemaBuilder {
             self.parse_schema_node(name, field_hash.as_value())
         } else {
             // This might be a simplified definition - look for known field patterns
-            Err(ParquetError::Schema(format!(
+            Err(RubyAdapterError::InvalidInput(format!(
                 "Field '{}' missing 'type' definition",
                 name
             )))
@@ -288,7 +300,7 @@ impl RubySchemaBuilder {
         precision: Option<u8>,
         scale: Option<i8>,
         timezone: Option<String>,
-    ) -> Result<PrimitiveType> {
+    ) -> Result<PrimitiveType, RubyAdapterError> {
         // Check if it's a decimal type with parentheses notation like "decimal(5,2)"
         if type_str.starts_with("decimal(") && type_str.ends_with(')') {
             let params = &type_str[8..type_str.len() - 1]; // Extract "5,2" from "decimal(5,2)"
@@ -324,6 +336,14 @@ impl RubySchemaBuilder {
             }
         }
 
+        if type_str.starts_with("fixed_len_byte_array(") && type_str.ends_with(')') {
+            let params = &type_str[20..type_str.len() - 1];
+            let len = params.parse::<i32>().map_err(|_| {
+                ParquetError::Schema(format!("Invalid fixed_len_byte_array length: {}", params))
+            })?;
+            return Ok(PrimitiveType::FixedLenByteArray(len));
+        }
+
         match type_str.as_str() {
             "boolean" | "bool" => Ok(PrimitiveType::Boolean),
             "int8" => Ok(PrimitiveType::Int8),
@@ -356,8 +376,9 @@ impl RubySchemaBuilder {
                 // PARQUET SPEC: timezone presence means UTC storage (isAdjustedToUTC = true)
                 Ok(PrimitiveType::TimestampNanos(timezone.map(Into::into)))
             }
-            "time32" | "time_millis" => Ok(PrimitiveType::TimeMillis),
-            "time64" | "time_micros" => Ok(PrimitiveType::TimeMicros),
+            "time_millis" => Ok(PrimitiveType::TimeMillis),
+            "time_micros" => Ok(PrimitiveType::TimeMicros),
+            "time_nanos" => Ok(PrimitiveType::TimeNanos),
             "decimal" => {
                 // Use provided precision/scale or defaults
                 let p = precision.unwrap_or(38);
@@ -380,7 +401,7 @@ impl RubySchemaBuilder {
                 let s = scale.unwrap_or(0);
                 Ok(PrimitiveType::Decimal256(p, s))
             }
-            _ => Err(ParquetError::Schema(format!(
+            _ => Err(RubyAdapterError::InvalidInput(format!(
                 "Unknown primitive type: {}",
                 type_str
             ))),
@@ -396,7 +417,7 @@ impl Default for RubySchemaBuilder {
 
 /// Wrapper functions for Ruby FFI since SchemaBuilderTrait requires Send + Sync
 /// and Ruby Value is not Send/Sync
-pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema> {
+pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema, RubyAdapterError> {
     let builder = RubySchemaBuilder::new();
 
     // The Ruby schema should be a hash with a root struct
@@ -430,7 +451,7 @@ pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema> {
         let mut unique_names = std::collections::HashSet::new();
         for name in &field_names {
             if !unique_names.insert(name) {
-                return Err(ParquetError::Schema(format!(
+                return Err(RubyAdapterError::InvalidInput(format!(
                     "Duplicate field names in root level schema: {:?}",
                     field_names
                 )));
@@ -443,7 +464,7 @@ pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema> {
             fields: field_nodes,
         }
     } else {
-        return Err(ParquetError::Schema(
+        return Err(RubyAdapterError::InvalidInput(
             "Schema must have 'type' or 'fields' key".to_string(),
         ));
     };
@@ -452,18 +473,18 @@ pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema> {
     parquet_core::SchemaBuilder::new()
         .with_root(root_node)
         .build()
-        .map_err(|e| ParquetError::Schema(e.to_string()))
+        .map_err(|e| RubyAdapterError::InvalidInput(e.to_string()))
 }
 
 /// Convert a Parquet schema back to Ruby representation
-pub fn parquet_schema_to_ruby(schema: &Schema) -> Result<Value> {
+pub fn parquet_schema_to_ruby(schema: &Schema) -> Result<Value, RubyAdapterError> {
     let ruby = Ruby::get()
         .map_err(|e| ParquetError::Conversion(format!("Failed to get Ruby runtime: {}", e)))?;
 
     schema_node_to_ruby(&schema.root, &ruby)
 }
 
-fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value> {
+fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAdapterError> {
     let hash = RHash::new();
 
     match node {
@@ -552,6 +573,7 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value> {
                 PrimitiveType::TimestampNanos(_) => Symbol::new("timestamp_nanos"),
                 PrimitiveType::TimeMillis => Symbol::new("time_millis"),
                 PrimitiveType::TimeMicros => Symbol::new("time_micros"),
+                PrimitiveType::TimeNanos => Symbol::new("time_nanos"),
                 PrimitiveType::Decimal128(_, _) => Symbol::new("decimal128"),
                 PrimitiveType::Decimal256(_, _) => Symbol::new("decimal256"),
                 PrimitiveType::FixedLenByteArray(_) => Symbol::new("fixed_len_byte_array"),
@@ -597,7 +619,7 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value> {
 /// Convert old schema format to new format
 /// Old: [{ "column_name" => "type" }, ...]
 /// New: [{ name: "column_name", type: :type }, ...]
-pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray> {
+pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray, RubyAdapterError> {
     let new_schema = RArray::new();
 
     for item in schema.into_iter() {
@@ -630,7 +652,7 @@ pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray> {
         );
 
         if let Err(e) = process_result {
-            return Err(ParquetError::Schema(format!(
+            return Err(RubyAdapterError::InvalidInput(format!(
                 "Failed to process field: {}",
                 e
             )));
@@ -645,7 +667,7 @@ pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray> {
 }
 
 /// Check if schema is in new DSL format (hash with type: :struct)
-pub fn is_dsl_schema(ruby: &Ruby, schema_value: Value) -> Result<bool> {
+pub fn is_dsl_schema(ruby: &Ruby, schema_value: Value) -> Result<bool, RubyAdapterError> {
     if !schema_value.is_kind_of(ruby.class_hash()) {
         return Ok(false);
     }
@@ -678,7 +700,7 @@ pub fn process_schema_value(
     ruby: &Ruby,
     schema_value: Value,
     data_array: Option<&RArray>,
-) -> Result<Value> {
+) -> Result<Value, RubyAdapterError> {
     // Check if it's the new DSL format
     if is_dsl_schema(ruby, schema_value)? {
         // For DSL format, pass it directly to ruby_schema_to_parquet
@@ -716,7 +738,7 @@ pub fn process_schema_value(
                     convert_legacy_schema(ruby, array)?
                 }
             } else {
-                return Err(ParquetError::Schema(
+                return Err(RubyAdapterError::InvalidInput(
                     "schema array must contain hashes".to_string(),
                 ));
             }
@@ -733,13 +755,13 @@ pub fn process_schema_value(
                 ParquetError::Schema(format!("Failed to convert fields to array: {}", e))
             })?
         } else {
-            return Err(ParquetError::Schema(
+            return Err(RubyAdapterError::InvalidInput(
                 "schema hash must have 'fields' key or be in DSL format with 'type' key"
                     .to_string(),
             ));
         }
     } else {
-        return Err(ParquetError::Schema(
+        return Err(RubyAdapterError::InvalidInput(
             "schema must be nil, an array, or a hash".to_string(),
         ));
     };
@@ -748,7 +770,7 @@ pub fn process_schema_value(
     if schema_array.is_empty() {
         if let Some(data) = data_array {
             if data.is_empty() {
-                return Err(ParquetError::Schema(
+                return Err(RubyAdapterError::InvalidInput(
                     "Cannot infer schema from empty data".to_string(),
                 ));
             }
@@ -767,7 +789,7 @@ pub fn process_schema_value(
                     })?;
                 first_array.len()
             } else {
-                return Err(ParquetError::Schema(
+                return Err(RubyAdapterError::InvalidInput(
                     "First data item must be an array".to_string(),
                 ));
             };
@@ -793,7 +815,7 @@ pub fn process_schema_value(
 
             schema_array = new_schema;
         } else {
-            return Err(ParquetError::Schema(
+            return Err(RubyAdapterError::InvalidInput(
                 "Schema is required when data is not provided for inference".to_string(),
             ));
         }

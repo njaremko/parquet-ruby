@@ -72,6 +72,7 @@ pub enum PrimitiveType {
     TimestampNanos(Option<Arc<str>>),
     TimeMillis,
     TimeMicros,
+    TimeNanos,
 
     // Fixed-length byte array
     FixedLenByteArray(i32),
@@ -146,6 +147,7 @@ impl PrimitiveType {
             PrimitiveType::TimestampNanos(_) => "TimestampNanos",
             PrimitiveType::TimeMillis => "TimeMillis",
             PrimitiveType::TimeMicros => "TimeMicros",
+            PrimitiveType::TimeNanos => "TimeNanos",
             PrimitiveType::FixedLenByteArray(_) => "FixedLenByteArray",
         }
     }
