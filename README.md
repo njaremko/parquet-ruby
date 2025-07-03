@@ -264,8 +264,99 @@ The following data types are supported in the schema:
 - `binary`
 - `boolean`
 - `date32`
-- `timestamp_millis`, `timestamp_micros`
+- `timestamp_millis`, `timestamp_micros`, `timestamp_second`, `timestamp_nanos`
 - `time_millis`, `time_micros`
+
+### Timestamp Timezone Handling
+
+**CRITICAL PARQUET SPECIFICATION LIMITATION**: The Apache Parquet format specification only supports two types of timestamps:
+1. **UTC-normalized timestamps** (when ANY timezone is specified) - `isAdjustedToUTC = true`
+2. **Local/unzoned timestamps** (when NO timezone is specified) - `isAdjustedToUTC = false`
+
+This means that specific timezone offsets like "+09:00" or "America/New_York" CANNOT be preserved in Parquet files. This is not a limitation of this Ruby library, but of the Parquet format itself.
+
+**When Writing:**
+- If the schema specifies ANY timezone (whether it's "UTC", "+09:00", "America/New_York", etc.):
+  - Time values are converted to UTC before storing
+  - The file metadata sets `isAdjustedToUTC = true`
+  - The original timezone information is LOST
+- If the schema doesn't specify a timezone:
+  - Timestamps are stored as local/unzoned time (no conversion)
+  - The file metadata sets `isAdjustedToUTC = false`
+  - These represent "wall clock" times without timezone context
+
+**When Reading:**
+- If the Parquet file has `isAdjustedToUTC = true` (ANY timezone was specified during writing):
+  - Time objects are returned in UTC
+  - The original timezone (e.g., "+09:00") is NOT recoverable
+- If the file has `isAdjustedToUTC = false` (NO timezone was specified):
+  - Time objects are returned as local time in your system's timezone
+  - These are "wall clock" times without timezone information
+
+```ruby
+# Preferred approach: use has_timezone to be explicit about UTC vs local storage
+schema = Parquet::Schema.define do
+  field :timestamp_utc, :timestamp_millis, has_timezone: true     # Stored as UTC (default)
+  field :timestamp_local, :timestamp_millis, has_timezone: false  # Stored as local/unzoned
+  field :timestamp_default, :timestamp_millis                     # Default: UTC storage
+end
+
+# Legacy approach still supported (any timezone value means UTC storage)
+schema_legacy = Parquet::Schema.define do
+  field :timestamp_utc, :timestamp_millis, timezone: "UTC"        # Stored as UTC
+  field :timestamp_tokyo, :timestamp_millis, timezone: "+09:00"  # Also stored as UTC!
+  field :timestamp_local, :timestamp_millis                       # No timezone - local
+end
+
+# Time values will be converted based on schema
+rows = [
+  [
+    Time.new(2024, 1, 1, 12, 0, 0, "+03:00"),  # Converted to UTC if has_timezone: true
+    Time.new(2024, 1, 1, 12, 0, 0, "-05:00"),  # Kept as local if has_timezone: false
+    Time.new(2024, 1, 1, 12, 0, 0)              # Kept as local (default)
+  ]
+]
+
+Parquet.write_rows(rows.each, schema: schema, write_to: "timestamps.parquet")
+
+# Reading back - timezone presence determines UTC vs local
+Parquet.each_row("timestamps.parquet") do |row|
+  # row["timestamp_utc"]     => Time object in UTC
+  # row["timestamp_local"]   => Time object in local timezone
+  # row["timestamp_default"] => Time object in local timezone
+end
+
+# If you need to preserve specific timezone information, store it separately:
+schema_with_tz = Parquet::Schema.define do
+  field :timestamp, :timestamp_millis, has_timezone: true  # Store as UTC
+  field :original_timezone, :string                        # Store timezone as string
+end
+```
+
+## Architecture
+
+This library uses a modular, trait-based architecture that separates language-agnostic Parquet operations from Ruby-specific bindings:
+
+- **parquet-core**: Language-agnostic core functionality for Parquet file operations
+  - Pure Rust implementation without Ruby dependencies
+  - Traits for customizable I/O operations (`ChunkReader`) and value conversion (`ValueConverter`)
+  - Efficient Arrow-based reader and writer implementations
+  
+- **parquet-ruby-adapter**: Ruby-specific adapter layer
+  - Implements core traits for Ruby integration
+  - Handles Ruby value conversion through the `ValueConverter` trait
+  - Manages Ruby I/O objects through the `ChunkReader` trait
+
+- **parquet gem**: Ruby FFI bindings
+  - Provides high-level Ruby API
+  - Manages memory safety between Ruby and Rust
+  - Supports both file-based and IO-based operations
+
+This architecture enables:
+- Clear separation of concerns between core functionality and language bindings
+- Easy testing of core logic without Ruby dependencies
+- Potential reuse of core functionality for other language bindings
+- Type-safe interfaces through Rust's trait system
 
 ### Schema DSL for Complex Data Types
 

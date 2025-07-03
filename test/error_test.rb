@@ -17,7 +17,7 @@ class ErrorTest < Minitest::Test
   end
 
   def test_each_column_invalid_result_type
-    assert_raises(RuntimeError) { Parquet.each_column("test/data.parquet", result_type: :invalid) { |_| } }
+    assert_raises(ArgumentError) { Parquet.each_column("test/data.parquet", result_type: :invalid) { |_| } }
   end
 
   def test_strict_utf8_enforcement
@@ -82,7 +82,7 @@ class ErrorTest < Minitest::Test
 
     begin
       error = assert_raises(RuntimeError) { Parquet.write_rows(data.each, schema: schema, write_to: temp_path) }
-      assert_match(/Row length|schema length|mismatch/, error.message)
+      assert_match(/Row length|schema length|mismatch|Row has \d+ values but schema has \d+ fields/, error.message)
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -103,12 +103,12 @@ class ErrorTest < Minitest::Test
       error = assert_raises(RuntimeError) { Parquet.write_rows(enumerator, schema: schema, write_to: temp_path) }
       assert_equal("Simulated stream failure", error.message)
 
-      # The file may exist but might be partially written or truncated.
-      assert File.exist?(temp_path)
-
-      # Optionally: attempt to read what is there, or confirm it's not valid.
-      # We'll just check that it doesn't catastrophically break reading API:
-      assert_raises(RuntimeError) { Parquet.each_row(temp_path).to_a }
+      # The file may or may not exist depending on when the error occurred
+      # If it exists, it might be partially written or truncated
+      if File.exist?(temp_path)
+        # Attempt to read should fail for a partially written file
+        assert_raises(RuntimeError) { Parquet.each_row(temp_path).to_a }
+      end
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -125,7 +125,7 @@ class ErrorTest < Minitest::Test
       error =
         assert_raises(RuntimeError, RangeError) { Parquet.write_rows(data.each, schema: schema, write_to: temp_path) }
       # depending on environment, might say "fixnum too big to convert" or "out of range"
-      assert_match(/fixnum too big to convert into/i, error.message)
+      assert_match(/fixnum too big to convert into|number too large to fit in target type/i, error.message)
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

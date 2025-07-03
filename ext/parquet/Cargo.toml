@@ -21,6 +21,7 @@ itertools = "^0.14"
 jiff = "0.2"
 magnus = { version = "0.7", features = ["rb-sys"] }
 parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["json"] }
+parquet-ruby-adapter = { path = "../parquet-ruby-adapter" }
 rand = "0.9"
 rb-sys = "^0.9"
 simdutf8 = "0.1.5"
@@ -28,6 +29,8 @@ tempfile = "^3.15"
 thiserror = "2.0"
 num = "0.4.3"
 uuid = "1.16.0"
+ordered-float = "5.0.0"
+
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
