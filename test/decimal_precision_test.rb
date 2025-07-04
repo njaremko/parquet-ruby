@@ -210,8 +210,8 @@ class DecimalPrecisionTest < Minitest::Test
       # Verify precision and scale in metadata
       # Parse from logical_type string like "Decimal { scale: 0, precision: 38 }"
       def parse_decimal_info(field)
-        if field["logical_type"] =~ /Decimal\s*{\s*scale:\s*(\d+),\s*precision:\s*(\d+)\s*}/
-          { precision: $2.to_i, scale: $1.to_i }
+        if field["logical_type"]["type"] == "Decimal"
+          { precision: field["logical_type"]["precision"], scale: field["logical_type"]["scale"] }
         else
           { precision: nil, scale: nil }
         end

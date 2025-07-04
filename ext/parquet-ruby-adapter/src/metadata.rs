@@ -115,9 +115,111 @@ impl TryIntoValue for RubyParquetMetaData {
                 .map_err(|e| {
                     RubyAdapterError::metadata(format!("Failed to set converted_type: {}", e))
                 })?;
+
             if let Some(logical_type) = basic_info.logical_type() {
+                let logical_type_value = match logical_type {
+                    parquet::basic::LogicalType::Decimal { scale, precision } => {
+                        let logical_hash = handle.hash_new();
+                        logical_hash.aset("type", "Decimal").map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set type: {}", e))
+                        })?;
+                        logical_hash.aset("scale", scale).map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set scale: {}", e))
+                        })?;
+                        logical_hash.aset("precision", precision).map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set precision: {}", e))
+                        })?;
+                        logical_hash.as_value()
+                    }
+                    parquet::basic::LogicalType::Time {
+                        is_adjusted_to_u_t_c,
+                        unit,
+                    } => {
+                        let logical_hash = handle.hash_new();
+                        logical_hash.aset("type", "Time").map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set type: {}", e))
+                        })?;
+                        logical_hash
+                            .aset(
+                                "is_adjusted_to_utc",
+                                is_adjusted_to_u_t_c.to_string().as_str(),
+                            )
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set is_adjusted_to_u_t_c: {}",
+                                    e
+                                ))
+                            })?;
+
+                        let unit_str = match unit {
+                            parquet::basic::TimeUnit::MILLIS(_) => "millis",
+                            parquet::basic::TimeUnit::MICROS(_) => "micros",
+                            parquet::basic::TimeUnit::NANOS(_) => "nanos",
+                        };
+                        logical_hash.aset("unit", unit_str).map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set unit: {}", e))
+                        })?;
+                        logical_hash.as_value()
+                    }
+                    parquet::basic::LogicalType::Timestamp {
+                        is_adjusted_to_u_t_c,
+                        unit,
+                    } => {
+                        let logical_hash = handle.hash_new();
+                        logical_hash.aset("type", "Timestamp").map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set type: {}", e))
+                        })?;
+                        logical_hash
+                            .aset("is_adjusted_to_utc", is_adjusted_to_u_t_c)
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set is_adjusted_to_u_t_c: {}",
+                                    e
+                                ))
+                            })?;
+                        let unit_str = match unit {
+                            parquet::basic::TimeUnit::MILLIS(_) => "millis",
+                            parquet::basic::TimeUnit::MICROS(_) => "micros",
+                            parquet::basic::TimeUnit::NANOS(_) => "nanos",
+                        };
+                        logical_hash.aset("unit", unit_str).map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set unit: {}", e))
+                        })?;
+                        logical_hash.as_value()
+                    }
+                    parquet::basic::LogicalType::Integer {
+                        bit_width,
+                        is_signed,
+                    } => {
+                        let logical_hash = handle.hash_new();
+                        logical_hash.aset("type", "Integer").map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set type: {}", e))
+                        })?;
+                        logical_hash.aset("bit_width", bit_width).map_err(|e| {
+                            RubyAdapterError::metadata(format!("Failed to set bit_width: {}", e))
+                        })?;
+                        logical_hash
+                            .aset("is_signed", is_signed.to_string().as_str())
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set is_signed: {}",
+                                    e
+                                ))
+                            })?;
+                        logical_hash.as_value()
+                    }
+                    _ => {
+                        let logical_hash = handle.hash_new();
+                        logical_hash
+                            .aset("type", format!("{:?}", logical_type))
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!("Failed to set type: {}", e))
+                            })?;
+                        logical_hash.as_value()
+                    }
+                };
                 field_hash
-                    .aset("logical_type", format!("{:?}", logical_type))
+                    .aset("logical_type", logical_type_value)
                     .map_err(|e| {
                         RubyAdapterError::metadata(format!("Failed to set logical_type: {}", e))
                     })?;

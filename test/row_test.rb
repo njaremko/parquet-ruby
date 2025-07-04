@@ -490,8 +490,8 @@ class RowTest < Minitest::Test
 
     schema = [
       { "id" => "int32" },
-      { "time_ms" => "time32" },
-      { "time_us" => "time64" }
+      { "time_ms" => "time_millis" },
+      { "time_us" => "time_micros" }
     ]
 
     # Write the data
