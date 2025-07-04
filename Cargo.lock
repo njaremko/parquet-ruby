@@ -225,6 +225,10 @@ dependencies = [
 name = "arrow-schema"
 version = "55.2.0"
 source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "arrow-select"
@@ -1092,6 +1096,7 @@ dependencies = [
  "rb-sys-env 0.2.2",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

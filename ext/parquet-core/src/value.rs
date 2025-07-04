@@ -2,6 +2,7 @@ use bytes::Bytes;
 use indexmap::IndexMap;
 use num::BigInt;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParquetValue {
@@ -22,6 +23,7 @@ pub enum ParquetValue {
     Boolean(bool),
     String(Arc<str>),
     Bytes(Bytes),
+    Uuid(Uuid),
 
     // Date/Time types
     Date32(i32), // Days since epoch
@@ -40,6 +42,7 @@ pub enum ParquetValue {
     // Time types
     TimeMillis(i32), // Time of day in milliseconds since midnight
     TimeMicros(i64), // Time of day in microseconds since midnight
+    TimeNanos(i64),  // Time of day in nanoseconds since midnight
 
     // Complex types
     List(Vec<ParquetValue>),
@@ -68,6 +71,7 @@ impl std::hash::Hash for ParquetValue {
             ParquetValue::Boolean(b) => b.hash(state),
             ParquetValue::String(s) => s.hash(state),
             ParquetValue::Bytes(b) => b.hash(state),
+            ParquetValue::Uuid(u) => u.hash(state),
             ParquetValue::Date32(d) => d.hash(state),
             ParquetValue::Date64(d) => d.hash(state),
             ParquetValue::Decimal128(d, scale) => {
@@ -96,6 +100,7 @@ impl std::hash::Hash for ParquetValue {
             }
             ParquetValue::TimeMillis(t) => t.hash(state),
             ParquetValue::TimeMicros(t) => t.hash(state),
+            ParquetValue::TimeNanos(t) => t.hash(state),
             ParquetValue::List(l) => l.hash(state),
             ParquetValue::Map(m) => m.hash(state),
             ParquetValue::Record(r) => {
@@ -133,6 +138,7 @@ impl ParquetValue {
             ParquetValue::Boolean(_) => "Boolean",
             ParquetValue::String(_) => "String",
             ParquetValue::Bytes(_) => "Bytes",
+            ParquetValue::Uuid(_) => "Uuid",
             ParquetValue::Date32(_) => "Date32",
             ParquetValue::Date64(_) => "Date64",
             ParquetValue::Decimal128(_, _) => "Decimal128",
@@ -143,6 +149,7 @@ impl ParquetValue {
             ParquetValue::TimestampNanos(_, _) => "TimestampNanos",
             ParquetValue::TimeMillis(_) => "TimeMillis",
             ParquetValue::TimeMicros(_) => "TimeMicros",
+            ParquetValue::TimeNanos(_) => "TimeNanos",
             ParquetValue::List(_) => "List",
             ParquetValue::Map(_) => "Map",
             ParquetValue::Record(_) => "Record",

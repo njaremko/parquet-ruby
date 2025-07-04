@@ -26,6 +26,7 @@ pub fn estimate_parquet_value_size(value: &ParquetValue) -> usize {
         ParquetValue::Float64(_) => 8,
         ParquetValue::String(s) => s.len() + 24, // String overhead
         ParquetValue::Bytes(b) => b.len() + 24,  // Vec overhead
+        ParquetValue::Uuid(_) => 16,
         ParquetValue::Date32(_) => 4,
         ParquetValue::Date64(_) => 8,
         ParquetValue::Decimal128(_, _) => 16 + 1, // value + scale
@@ -36,6 +37,7 @@ pub fn estimate_parquet_value_size(value: &ParquetValue) -> usize {
         ParquetValue::TimestampNanos(_, tz) => 8 + tz.as_ref().map_or(0, |s| s.len() + 24),
         ParquetValue::TimeMillis(_) => 4,
         ParquetValue::TimeMicros(_) => 8,
+        ParquetValue::TimeNanos(_) => 8,
         ParquetValue::List(items) => {
             24 + items.iter().map(estimate_parquet_value_size).sum::<usize>()
         }
