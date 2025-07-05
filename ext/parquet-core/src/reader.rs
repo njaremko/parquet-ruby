@@ -1,10 +1,10 @@
 //! Core Parquet reading functionality
 
-use crate::{arrow_conversion::arrow_to_parquet_value, ParquetValue, Result};
+use crate::{arrow_conversion::arrow_to_parquet_value, ParquetError, ParquetValue, Result};
 use arrow::record_batch::RecordBatch;
 use arrow_array::Array;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use parquet::file::metadata::FileMetaData;
+use parquet::file::metadata::{FileMetaData, ParquetMetaData};
 use std::sync::Arc;
 
 /// Core Parquet reader that works with any source implementing Read + Seek
@@ -33,10 +33,12 @@ where
     /// Returns an iterator over rows where each row is a vector of ParquetValues
     pub fn read_rows(self) -> Result<RowIterator<R>> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+        let metadata = builder.metadata().clone();
         let reader = builder.build()?;
 
         Ok(RowIterator {
             batch_reader: reader,
+            metadata,
             current_batch: None,
             current_row: 0,
             _phantom: std::marker::PhantomData,
@@ -64,10 +66,12 @@ where
 
         let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
         builder = builder.with_projection(mask);
+        let metadata = builder.metadata().clone();
         let reader = builder.build()?;
 
         Ok(RowIterator {
             batch_reader: reader,
+            metadata,
             current_batch: None,
             current_row: 0,
             _phantom: std::marker::PhantomData,
@@ -88,10 +92,12 @@ where
         }
 
         let schema = builder.schema().clone();
+        let metadata = builder.metadata().clone();
         let reader = builder.build()?;
 
         Ok(ColumnIterator {
             batch_reader: reader,
+            metadata,
             schema,
             returned_empty_batch: false,
             is_empty_file: is_empty,
@@ -129,10 +135,12 @@ where
         }
 
         let schema = builder.schema().clone();
+        let metadata = builder.metadata().clone();
         let reader = builder.build()?;
 
         Ok(ColumnIterator {
             batch_reader: reader,
+            metadata,
             schema,
             returned_empty_batch: false,
             is_empty_file: is_empty,
@@ -144,6 +152,7 @@ where
 /// Iterator over rows in a Parquet file
 pub struct RowIterator<R> {
     batch_reader: ParquetRecordBatchReader,
+    metadata: Arc<ParquetMetaData>,
     current_batch: Option<RecordBatch>,
     current_row: usize,
     _phantom: std::marker::PhantomData<R>,
@@ -156,6 +165,7 @@ where
     type Item = Result<Vec<ParquetValue>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let schema_descriptor = self.metadata.file_metadata().schema_descr_ptr();
         loop {
             // If we have a current batch and haven't exhausted it
             if let Some(ref batch) = self.current_batch {
@@ -164,9 +174,31 @@ where
                     let mut row_values = Vec::with_capacity(batch.num_columns());
 
                     let schema = batch.schema();
+
+                    let root_schema = schema_descriptor.root_schema();
+                    let parquet_fields = match root_schema {
+                        parquet::schema::types::Type::GroupType { fields, .. } => fields,
+                        _ => {
+                            return Some(Err(ParquetError::Conversion(
+                                "Root schema must be a group type".to_string(),
+                            )))
+                        }
+                    };
+
                     for (i, column) in batch.columns().iter().enumerate() {
                         let field = schema.field(i);
-                        let value = match arrow_to_parquet_value(field, column, self.current_row) {
+                        let parquet_field = if i < parquet_fields.len() {
+                            parquet_fields[i].clone()
+                        } else {
+                            // Fallback to leaf column if index out of bounds
+                            schema_descriptor.column(i).self_type_ptr()
+                        };
+                        let value = match arrow_to_parquet_value(
+                            field,
+                            &parquet_field,
+                            column,
+                            self.current_row,
+                        ) {
                             Ok(v) => v,
                             Err(e) => return Some(Err(e)),
                         };
@@ -194,6 +226,7 @@ where
 /// Iterator over column batches in a Parquet file
 pub struct ColumnIterator<R> {
     batch_reader: ParquetRecordBatchReader,
+    metadata: Arc<ParquetMetaData>,
     schema: Arc<arrow_schema::Schema>,
     returned_empty_batch: bool,
     is_empty_file: bool,
@@ -228,6 +261,17 @@ where
         match self.batch_reader.next() {
             Some(Ok(batch)) => {
                 let mut columns = Vec::with_capacity(batch.num_columns());
+                let schema_descriptor = self.metadata.file_metadata().schema_descr_ptr();
+
+                let root_schema = schema_descriptor.root_schema();
+                let parquet_fields = match root_schema {
+                    parquet::schema::types::Type::GroupType { fields, .. } => fields,
+                    _ => {
+                        return Some(Err(ParquetError::Conversion(
+                            "Root schema must be a group type".to_string(),
+                        )))
+                    }
+                };
 
                 for (idx, column) in batch.columns().iter().enumerate() {
                     let field = self.schema.field(idx);
@@ -236,7 +280,13 @@ where
                     // Convert entire column to ParquetValues
                     let mut values = Vec::with_capacity(column.len());
                     for row_idx in 0..column.len() {
-                        match arrow_to_parquet_value(field, column, row_idx) {
+                        let parquet_field = if idx < parquet_fields.len() {
+                            parquet_fields[idx].clone()
+                        } else {
+                            // Fallback to leaf column if index out of bounds
+                            schema_descriptor.column(idx).self_type_ptr()
+                        };
+                        match arrow_to_parquet_value(field, &parquet_field, column, row_idx) {
                             Ok(value) => values.push(value),
                             Err(e) => return Some(Err(e)),
                         }
