@@ -1395,8 +1395,58 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
         ParquetValue::UInt16(i) => Ok((i as u64).into_value_with(&ruby)),
         ParquetValue::UInt32(i) => Ok((i as u64).into_value_with(&ruby)),
         ParquetValue::UInt64(i) => Ok(i.into_value_with(&ruby)),
-        ParquetValue::Float16(OrderedFloat(f)) => Ok((f as f64).into_value_with(&ruby)),
-        ParquetValue::Float32(OrderedFloat(f)) => Ok((f as f64).into_value_with(&ruby)),
+        ParquetValue::Float16(OrderedFloat(f)) => {
+            let cleaned = {
+                // Fast-path the specials.
+                if f.is_nan() || f.is_infinite() {
+                    f as f64
+                } else if f == 0.0 {
+                    // Keep the IEEE-754 sign bit for −0.0.
+                    if f.is_sign_negative() {
+                        -0.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    // `to_string` gives the shortest exact, round-trippable decimal.
+                    // Parsing it back to `f64` cannot fail, but fall back defensively.
+                    match f.to_string().parse::<f64>() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            dbg!(e);
+                            f as f64
+                        } // extremely unlikely
+                    }
+                }
+            };
+            Ok(cleaned.into_value_with(&ruby))
+        }
+        ParquetValue::Float32(OrderedFloat(f)) => {
+            let cleaned = {
+                // Fast-path the specials.
+                if f.is_nan() || f.is_infinite() {
+                    f as f64
+                } else if f == 0.0 {
+                    // Keep the IEEE-754 sign bit for −0.0.
+                    if f.is_sign_negative() {
+                        -0.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    // `to_string` gives the shortest exact, round-trippable decimal.
+                    // Parsing it back to `f64` cannot fail, but fall back defensively.
+                    match f.to_string().parse::<f64>() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            dbg!(e);
+                            f as f64
+                        } // extremely unlikely
+                    }
+                }
+            };
+            Ok(cleaned.into_value_with(&ruby))
+        }
         ParquetValue::Float64(OrderedFloat(f)) => Ok(f.into_value_with(&ruby)),
         ParquetValue::String(s) => Ok(s.into_value_with(&ruby)),
         ParquetValue::Uuid(u) => Ok(u

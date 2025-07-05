@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.1
+- Improve parsing of sub-64 bit floats into Ruby Float objects (slower, but you get 12.3 instead of 12.3000000000219)
+
 ## 0.7.0
 - Parse un-adjusted timestamps as UTC, and trust people not to believe it.
 - Improve formatting of logical type returned in `Parquet.metadata`
