@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.2
+- Get rid of a debug log that shouldn't ever happen, but just in case.
+
 ## 0.7.1
 - Improve parsing of sub-64 bit floats into Ruby Float objects (slower, but you get 12.3 instead of 12.3000000000219)
 

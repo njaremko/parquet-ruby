@@ -1409,14 +1409,8 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                     }
                 } else {
                     // `to_string` gives the shortest exact, round-trippable decimal.
-                    // Parsing it back to `f64` cannot fail, but fall back defensively.
-                    match f.to_string().parse::<f64>() {
-                        Ok(v) => v,
-                        Err(e) => {
-                            dbg!(e);
-                            f as f64
-                        } // extremely unlikely
-                    }
+                    // Parsing it back to `f64` cannot fail
+                    f.to_string().parse::<f64>()?
                 }
             };
             Ok(cleaned.into_value_with(&ruby))
@@ -1435,14 +1429,8 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                     }
                 } else {
                     // `to_string` gives the shortest exact, round-trippable decimal.
-                    // Parsing it back to `f64` cannot fail, but fall back defensively.
-                    match f.to_string().parse::<f64>() {
-                        Ok(v) => v,
-                        Err(e) => {
-                            dbg!(e);
-                            f as f64
-                        } // extremely unlikely
-                    }
+                    // Parsing it back to `f64` cannot fail
+                    f.to_string().parse::<f64>()?
                 }
             };
             Ok(cleaned.into_value_with(&ruby))
