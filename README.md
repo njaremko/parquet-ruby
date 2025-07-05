@@ -2,616 +2,405 @@
 
 [![Gem Version](https://badge.fury.io/rb/parquet.svg)](https://badge.fury.io/rb/parquet)
 
-This project is a Ruby library wrapping the [`parquet`](https://github.com/apache/arrow-rs/tree/main/parquet) rust crate.
+Read and write [Apache Parquet](https://parquet.apache.org/) files from Ruby. This gem wraps the official Apache [`parquet`](https://github.com/apache/arrow-rs/tree/main/parquet) rust crate, providing:
 
-## Usage
+- **High performance** columnar data storage and retrieval
+- **Memory-efficient** streaming APIs for large datasets
+- **Full compatibility** with the Apache Parquet specification
+- **Simple, Ruby-native** APIs that feel natural
 
-This library provides high-level bindings to `parquet` with two primary APIs for reading Parquet files: row-wise and column-wise iteration. The column-wise API generally offers better performance, especially when working with subset of columns.
+## Why Use This Library?
 
-### Metadata
+Apache Parquet is the de facto standard for analytical data storage, offering:
+- **Efficient compression** - typically 2-10x smaller than CSV
+- **Fast columnar access** - read only the columns you need
+- **Rich type system** - preserves data types, including nested structures
+- **Wide ecosystem support** - works with Spark, Pandas, DuckDB, and more
 
-The `metadata` method provides detailed information about a Parquet file's structure and contents:
+## Installation
+
+Add this line to your application's Gemfile:
 
 ```ruby
-require "parquet"
-
-# Get metadata from a file path
-metadata = Parquet.metadata("data.parquet")
-
-# Or from an IO object
-File.open("data.parquet", "rb") do |file|
-  metadata = Parquet.metadata(file)
-end
-
-# Example metadata output:
-# {
-#   "num_rows" => 3,
-#   "created_by" => "parquet-rs version 54.2.0",
-#   "key_value_metadata" => [
-#     {
-#       "key" => "ARROW:schema",
-#       "value" => "base64_encoded_schema"
-#     }
-#   ],
-#   "schema" => {
-#     "name" => "arrow_schema",
-#     "fields" => [
-#       {
-#         "name" => "id",
-#         "type" => "primitive",
-#         "physical_type" => "INT64",
-#         "repetition" => "OPTIONAL",
-#         "converted_type" => "NONE"
-#       },
-#       # ... other fields
-#     ]
-#   },
-#   "row_groups" => [
-#     {
-#       "num_columns" => 5,
-#       "num_rows" => 3,
-#       "total_byte_size" => 379,
-#       "columns" => [
-#         {
-#           "column_path" => "id",
-#           "num_values" => 3,
-#           "compression" => "UNCOMPRESSED",
-#           "total_compressed_size" => 91,
-#           "encodings" => ["PLAIN", "RLE", "RLE_DICTIONARY"],
-#           "statistics" => {
-#             "min_is_exact" => true,
-#             "max_is_exact" => true
-#           }
-#         },
-#         # ... other columns
-#       ]
-#     }
-#   ]
-# }
+gem 'parquet'
 ```
 
-The metadata includes:
-- Total number of rows
-- File creation information
-- Key-value metadata (including Arrow schema)
-- Detailed schema information for each column
-- Row group information including:
-  - Number of columns and rows
-  - Total byte size
-  - Column-level details (compression, encodings, statistics)
+Then execute:
 
-### Row-wise Iteration
+```bash
+$ bundle install
+```
 
-The `each_row` method provides sequential access to individual rows:
+Or install it directly:
+
+```bash
+$ gem install parquet
+```
+
+## Quick Start
+
+### Reading Data
 
 ```ruby
 require "parquet"
 
-# Basic usage with default hash output
+# Read Parquet files row by row
 Parquet.each_row("data.parquet") do |row|
-  puts row.inspect  # {"id"=>1, "name"=>"name_1"}
+  puts row  # => {"id" => 1, "name" => "Alice", "score" => 95.5}
 end
 
-# Array output for more efficient memory usage
+# Or column by column for better performance
+Parquet.each_column("data.parquet", batch_size: 1000) do |batch|
+  puts batch  # => {"id" => [1, 2, ...], "name" => ["Alice", "Bob", ...]}
+end
+```
+
+### Writing Data
+
+```ruby
+# Define your schema
+schema = [
+  { "id" => "int64" },
+  { "name" => "string" },
+  { "score" => "double" }
+]
+
+# Write row by row
+rows = [
+  [1, "Alice", 95.5],
+  [2, "Bob", 82.3]
+]
+
+Parquet.write_rows(rows.each, schema: schema, write_to: "output.parquet")
+```
+
+## Reading Parquet Files
+
+The library provides two APIs for reading data, each optimized for different use cases:
+
+### Row-wise Reading (Sequential Access)
+
+Best for: Processing records one at a time, data transformations, ETL pipelines
+
+```ruby
+# Basic usage - returns hashes
+Parquet.each_row("data.parquet") do |row|
+  puts row  # => {"id" => 1, "name" => "Alice"}
+end
+
+# Memory-efficient array format
 Parquet.each_row("data.parquet", result_type: :array) do |row|
-  puts row.inspect  # [1, "name_1"]
+  puts row  # => [1, "Alice"]
 end
 
-# Select specific columns to reduce I/O
+# Read specific columns only
 Parquet.each_row("data.parquet", columns: ["id", "name"]) do |row|
-  puts row.inspect
+  # Only requested columns are loaded from disk
 end
 
-# Reading from IO objects
+# Works with IO objects
 File.open("data.parquet", "rb") do |file|
   Parquet.each_row(file) do |row|
-    puts row.inspect
+    # Process row
   end
 end
 ```
 
-### Column-wise Iteration
+### Column-wise Reading (Analytical Access)
 
-The `each_column` method reads data in column-oriented batches, which is typically more efficient for analytical queries:
+Best for: Analytics, aggregations, when you need few columns from wide tables
 
 ```ruby
-require "parquet"
+# Process data in column batches
+Parquet.each_column("data.parquet", batch_size: 1000) do |batch|
+  # batch is a hash of column_name => array_of_values
+  ids = batch["id"]      # => [1, 2, 3, ..., 1000]
+  names = batch["name"]  # => ["Alice", "Bob", ...]
 
-# Process columns in batches of 1024 rows
-Parquet.each_column("data.parquet", batch_size: 1024) do |batch|
-  # With result_type: :hash (default)
-  puts batch.inspect
-  # {
-  #   "id" => [1, 2, ..., 1024],
-  #   "name" => ["name_1", "name_2", ..., "name_1024"]
-  # }
+  # Perform columnar operations
+  avg_id = ids.sum.to_f / ids.length
 end
 
-# Array output with specific columns
+# Array format for more control
 Parquet.each_column("data.parquet",
-                    columns: ["id", "name"],
                     result_type: :array,
-                    batch_size: 1024) do |batch|
-  puts batch.inspect
-  # [
-  #   [1, 2, ..., 1024],           # id column
-  #   ["name_1", "name_2", ...]    # name column
-  # ]
+                    columns: ["id", "name"]) do |batch|
+  # batch is an array of arrays
+  # [[1, 2, ...], ["Alice", "Bob", ...]]
 end
 ```
 
-### Arguments
+### File Metadata
 
-Both methods accept these common arguments:
-
-- `input`: Path string or IO-like object containing Parquet data
-- `result_type`: Output format (`:hash` or `:array`, defaults to `:hash`)
-- `columns`: Optional array of column names to read (improves performance)
-
-Additional arguments for `each_column`:
-
-- `batch_size`: Number of rows per batch (defaults to implementation-defined value)
-
-When no block is given, both methods return an Enumerator.
-
-### Writing Row-wise Data
-
-The `write_rows` method allows you to write data row by row:
+Inspect file structure without reading data:
 
 ```ruby
-require "parquet"
+metadata = Parquet.metadata("data.parquet")
 
-# Define the schema for your data
+puts metadata["num_rows"]           # Total row count
+puts metadata["created_by"]         # Writer identification
+puts metadata["schema"]["fields"]   # Column definitions
+puts metadata["row_groups"].size    # Number of row groups
+```
+
+## Writing Parquet Files
+
+### Row-wise Writing
+
+Best for: Streaming data, converting from other formats, memory-constrained environments
+
+```ruby
+# Basic schema definition
+schema = [
+  { "id" => "int64" },
+  { "name" => "string" },
+  { "active" => "boolean" },
+  { "balance" => "double" }
+]
+
+# Stream data from any enumerable
+rows = CSV.foreach("input.csv").map do |row|
+  [row[0].to_i, row[1], row[2] == "true", row[3].to_f]
+end
+
+Parquet.write_rows(rows,
+  schema: schema,
+  write_to: "output.parquet",
+  batch_size: 5000  # Rows per batch (default: 1000)
+)
+```
+
+### Column-wise Writing
+
+Best for: Pre-columnar data, better compression, higher performance
+
+```ruby
+# Prepare columnar data
+ids = [1, 2, 3, 4, 5]
+names = ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+scores = [95.5, 82.3, 88.7, 91.2, 79.8]
+
+# Create batches
+batches = [[
+  ids,    # First column
+  names,  # Second column
+  scores  # Third column
+]]
+
 schema = [
   { "id" => "int64" },
   { "name" => "string" },
   { "score" => "double" }
 ]
 
-# Create an enumerator that yields arrays of row values
-rows = [
-  [1, "Alice", 95.5],
-  [2, "Bob", 82.3],
-  [3, "Charlie", 88.7]
-].each
-
-# Write to a file
-Parquet.write_rows(rows, schema: schema, write_to: "data.parquet")
-
-# Write to an IO object
-File.open("data.parquet", "wb") do |file|
-  Parquet.write_rows(rows, schema: schema, write_to: file)
-end
-
-# Optionally specify batch size (default is 1000)
-Parquet.write_rows(rows,
+Parquet.write_columns(batches.each,
   schema: schema,
-  write_to: "data.parquet",
-  batch_size: 500
-)
-
-# Optionally specify memory threshold for flushing (default is 64MB)
-Parquet.write_rows(rows,
-  schema: schema,
-  write_to: "data.parquet",
-  flush_threshold: 32 * 1024 * 1024  # 32MB
-)
-
-# Optionally specify sample size for row size estimation (default is 100)
-Parquet.write_rows(rows,
-  schema: schema,
-  write_to: "data.parquet",
-  sample_size: 200  # Sample 200 rows for size estimation
+  write_to: "output.parquet",
+  compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd
 )
 ```
 
-### Writing Column-wise Data
+## Data Types
 
-The `write_columns` method provides a more efficient way to write data in column-oriented batches:
+### Basic Types
 
 ```ruby
-require "parquet"
-
-# Define the schema
 schema = [
-  { "id" => "int64" },
+  # Integers
+  { "tiny" => "int8" },         # -128 to 127
+  { "small" => "int16" },       # -32,768 to 32,767
+  { "medium" => "int32" },      # ±2 billion
+  { "large" => "int64" },       # ±9 quintillion
+
+  # Unsigned integers
+  { "ubyte" => "uint8" },       # 0 to 255
+  { "ushort" => "uint16" },     # 0 to 65,535
+  { "uint" => "uint32" },       # 0 to 4 billion
+  { "ulong" => "uint64" },      # 0 to 18 quintillion
+
+  # Floating point
+  { "price" => "float" },       # 32-bit precision
+  { "amount" => "double" },     # 64-bit precision
+
+  # Other basics
   { "name" => "string" },
-  { "score" => "double" }
+  { "data" => "binary" },
+  { "active" => "boolean" }
 ]
-
-# Create batches of column data
-batches = [
-  # First batch
-  [
-    [1, 2],          # id column
-    ["Alice", "Bob"], # name column
-    [95.5, 82.3]     # score column
-  ],
-  # Second batch
-  [
-    [3],             # id column
-    ["Charlie"],     # name column
-    [88.7]           # score column
-  ]
-]
-
-# Create an enumerator from the batches
-columns = batches.each
-
-# Write to a parquet file with default ZSTD compression
-Parquet.write_columns(columns, schema: schema, write_to: "data.parquet")
-
-# Write to a parquet file with specific compression and memory threshold
-Parquet.write_columns(columns,
-  schema: schema,
-  write_to: "data.parquet",
-  compression: "snappy",  # Supported: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
-  flush_threshold: 32 * 1024 * 1024  # 32MB
-)
-
-# Write to an IO object
-File.open("data.parquet", "wb") do |file|
-  Parquet.write_columns(columns, schema: schema, write_to: file)
-end
 ```
 
-The following data types are supported in the schema:
-
-- `int8`, `int16`, `int32`, `int64`
-- `uint8`, `uint16`, `uint32`, `uint64`
-- `float`, `double`
-- `string`
-- `binary`
-- `boolean`
-- `date32`
-- `timestamp_millis`, `timestamp_micros`, `timestamp_second`, `timestamp_nanos`
-- `time_millis`, `time_micros`
-
-### Timestamp Timezone Handling
-
-**CRITICAL PARQUET SPECIFICATION LIMITATION**: The Apache Parquet format specification only supports two types of timestamps:
-1. **UTC-normalized timestamps** (when ANY timezone is specified) - `isAdjustedToUTC = true`
-2. **Local/unzoned timestamps** (when NO timezone is specified) - `isAdjustedToUTC = false`
-
-This means that specific timezone offsets like "+09:00" or "America/New_York" CANNOT be preserved in Parquet files. This is not a limitation of this Ruby library, but of the Parquet format itself.
-
-**When Writing:**
-- If the schema specifies ANY timezone (whether it's "UTC", "+09:00", "America/New_York", etc.):
-  - Time values are converted to UTC before storing
-  - The file metadata sets `isAdjustedToUTC = true`
-  - The original timezone information is LOST
-- If the schema doesn't specify a timezone:
-  - Timestamps are stored as local/unzoned time (no conversion)
-  - The file metadata sets `isAdjustedToUTC = false`
-  - These represent "wall clock" times without timezone context
-
-**When Reading:**
-- If the Parquet file has `isAdjustedToUTC = true` (ANY timezone was specified during writing):
-  - Time objects are returned in UTC
-  - The original timezone (e.g., "+09:00") is NOT recoverable
-- If the file has `isAdjustedToUTC = false` (NO timezone was specified):
-  - Time objects are returned as local time in your system's timezone
-  - These are "wall clock" times without timezone information
+### Date and Time Types
 
 ```ruby
-# Preferred approach: use has_timezone to be explicit about UTC vs local storage
+schema = [
+  # Date (days since Unix epoch)
+  { "date" => "date32" },
+
+  # Timestamps (with different precisions)
+  { "created_sec" => "timestamp_second" },
+  { "created_ms" => "timestamp_millis" },    # Most common
+  { "created_us" => "timestamp_micros" },
+  { "created_ns" => "timestamp_nanos" },
+
+  # Time of day (without date)
+  { "time_ms" => "time_millis" },    # Milliseconds since midnight
+  { "time_us" => "time_micros" }     # Microseconds since midnight
+]
+```
+
+### Decimal Type (Financial Data)
+
+For exact decimal arithmetic (no floating-point errors):
+
+```ruby
+require "bigdecimal"
+
+schema = [
+  # Financial amounts with 2 decimal places
+  { "price" => "decimal", "precision" => 10, "scale" => 2 },  # Up to 99,999,999.99
+  { "balance" => "decimal", "precision" => 15, "scale" => 2 }, # Larger amounts
+
+  # High-precision calculations
+  { "rate" => "decimal", "precision" => 10, "scale" => 8 }     # 8 decimal places
+]
+
+# Use BigDecimal for exact values
+data = [[
+  BigDecimal("19.99"),
+  BigDecimal("1234567.89"),
+  BigDecimal("0.00000123")
+]]
+```
+
+## Complex Data Structures
+
+The library includes a powerful Schema DSL for defining nested data:
+
+### Using the Schema DSL
+
+```ruby
 schema = Parquet::Schema.define do
-  field :timestamp_utc, :timestamp_millis, has_timezone: true     # Stored as UTC (default)
-  field :timestamp_local, :timestamp_millis, has_timezone: false  # Stored as local/unzoned
-  field :timestamp_default, :timestamp_millis                     # Default: UTC storage
-end
+  # Simple fields
+  field :id, :int64, nullable: false      # Required field
+  field :name, :string                    # Optional by default
 
-# Legacy approach still supported (any timezone value means UTC storage)
-schema_legacy = Parquet::Schema.define do
-  field :timestamp_utc, :timestamp_millis, timezone: "UTC"        # Stored as UTC
-  field :timestamp_tokyo, :timestamp_millis, timezone: "+09:00"  # Also stored as UTC!
-  field :timestamp_local, :timestamp_millis                       # No timezone - local
-end
+  # Nested structure
+  field :address, :struct do
+    field :street, :string
+    field :city, :string
+    field :location, :struct do
+      field :lat, :double
+      field :lng, :double
+    end
+  end
 
-# Time values will be converted based on schema
-rows = [
-  [
-    Time.new(2024, 1, 1, 12, 0, 0, "+03:00"),  # Converted to UTC if has_timezone: true
-    Time.new(2024, 1, 1, 12, 0, 0, "-05:00"),  # Kept as local if has_timezone: false
-    Time.new(2024, 1, 1, 12, 0, 0)              # Kept as local (default)
+  # Lists
+  field :tags, :list, item: :string
+  field :scores, :list, item: :int32
+
+  # Maps (dictionaries)
+  field :metadata, :map, key: :string, value: :string
+
+  # Complex combinations
+  field :contacts, :list, item: :struct do
+    field :name, :string
+    field :email, :string
+    field :primary, :boolean
+  end
+end
+```
+
+### Writing Complex Data
+
+```ruby
+data = [[
+  1,                              # id
+  "Alice Johnson",                # name
+  {                               # address
+    "street" => "123 Main St",
+    "city" => "Springfield",
+    "location" => {
+      "lat" => 40.7128,
+      "lng" => -74.0060
+    }
+  },
+  ["ruby", "parquet", "data"],    # tags
+  [85, 92, 88],                   # scores
+  { "dept" => "Engineering" },    # metadata
+  [                               # contacts
+    { "name" => "Bob", "email" => "bob@example.com", "primary" => true },
+    { "name" => "Carol", "email" => "carol@example.com", "primary" => false }
   ]
-]
+]]
 
-Parquet.write_rows(rows.each, schema: schema, write_to: "timestamps.parquet")
+Parquet.write_rows(data.each, schema: schema, write_to: "complex.parquet")
+```
 
-# Reading back - timezone presence determines UTC vs local
-Parquet.each_row("timestamps.parquet") do |row|
-  # row["timestamp_utc"]     => Time object in UTC
-  # row["timestamp_local"]   => Time object in local timezone
-  # row["timestamp_default"] => Time object in local timezone
+## ⚠️ Important Limitations
+
+### Timezone Handling in Parquet
+
+**Critical**: The Parquet specification has a fundamental limitation with timezone storage:
+
+1. **UTC-normalized**: Any timestamp with timezone info (including "+09:00" or "America/New_York") is converted to UTC
+2. **Local/unzoned**: Timestamps without timezone info are stored as-is
+
+**The original timezone information is permanently lost.** This is not a limitation of this library but of the Parquet format itself.
+
+```ruby
+schema = Parquet::Schema.define do
+  # These BOTH store in UTC - timezone info is lost!
+  field :timestamp_utc, :timestamp_millis, timezone: "UTC"
+  field :timestamp_tokyo, :timestamp_millis, timezone: "+09:00"
+
+  # This stores as local time (no timezone)
+  field :timestamp_local, :timestamp_millis
 end
 
-# If you need to preserve specific timezone information, store it separately:
-schema_with_tz = Parquet::Schema.define do
-  field :timestamp, :timestamp_millis, has_timezone: true  # Store as UTC
-  field :original_timezone, :string                        # Store timezone as string
+# If you need timezone preservation, store it separately:
+schema = Parquet::Schema.define do
+  field :timestamp, :timestamp_millis, has_timezone: true  # UTC storage
+  field :original_tz, :string                              # "America/New_York"
 end
+```
+
+## Performance Tips
+
+1. **Use column-wise reading** when you need only a few columns from wide tables
+2. **Specify columns parameter** to avoid reading unnecessary data
+3. **Choose appropriate batch sizes**:
+   - Larger batches = better throughput but more memory
+   - Smaller batches = less memory but more overhead
+4. **Pre-sort data** by commonly filtered columns for better compression
+
+
+## Memory Management
+
+Control memory usage with flush thresholds:
+
+```ruby
+Parquet.write_rows(huge_dataset.each,
+  schema: schema,
+  write_to: "output.parquet",
+  batch_size: 1000,              # Rows before considering flush
+  flush_threshold: 32 * 1024**2  # Flush if batch exceeds 32MB
+)
 ```
 
 ## Architecture
 
-This library uses a modular, trait-based architecture that separates language-agnostic Parquet operations from Ruby-specific bindings:
+This gem uses a modular architecture:
 
-- **parquet-core**: Language-agnostic core functionality for Parquet file operations
-  - Pure Rust implementation without Ruby dependencies
-  - Traits for customizable I/O operations (`ChunkReader`) and value conversion (`ValueConverter`)
-  - Efficient Arrow-based reader and writer implementations
-  
-- **parquet-ruby-adapter**: Ruby-specific adapter layer
-  - Implements core traits for Ruby integration
-  - Handles Ruby value conversion through the `ValueConverter` trait
-  - Manages Ruby I/O objects through the `ChunkReader` trait
+- **parquet-core**: Language-agnostic Rust core for Parquet operations
+- **parquet-ruby-adapter**: Ruby-specific FFI adapter layer
+- **parquet gem**: High-level Ruby API
 
-- **parquet gem**: Ruby FFI bindings
-  - Provides high-level Ruby API
-  - Manages memory safety between Ruby and Rust
-  - Supports both file-based and IO-based operations
+Take a look at [ARCH.md](./ARCH.md)
 
-This architecture enables:
-- Clear separation of concerns between core functionality and language bindings
-- Easy testing of core logic without Ruby dependencies
-- Potential reuse of core functionality for other language bindings
-- Type-safe interfaces through Rust's trait system
+## Contributing
 
-### Schema DSL for Complex Data Types
+Bug reports and pull requests are welcome on GitHub at https://github.com/njaremko/parquet-ruby.
 
-In addition to the hash-based schema definition shown above, this library provides a more expressive DSL for defining complex schemas with nested structures:
+## License
 
-```ruby
-require "parquet"
-
-# Define a complex schema using the Schema DSL
-schema = Parquet::Schema.define do
-  field :id, :int64, nullable: false  # Required field
-  field :name, :string                # Optional field (nullable: true is default)
-
-  # Nested struct
-  field :address, :struct do
-    field :street, :string
-    field :city, :string
-    field :zip, :string
-    field :coordinates, :struct do
-      field :latitude, :double
-      field :longitude, :double
-    end
-  end
-
-  # List of primitives
-  field :scores, :list, item: :float
-
-  # List of structs
-  field :contacts, :list, item: :struct do
-    field :name, :string
-    field :phone, :string
-    field :primary, :boolean
-  end
-
-  # Map with string values
-  field :metadata, :map, key: :string, value: :string
-
-  # Map with struct values
-  field :properties, :map, key: :string, value: :struct do
-    field :count, :int32
-    field :description, :string
-  end
-
-  # Nested lists (list of lists of strings)
-  field :nested_lists, :list, item: :list do
-    field :item, :string  # REQUIRED: Inner item field MUST be named 'item' for nested lists
-  end
-
-  # Map of lists
-  field :map_of_lists, :map, key: :string, value: :list do
-    field :item, :int32  # REQUIRED: List items in maps MUST be named 'item'
-  end
-end
-
-### Nested Lists
-
-When working with nested lists (a list of lists), there are specific requirements:
-
-1. Using the Schema DSL:
-```ruby
-# A list of lists of strings
-field :nested_lists, :list, item: :list do
-  field :item, :string  # For nested lists, inner item MUST be named 'item'
-end
-```
-
-2. Using hash-based schema format:
-```ruby
-# A list of lists of integers
-{ "nested_numbers" => "list<list<int32>>" }
-```
-
-The data for nested lists is structured as an array of arrays:
-```ruby
-# Data for the nested_lists field
-[["a", "b"], ["c", "d", "e"], []]  # Last one is an empty inner list
-```
-
-### Decimal Data Type
-
-Parquet supports decimal numbers with configurable precision and scale, which is essential for financial applications where exact decimal representation is critical. The library seamlessly converts between Ruby's `BigDecimal` and Parquet's decimal type.
-
-#### Decimal Precision and Scale
-
-When working with decimal fields, you need to understand two key parameters:
-
-- **Precision**: The total number of significant digits (both before and after the decimal point)
-- **Scale**: The number of digits after the decimal point
-
-The rules for defining decimals are:
-
-```ruby
-# No precision/scale specified - uses maximum precision (38) with scale 0
-field :amount1, :decimal  # Equivalent to INTEGER with 38 digits
-
-# Only precision specified - scale defaults to 0
-field :amount2, :decimal, precision: 10  # 10 digits, no decimal places
-
-# Only scale specified - uses maximum precision (38)
-field :amount3, :decimal, scale: 2  # 38 digits with 2 decimal places
-
-# Both precision and scale specified
-field :amount4, :decimal, precision: 10, scale: 2  # 10 digits with 2 decimal places
-```
-
-#### Financial Data Example
-
-Here's a practical example for a financial application:
-
-```ruby
-require "parquet"
-require "bigdecimal"
-
-# Schema for financial transactions
-schema = Parquet::Schema.define do
-  field :transaction_id, :string, nullable: false
-  field :timestamp, :timestamp_millis, nullable: false
-  field :amount, :decimal, precision: 12, scale: 2  # Supports up to 10^10 with 2 decimal places
-  field :balance, :decimal, precision: 16, scale: 2  # Larger precision for running balances
-  field :currency, :string
-  field :exchange_rate, :decimal, precision: 10, scale: 6  # 6 decimal places for forex rates
-  field :fee, :decimal, precision: 8, scale: 2, nullable: true  # Optional fee
-  field :category, :string
-end
-
-# Sample financial data
-transactions = [
-  [
-    "T-12345",
-    Time.now,
-    BigDecimal("1256.99"),       # amount (directly using BigDecimal)
-    BigDecimal("10250.25"),      # balance
-    "USD",
-    BigDecimal("1.0"),           # exchange_rate
-    BigDecimal("2.50"),          # fee
-    "Groceries"
-  ],
-  [
-    "T-12346",
-    Time.now - 86400,            # yesterday
-    BigDecimal("-89.50"),        # negative amount for withdrawal
-    BigDecimal("10160.75"),      # updated balance
-    "USD",
-    BigDecimal("1.0"),           # exchange_rate
-    nil,                         # no fee
-    "Transportation"
-  ],
-  [
-    "T-12347",
-    Time.now - 172800,           # two days ago
-    BigDecimal("250.00"),        # amount
-    BigDecimal("10410.75"),      # balance
-    "EUR",                       # different currency
-    BigDecimal("1.05463"),       # exchange_rate
-    BigDecimal("1.75"),          # fee
-    "Entertainment"
-  ]
-]
-
-# Write financial data to Parquet file
-Parquet.write_rows(transactions.each, schema: schema, write_to: "financial_data.parquet")
-
-# Read back transactions
-Parquet.each_row("financial_data.parquet") do |transaction|
-  # Access decimal fields as BigDecimal objects
-  puts "Transaction: #{transaction['transaction_id']}"
-  puts "  Amount: #{transaction['currency']} #{transaction['amount']}"
-  puts "  Balance: $#{transaction['balance']}"
-  puts "  Fee: #{transaction['fee'] || 'No fee'}"
-
-  # You can perform precise decimal calculations
-  if transaction['currency'] != 'USD'
-    usd_amount = transaction['amount'] * transaction['exchange_rate']
-    puts "  USD Equivalent: $#{usd_amount.round(2)}"
-  end
-end
-```
-
-#### Decimal Type Storage Considerations
-
-Parquet optimizes storage based on the precision:
-- For precision ≤ 9: Uses 4-byte INT32
-- For precision ≤ 18: Uses 8-byte INT64
-- For precision ≤ 38: Uses 16-byte BYTE_ARRAY
-
-Choose appropriate precision and scale for your data to optimize storage while ensuring adequate range:
-
-```ruby
-# Banking examples
-field :account_balance, :decimal, precision: 16, scale: 2   # Up to 14 digits before decimal point
-field :interest_rate, :decimal, precision: 8, scale: 6      # Rate with 6 decimal places (e.g., 0.015625)
-
-# E-commerce examples
-field :product_price, :decimal, precision: 10, scale: 2     # Product price
-field :shipping_weight, :decimal, precision: 6, scale: 3    # Weight in kg with 3 decimal places
-
-# Analytics examples
-field :conversion_rate, :decimal, precision: 5, scale: 4    # Rate like 0.0123
-field :daily_revenue, :decimal, precision: 14, scale: 2     # Daily revenue with 2 decimal places
-```
-
-### Sample Data with Nested Structures
-
-Here's an example showing how to use the schema defined earlier with sample data:
-
-```ruby
-# Sample data with nested structures
-data = [
-  [
-    1,                            # id
-    "John Doe",                   # name
-    {                             # address (struct)
-      "street" => "123 Main St",
-      "city" => "Springfield",
-      "zip" => "12345",
-      "coordinates" => {
-        "latitude" => 37.7749,
-        "longitude" => -122.4194
-      }
-    },
-    [85.5, 92.0, 78.5],          # scores (list of floats)
-    [                             # contacts (list of structs)
-      { "name" => "Contact 1", "phone" => "555-1234", "primary" => true },
-      { "name" => "Contact 2", "phone" => "555-5678", "primary" => false }
-    ],
-    { "created" => "2023-01-01", "status" => "active" },  # metadata (map)
-    {                             # properties (map of structs)
-      "feature1" => { "count" => 5, "description" => "Main feature" },
-      "feature2" => { "count" => 3, "description" => "Secondary feature" }
-    },
-    [["a", "b"], ["c", "d", "e"]],  # nested_lists (a list of lists of strings)
-    {                                # map_of_lists
-      "group1" => [1, 2, 3],
-      "group2" => [4, 5, 6]
-    }
-  ]
-]
-
-# Write to a parquet file using the schema
-Parquet.write_rows(data.each, schema: schema, write_to: "complex_data.parquet")
-
-# Read back the data
-Parquet.each_row("complex_data.parquet") do |row|
-  puts row.inspect
-end
-```
-
-The Schema DSL supports:
-
-- **Primitive types**: All standard Parquet types (`int32`, `string`, etc.)
-- **Complex types**: Structs, lists, and maps with arbitrary nesting
-- **Nullability control**: Specify which fields can contain null values with `nullable: false/true`
-- **List item nullability**: Control whether list items can be null with `item_nullable: false/true`
-- **Map key/value nullability**: Control whether map keys or values can be null with `value_nullable: false/true`
-
-Note: When using List and Map types, you need to provide at least:
-- For lists: The `item:` parameter specifying the item type
-- For maps: Both `key:` and `value:` parameters specifying key and value types
+The gem is available as open source under the terms of the MIT License.

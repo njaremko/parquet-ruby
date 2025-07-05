@@ -1,588 +1,701 @@
-# Parquet Ruby Gem Architecture Documentation
+# Parquet Ruby Gem Architecture Guide
 
-This document provides a comprehensive overview of the Parquet Ruby gem's architecture, including detailed diagrams and descriptions of how data flows through the system.
+Welcome to the architecture documentation for the Parquet Ruby gem! This guide will help you understand how the library works internally and where to find important components.
+
 
 ## Table of Contents
-1. [Architecture Overview](#architecture-overview)
-2. [Component Architecture](#component-architecture)
-3. [Data Flow Diagrams](#data-flow-diagrams)
-4. [Type System and Conversions](#type-system-and-conversions)
-5. [Memory Management](#memory-management)
-6. [Crate Descriptions](#crate-descriptions)
-7. [Key Design Patterns](#key-design-patterns)
 
-## Architecture Overview
+1. [Quick Start for Developers](#quick-start-for-developers)
+2. [High-Level Architecture](#high-level-architecture)
+3. [The Three Core Components](#the-three-core-components)
+4. [How Data Flows Through the System](#how-data-flows-through-the-system)
+5. [Ruby and Parquet Type Conversions](#ruby-and-parquet-type-conversions)
+6. [Important Implementation Details](#important-implementation-details)
+7. [Deep Dive: Module Reference](#deep-dive-module-reference)
+8. [Development Guide](#development-guide)
 
-The Parquet Ruby gem provides high-performance Parquet file reading and writing capabilities by wrapping the official Apache parquet-rs Rust crate through FFI. The architecture consists of three main layers:
+---
 
-### Timestamp and Timezone Handling
+## Quick Start for Developers
 
-**PARQUET SPECIFICATION LIMITATION**: The Apache Parquet format specification defines only two types of timestamp storage:
-1. **UTC-normalized timestamps** (`isAdjustedToUTC = true`) - When ANY timezone is present in the schema
-2. **Local/unzoned timestamps** (`isAdjustedToUTC = false`) - When NO timezone is present in the schema
+If you're looking to contribute or understand specific parts of the codebase, here's where to find things:
 
-This means Parquet CANNOT preserve specific timezone information like "+09:00" or "America/New_York". This is defined in the Parquet specification, not a limitation of this Ruby implementation.
+### 📍 Key Files and Their Purpose
 
-#### When Writing
-- Schema WITH timezone (e.g., "UTC", "+09:00", "America/New_York"):
-  - ALL timestamps are converted to UTC
-  - Stored with `isAdjustedToUTC = true`
-  - Original timezone offset is LOST (e.g., "+09:00" becomes "UTC")
-- Schema WITHOUT timezone:
-  - Timestamps stored as local/unzoned time (no conversion)
-  - Stored with `isAdjustedToUTC = false`
-  - Represents "wall clock" time without timezone context
+| What you're looking for | Where to find it | File/Module |
+|------------------------|------------------|-------------|
+| Ruby API entry points | Ruby layer | `lib/parquet.rb` |
+| Schema DSL | Ruby layer | `lib/parquet/schema.rb` |
+| FFI bindings | Rust FFI layer | `ext/parquet/src/adapter_ffi.rs` |
+| Core reading logic | Core library | `parquet-core/src/reader.rs` |
+| Core writing logic | Core library | `parquet-core/src/writer.rs` |
+| Ruby↔Parquet conversions | Adapter layer | `parquet-ruby-adapter/src/converter.rs` |
+| Type definitions | Core library | `parquet-core/src/types.rs` |
+| Memory management | Various | `batch_manager.rs`, `allocator.rs` |
 
-#### When Reading
-- Files with `isAdjustedToUTC = true` (had ANY timezone when written):
-  - Time objects returned in UTC
-  - Original timezone is NOT recoverable (was lost during write)
-- Files with `isAdjustedToUTC = false` (had NO timezone):
-  - Time objects returned as local time in system timezone
-  - These are "wall clock" times without timezone information
-- Date32 fields are returned as Ruby Date objects (timezone-agnostic)
+### 🔧 Common Development Tasks
 
-**Workaround**: If you need to preserve timezone information, store it separately as a string column alongside the timestamp.
+**Want to add a new Ruby API method?**
+1. Add the Ruby method in `lib/parquet.rb`
+2. Create FFI wrapper in `ext/parquet/src/adapter_ffi.rs`
+3. Implement logic in appropriate `parquet-ruby-adapter` module
+
+**Need to support a new data type?**
+1. Add to `ParquetValue` enum in `parquet-core/src/types.rs`
+2. Update conversions in `parquet-ruby-adapter/src/converter.rs`
+3. Add Arrow conversions in `parquet-core/src/arrow_conversion.rs`
+
+**Debugging memory issues?**
+- Check `BatchSizeManager` in `parquet-ruby-adapter/src/batch_manager.rs`
+- Review platform allocators in `ext/parquet/src/allocator.rs`
+- Look at string caching in `parquet-ruby-adapter/src/string_cache.rs`
+
+**Understanding the flow?**
+- Start at `lib/parquet.rb` to see the Ruby API
+- Follow method calls into `adapter_ffi.rs`
+- Trace through to the relevant module in `parquet-ruby-adapter`
+- Core logic lives in `parquet-core`
+
+---
+
+## High-Level Architecture
+
+The Parquet Ruby gem is built as a three-layer architecture that cleanly separates concerns:
+
+### The Three Layers
+
+1. **Ruby Layer** - What Ruby developers interact with
+   - Pure Ruby code providing the public API
+   - Schema DSL for defining table structures
+   - Handles Ruby-specific concerns
+
+2. **FFI Bridge Layer** - The translation layer
+   - Converts between Ruby and Rust types
+   - Manages the Ruby GIL (Global Interpreter Lock)
+   - Handles memory safety between languages
+
+3. **Core Rust Layer** - The heavy lifting
+   - High-performance Parquet reading/writing
+   - Integration with Apache Arrow for columnar processing
+   - Memory-efficient streaming operations
+
+### Visual Overview
 
 ```mermaid
 graph TB
+    subgraph "Your Ruby Code"
+        USER[Your Ruby Application]
+    end
+
     subgraph "Ruby Layer"
         A[parquet.rb<br/>Main Entry Point]
         B[schema.rb<br/>Schema DSL]
-        C[Ruby API<br/>Public Methods]
     end
 
     subgraph "FFI Bridge Layer"
         D[Magnus FFI<br/>Ruby-Rust Bridge]
-        E[adapter_ffi.rs<br/>FFI Handlers]
+        E[adapter_ffi.rs<br/>Argument Parsing]
         F[Type Converters<br/>Ruby ↔ Parquet]
     end
 
     subgraph "Core Rust Layer"
         G[parquet-core<br/>Core Logic]
-        H[parquet-ruby-adapter<br/>Ruby Adapters]
-        I[Apache Arrow<br/>Columnar Processing]
+        H[parquet-ruby-adapter<br/>Ruby-specific Logic]
+        I[Apache Arrow<br/>& parquet-rs]
     end
 
+    subgraph "Storage"
+        FILE[Parquet Files]
+    end
+
+    USER --> A
+    USER --> B
     A --> D
     B --> D
-    C --> D
     D --> E
     E --> F
     F --> G
     F --> H
     G --> I
     H --> I
+    I --> FILE
 
+    style USER fill:#e1f5e1,stroke:#333,stroke-width:2px
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style B fill:#f9f,stroke:#333,stroke-width:2px
-    style C fill:#f9f,stroke:#333,stroke-width:2px
     style D fill:#9ff,stroke:#333,stroke-width:2px
     style E fill:#9ff,stroke:#333,stroke-width:2px
     style F fill:#9ff,stroke:#333,stroke-width:2px
     style G fill:#ff9,stroke:#333,stroke-width:2px
     style H fill:#ff9,stroke:#333,stroke-width:2px
     style I fill:#ff9,stroke:#333,stroke-width:2px
+    style FILE fill:#ccc,stroke:#333,stroke-width:2px
 ```
 
-## Component Architecture
+### Why This Architecture?
 
-### Workspace Structure
+This layered approach provides several benefits:
 
-The project uses a Rust workspace with three crates:
+- **Performance**: Core logic in Rust for maximum speed
+- **Safety**: FFI bridge carefully manages memory between languages
+- **Flexibility**: Ruby layer provides idiomatic API
+- **Maintainability**: Clear separation of concerns
+- **Reusability**: Core library could support other language bindings
+
+---
+
+## The Three Core Components
+
+The codebase is organized as a Rust workspace with three distinct crates, each with a specific purpose:
+
+### 1. ext/parquet - The FFI Extension
+
+**Purpose**: This is the glue between Ruby and Rust.
 
 ```mermaid
 graph LR
-    subgraph "Rust Workspace"
-        A[ext/parquet<br/>FFI Extension]
-        B[parquet-ruby-adapter<br/>Ruby Integration]
-        C[parquet-core<br/>Core Library]
-    end
+    Ruby[Ruby Code] --> FFI[ext/parquet]
+    FFI --> Rust[Rust Libraries]
 
-    A --> B
-    B --> C
-
-    style A fill:#9cf,stroke:#333,stroke-width:2px
-    style B fill:#fc9,stroke:#333,stroke-width:2px
-    style C fill:#cfc,stroke:#333,stroke-width:2px
+    style Ruby fill:#f9f,stroke:#333,stroke-width:2px
+    style FFI fill:#9cf,stroke:#333,stroke-width:2px
+    style Rust fill:#ff9,stroke:#333,stroke-width:2px
 ```
 
-### Module Hierarchy
+**Key responsibilities:**
+- Registers Ruby methods using Magnus (Ruby-Rust bridge)
+- Parses Ruby arguments and converts them to Rust types
+- Handles errors and converts them to Ruby exceptions
+- Platform-specific memory allocator configuration
+
+**Important files:**
+- `lib.rs` - Entry point, registers Ruby module
+- `adapter_ffi.rs` - Thin wrappers for each Ruby method
+- `allocator.rs` - Memory allocator setup (jemalloc on Linux, mimalloc elsewhere)
+
+### 2. parquet-ruby-adapter - Ruby-Specific Logic
+
+**Purpose**: Handles all Ruby-specific concerns that the core library shouldn't know about.
+
+**Key modules:**
+- `converter.rs` - Converts Ruby values to/from Parquet values
+- `io.rs` - Wraps Ruby IO objects for Rust to use
+- `schema.rs` - Parses Ruby schema definitions
+- `batch_manager.rs` - Smart batching for memory efficiency
+- `string_cache.rs` - Interns strings in Ruby VM for memory savings
+
+### 3. parquet-core - The Engine
+
+**Purpose**: Pure Rust implementation of Parquet operations. Language-agnostic.
+
+**Core components:**
+- `reader.rs` - High-performance file reading
+- `writer.rs` - Efficient file writing with compression
+- `types.rs` - Comprehensive type system (`ParquetValue` enum)
+- `arrow_conversion.rs` - Converts between Arrow arrays and Parquet values
+- `schema.rs` - Type-safe schema representation
+
+### How They Work Together
 
 ```mermaid
 graph TD
-    subgraph "Ruby Module Structure"
-        A[Parquet Module]
-        A --> B[Schema Class]
-        A --> C[SchemaBuilder<br/>Internal]
-        A --> D[VERSION Constant]
-        A --> E[Native Methods]
-
-        E --> F[metadata]
-        E --> G[each_row]
-        E --> H[each_column]
-        E --> I[write_rows]
-        E --> J[write_columns]
+    subgraph "Example: Reading a Parquet file"
+        A[Ruby: Parquet.each_row] --> B[FFI: parse arguments]
+        B --> C[Adapter: create reader]
+        C --> D[Core: read batches]
+        D --> E[Core: convert to ParquetValue]
+        E --> F[Adapter: convert to Ruby]
+        F --> G[Ruby: yield rows]
     end
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#fcf,stroke:#333,stroke-width:2px
-    style C fill:#fcf,stroke:#333,stroke-width:2px
-    style E fill:#cff,stroke:#333,stroke-width:2px
-```
-
-## Data Flow Diagrams
-
-### Read Operation Flow
-
-#### Row-wise Reading
-
-```mermaid
-sequenceDiagram
-    participant Ruby as Ruby Code
-    participant FFI as FFI Bridge
-    participant Core as Core Reader
-    participant Arrow as Apache Arrow
-    participant File as Parquet File
-
-    Ruby->>FFI: Parquet.each_row(file, options)
-    FFI->>FFI: Parse arguments
-    FFI->>Core: Create Reader
-    Core->>Arrow: Build RecordBatchReader
-
-    loop For each batch
-        Arrow->>File: Read batch (1024 rows)
-        File-->>Arrow: RecordBatch data
-        Arrow-->>Core: Arrow arrays
-        Core->>Core: Extract row values
-        Core-->>FFI: Vec<ParquetValue>
-        FFI->>FFI: Convert to Ruby
-        FFI-->>Ruby: Yield Ruby Hash/Array
-    end
-```
-
-#### Column-wise Reading
-
-```mermaid
-sequenceDiagram
-    participant Ruby as Ruby Code
-    participant FFI as FFI Bridge
-    participant Core as Core Reader
-    participant Arrow as Apache Arrow
-    participant File as Parquet File
-
-    Ruby->>FFI: Parquet.each_column(file, batch_size: 1000)
-    FFI->>FFI: Parse arguments
-    FFI->>Core: Create Reader
-    Core->>Arrow: Build RecordBatchReader
-
-    loop For each batch
-        Arrow->>File: Read columnar batch
-        File-->>Arrow: RecordBatch data
-        Arrow-->>Core: Column arrays
-        Core->>Core: Process columns
-        Core-->>FFI: ColumnBatch
-        FFI->>FFI: Convert arrays to Ruby
-        FFI-->>Ruby: Yield column arrays
-    end
-```
-
-### Write Operation Flow
-
-#### Row-wise Writing
-
-```mermaid
-flowchart TD
-    A[Ruby: write_rows] --> B[Parse Schema]
-    B --> C[Create BatchSizeManager]
-    C --> D[Initialize Writer]
-
-    D --> E{For each row}
-    E --> F[Convert to ParquetValue]
-    F --> G[Add to batch]
-    G --> H{Batch full?}
-
-    H -->|Yes| I[Write batch to Arrow]
-    H -->|No| J{Memory threshold?}
-
-    J -->|Yes| I
-    J -->|No| E
-
-    I --> K[Compress & Write]
-    K --> E
-
-    E -->|Done| L[Flush remaining]
-    L --> M[Close file]
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style M fill:#9f9,stroke:#333,stroke-width:2px
-```
-
-#### Dynamic Batch Size Management (Reservoir Sampling)
-
-```mermaid
-graph TD
-    A[Start Writing] --> B[Sample First 100 Rows<br/>Using Reservoir Sampling]
-    B --> C[Calculate Average Row Size]
-    C --> D[Set Initial Batch Size<br/>target_memory_usage / avg_row_size]
-
-    D --> E{Writing Rows}
-    E --> F[Track Recent Row Sizes<br/>in samples array]
-    F --> G{Samples >= 10?}
-
-    G -->|Yes| H[Recalculate Average<br/>from Recent Samples]
-    G -->|No| I[Continue with Current Size]
-
-    H --> J[Adjust Batch Size<br/>min(10, calculated_size)]
-    J --> I
-    I --> K{Memory Threshold?<br/>batch_memory_usage > threshold}
-
-    K -->|Yes| L[Flush Batch]
-    K -->|No| E
-
-    L --> E
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style L fill:#ff9,stroke:#333,stroke-width:2px
-```
-
-## Type System and Conversions
-
-### Type Conversion Flow
-
-```mermaid
-graph LR
-    subgraph "Ruby to Parquet"
-        A1[Ruby Integer] --> B1[Int8-64/UInt8-64]
-        A2[Ruby Float] --> B2[Float32/Float64]
-        A3[Ruby String] --> B3[String/Binary/UUID]
-        A4[Ruby Time] --> B4[Timestamp<br/>Second/Millis/Micros/Nanos]
-        A5[Ruby BigDecimal] --> B5[Decimal128/256]
-        A6[Ruby Array] --> B6[List]
-        A7[Ruby Hash] --> B7[Map/Record]
-        A8[Ruby Date] --> B8[Date32/Date64]
-        A9[NilClass] --> B9[Null]
-    end
-
-    subgraph "Parquet to Ruby"
-        C1[Int8-64/UInt8-64] --> D1[Ruby Integer]
-        C2[Float32/Float64] --> D2[Ruby Float]
-        C3[String/Binary] --> D3[Ruby String]
-        C4[Timestamp] --> D4[Ruby Time]
-        C5[Decimal128/256] --> D5[Ruby BigDecimal]
-        C6[List] --> D6[Ruby Array]
-        C7[Map/Record] --> D7[Ruby Hash]
-        C8[Date32/Date64] --> D8[Ruby Date]
-        C9[Float16] --> D9[Ruby Float<br/>(stored as f32)]
-    end
-```
-
-### ParquetValue Enum
-
-The core type system uses a comprehensive enum with all Parquet types:
-- Numeric: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64
-- Float: Float16 (as f32), Float32, Float64 (using OrderedFloat)
-- Temporal: Date32, Date64, TimeMillis, TimeMicros, TimestampSecond/Millis/Micros/Nanos
-- Decimal: Decimal128 (i128), Decimal256 (BigInt)
-- Complex: List, Map, Record
-- Basic: Boolean, String, Bytes, Null
-
-### Schema Definition System
-
-```mermaid
-graph TD
-    A[Schema Definition] --> B{Format?}
-
-    B -->|DSL| C[Schema.define block]
-    B -->|Hash| D[Hash format]
-    B -->|Array| E[Legacy array format]
-
-    C --> F[SchemaBuilder]
-    D --> G[Direct parsing]
-    E --> H[Legacy parser]
-
-    F --> I[Parquet Schema]
-    G --> I
-    H --> I
-
-    I --> J[Arrow Schema]
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style I fill:#9f9,stroke:#333,stroke-width:2px
-    style J fill:#9ff,stroke:#333,stroke-width:2px
-```
-
-## Memory Management
-
-### Memory Architecture
-
-```mermaid
-graph TD
-    subgraph "Platform-specific Allocators"
-        A[Linux: jemalloc<br/>with disable_initial_exec_tls]
-        B[macOS/Unix: mimalloc]
-        C[Windows: system allocator]
-    end
-
-    subgraph "Memory Management Features"
-        D[BatchSizeManager<br/>Reservoir sampling]
-        E[StringCache<br/>Statistics tracking]
-        F[Streaming IO<br/>Low memory usage]
-    end
-
-    subgraph "Safety Features"
-        G[Magnus GC Integration]
-        H[Rust Ownership]
-        I[Arc/Mutex for threads]
-    end
-
-    A --> D
-    B --> D
-    C --> D
-
-    D --> G
-    E --> G
-    F --> H
-
-    style D fill:#9ff,stroke:#333,stroke-width:2px
-    style G fill:#9f9,stroke:#333,stroke-width:2px
-    style H fill:#9f9,stroke:#333,stroke-width:2px
-```
-
-### IO Handling Architecture
-
-```mermaid
-graph TD
-    A[IO Input] --> B{Type?}
-
-    B -->|File Path| C[Direct File Access]
-    B -->|Ruby String| D[In-memory Buffer]
-    B -->|IO Object| E[RubyIOReader]
-
-    E --> F{Seekable?}
-    F -->|Yes| G[Direct wrapper]
-    F -->|No| H[Copy to temp file]
-
-    C --> I[CloneableChunkReader]
-    D --> I
-    G --> I
-    H --> I
-
-    I --> J[Thread-safe wrapper]
-    J --> K[Parquet Reader]
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style I fill:#9ff,stroke:#333,stroke-width:2px
-    style K fill:#9f9,stroke:#333,stroke-width:2px
-```
-
-## Crate Descriptions
-
-### 1. ext/parquet - Main FFI Extension
-
-**Purpose**: Provides the FFI bridge between Ruby and Rust, exposing Parquet functionality to Ruby code.
-
-**Key Components**:
-- **lib.rs**: Entry point that registers Ruby module functions using Magnus
-- **adapter_ffi.rs**: Thin FFI wrapper that parses Ruby arguments and delegates all logic to parquet-ruby-adapter modules
-- **allocator.rs**: Platform-specific memory allocator configuration
-
-**Responsibilities**:
-- Ruby method registration and binding
-- Argument parsing using Magnus scan_args
-- Delegating all business logic to parquet-ruby-adapter modules
-- Error type conversion from Rust to Ruby exceptions
-
-**Key Features**:
-- Minimal FFI surface area - contains only thin wrapper functions
-- Complete separation between FFI layer and business logic
-- All implementation details moved to parquet-ruby-adapter
-- Clean, maintainable code structure
-
-### 2. parquet-core - Core Library
-
-**Purpose**: Language-agnostic core Parquet functionality that can be reused across different language bindings.
-
-**Key Components**:
-- **Reader**: High-performance file reader with row/column iteration
-- **Writer**: Efficient file writer supporting various compression formats with dynamic batch sizing
-- **Schema**: Type-safe schema representation with builder API
-- **ParquetValue**: Comprehensive enum representing all Parquet data types
-- **ParquetError**: Comprehensive error handling with context support
-- **arrow_conversion**: Bidirectional conversion between Arrow arrays and ParquetValue
-- **test_utils.rs**: Testing utilities (test builds only)
-
-**arrow_conversion Module**:
-- **Purpose**: Consolidates all type conversion logic between Arrow arrays and ParquetValues
-- **Key Functions**:
-  - `arrow_to_parquet_value`: Converts a single value from an Arrow array to ParquetValue
-  - `parquet_values_to_arrow_array`: Converts a vector of ParquetValues to Arrow arrays
-  - `append_parquet_value_to_builder`: Incremental building for complex scenarios
-- **Features**:
-  - Handles all primitive types with automatic upcasting (e.g., Int8->Int32)
-  - Complex type support (structs, lists, maps)
-  - Proper null bitmap handling for collections
-  - Decimal256 conversion using BigInt
-  - Efficient batch conversions
-- **Benefits**:
-  - Eliminates 900+ lines of code duplication between reader and writer
-  - Single source of truth for type conversions
-  - Easier to maintain and test
-  - Consistent behavior across read/write operations
-
-**Traits**:
-- `SchemaInspector`: Provides methods for examining and querying schemas
-
-**Note**: The crate uses concrete types rather than abstract I/O traits:
-- Reader uses `parquet::file::reader::ChunkReader` directly
-- Writer uses `std::io::Write + Send` directly
-- Schema building is implemented directly in language adapters
-
-**Design Philosophy**:
-- Zero-cost abstractions using Rust's trait system
-- Separation of concerns between core logic and language bindings
-- Efficient memory usage with streaming operations
-- Type safety enforced at compile time
-- DRY principle - no duplicate conversion logic
-
-### 3. parquet-ruby-adapter - Ruby Integration
-
-**Purpose**: Bridges Ruby-specific functionality with the core library, implementing Ruby-specific type conversions and IO handling.
-
-**Module Structure**:
-
-**converter.rs - RubyValueConverter**:
-- Handles Ruby to Parquet value conversions
-- Complex type support (BigDecimal, Time, DateTime, UUID)
-- Optional string caching for statistics
-- Schema-guided type conversions
-- Note: Not thread-safe due to Ruby's GIL requirements
-
-**io.rs - RubyIOReader/Writer**:
-- Implements Rust's Read/Write/Seek traits for Ruby objects
-- Thread-safe wrappers with GIL management
-- Support for non-seekable IO through temporary files
-
-**chunk_reader.rs - CloneableChunkReader**:
-- Enables parallel reading from various sources
-- Critical for Parquet's multi-threaded architecture
-- Abstracts over files and IO objects
-
-**schema.rs - Schema Conversion**:
-- Converts Ruby schema formats to Parquet schemas
-- Supports multiple formats (DSL, hash, legacy array)
-- Handles nested types (structs, lists, maps)
-- Complex type parsing (e.g., "list<string>", "decimal(5,2)")
-- Note: Cannot use SchemaBuilder trait due to Ruby Value not being Send/Sync
-
-**string_cache.rs - StringCache**:
-- Interns strings in Ruby VM using RString::to_interned_str()
-- Thread-safe global cache with Arc<Mutex<HashMap>>
-- Tracks cache hits/misses for performance statistics
-- Returns interned strings as &'static str valid for Ruby VM lifetime
-- Note: Primary benefit is Ruby VM memory savings, not Rust-side savings
-
-**logger.rs - RubyLogger**:
-- Integration with Ruby's logging system
-- Validates logger methods and provides lazy evaluation
-
-**batch_manager.rs - BatchSizeManager**:
-- Dynamic batch size management using reservoir sampling
-- Samples first 100 rows to estimate average size
-- Adjusts batch size to stay within memory threshold (80% target)
-- Minimum batch size of 10 rows
-
-**metadata.rs - Metadata Handling**:
-- RubyParquetMetaData wrapper for IntoValue trait
-- parse_metadata function for reading file metadata
-- Converts Parquet metadata to Ruby-friendly format
-
-**types.rs - Type Definitions**:
-- ParserResultType enum (Hash/Array output formats)
-- WriterOutput enum for file/tempfile handling
-- Argument structs (ParquetWriteArgs, RowEnumeratorArgs, ColumnEnumeratorArgs)
-- Common type definitions used across modules
-
-**utils.rs - Utility Functions**:
-- Argument parsing helpers (parse_parquet_write_args)
-- Memory estimation functions (estimate_parquet_value_size, estimate_row_size)
-- Compression parsing (parse_compression)
-- Enumerator creation helpers
-
-**reader.rs - Reading Operations**:
-- each_row function for row-wise iteration
-- each_column function for column-wise iteration
-- Handles file and IO object inputs
-- Manages streaming readers and chunk readers
-- Supports projection (column selection)
-
-**writer.rs - Writing Operations**:
-- create_writer function for file/IO initialization
-- finalize_writer function for closing and cleanup
-- write_rows function for row-oriented data writing
-- write_columns function for column-oriented data writing
-- Handles temporary file creation for IO objects
-- Manages batch writing and memory thresholds
-
-## Key Design Patterns
-
-### 1. FFI Bridge Pattern
-
-```mermaid
-graph LR
-    A[Ruby Method Call] --> B[Magnus Wrapper]
-    B --> C[Rust Function]
-    C --> D[Core Logic]
-    D --> E[Result]
-    E --> F[Magnus Conversion]
-    F --> G[Ruby Return Value]
 
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style G fill:#f9f,stroke:#333,stroke-width:2px
+```
+
+## How Data Flows Through the System
+
+Understanding how data moves through the library helps when debugging or adding features.
+
+### Reading Parquet Files
+
+The library supports two reading modes:
+
+#### 1. Row-by-Row Reading (`each_row`)
+
+Best for: Processing records individually, data transformations
+
+```ruby
+Parquet.each_row("data.parquet") do |row|
+  # row is a Hash with column names as keys
+  puts row["name"]
+end
+```
+
+**What happens internally:**
+
+```mermaid
+sequenceDiagram
+    participant App as Your Ruby App
+    participant Gem as Parquet Gem
+    participant Arrow as Arrow/Parquet-rs
+    participant File as Parquet File
+
+    App->>Gem: each_row("data.parquet")
+    Gem->>Arrow: Create reader
+
+    loop For each batch (1024 rows)
+        Arrow->>File: Read columnar batch
+        File-->>Arrow: Compressed data
+        Arrow-->>Gem: Arrow arrays
+        Gem->>Gem: Convert columns to rows
+        loop For each row in batch
+            Gem-->>App: Yield Ruby Hash
+        end
+    end
+```
+
+**Key points:**
+- Reads data in batches of 1024 rows for efficiency
+- Converts columnar data to row format on-the-fly
+- Memory efficient - only one batch in memory at a time
+
+#### 2. Column-by-Column Reading (`each_column`)
+
+Best for: Analytics, aggregations, columnar operations
+
+```ruby
+Parquet.each_column("data.parquet", batch_size: 5000) do |columns|
+  # columns is a Hash with column names as keys
+  # Each value is an array of values for that batch
+  sum = columns["amount"].sum
+end
+```
+
+**What happens internally:**
+- Reads data in its native columnar format
+- More efficient for analytical workloads
+- Configurable batch size (default 1000 rows)
+
+### Writing Parquet Files
+
+The library supports both row-oriented and column-oriented writing:
+
+#### Row-Oriented Writing (`write_rows`)
+
+Most common approach for typical Ruby applications:
+
+```ruby
+schema = {
+  "name" => {type: "string"},
+  "age" => {type: "int32"},
+  "active" => {type: "boolean"}
+}
+
+data = [
+  {"name" => "Alice", "age" => 30, "active" => true},
+  {"name" => "Bob", "age" => 25, "active" => false}
+]
+
+Parquet.write_rows("output.parquet", schema, data)
+```
+
+**Smart Memory Management:**
+
+The writer uses an intelligent batching system to prevent memory issues:
+
+```mermaid
+flowchart LR
+    A[Your Data] --> B[BatchSizeManager]
+    B --> C{Batch Full?}
+    C -->|No| D[Add to batch]
+    C -->|Yes| E[Write to file]
+    E --> F[Clear batch]
+    F --> D
+
     style B fill:#9ff,stroke:#333,stroke-width:2px
-    style F fill:#9ff,stroke:#333,stroke-width:2px
-```
-
-### 2. Iterator Pattern
-
-```mermaid
-stateDiagram-v2
-    [*] --> Created: new()
-    Created --> Ready: initialize
-    Ready --> HasData: next()
-    HasData --> Ready: yield item
-    HasData --> NeedsBatch: batch empty
-    NeedsBatch --> HasData: fetch batch
-    NeedsBatch --> Done: no more data
-    Done --> [*]
-```
-
-```mermaid
-graph TD
-    A[Ruby Value] --> B{Schema Check}
-    B -->|Valid| C[Type Conversion]
-    B -->|Invalid| D[Type Error]
-    C --> E[Parquet Value]
-    D --> F[Ruby Exception]
-
-    style D fill:#f99,stroke:#333,stroke-width:2px
-    style F fill:#f99,stroke:#333,stroke-width:2px
     style E fill:#9f9,stroke:#333,stroke-width:2px
 ```
 
-```mermaid
-graph TD
-    A[Rust Error] --> B{Error Type}
-    B -->|IO Error| C[Ruby IOError]
-    B -->|Type Error| D[Ruby TypeError]
-    B -->|Encoding Error| E[Ruby EncodingError]
-    B -->|General Error| F[Ruby RuntimeError]
+**How the BatchSizeManager works:**
+1. Samples first 100 rows to estimate average row size
+2. Calculates optimal batch size to stay under memory threshold (default 80MB)
+3. Continuously adjusts based on actual data
+4. Ensures minimum batch size of 10 rows for efficiency
 
-    C --> G[With context]
-    D --> G
-    E --> G
-    F --> G
+#### Column-Oriented Writing (`write_columns`)
 
-    style A fill:#f99,stroke:#333,stroke-width:2px
-    style G fill:#9f9,stroke:#333,stroke-width:2px
+More efficient when you already have columnar data:
+
+```ruby
+columns = {
+  "name" => ["Alice", "Bob", "Charlie"],
+  "age" => [30, 25, 35],
+  "active" => [true, false, true]
+}
+
+Parquet.write_columns("output.parquet", schema, columns)
 ```
+
+### Compression Options
+
+The library supports multiple compression algorithms:
+
+- `snappy` (default) - Fast compression/decompression
+- `gzip` - Better compression ratio, slower
+- `brotli` - Best compression ratio, slowest
+- `lz4` - Very fast, decent compression
+- `zstd` - Good balance of speed and compression
+- `uncompressed` - No compression
+
+## Ruby and Parquet Type Conversions
+
+Understanding type mappings is crucial for working with Parquet files.
+
+### Basic Type Mappings
+
+| Ruby Type | Parquet Type Options | Notes |
+|-----------|---------------------|-------|
+| Integer | int8, int16, int32, int64, uint8-64 | Choose based on value range |
+| Float | float32, float64 | float32 for memory savings |
+| String | string, binary, uuid | UTF-8 for string, arbitrary bytes for binary |
+| Time | timestamp_*, time_* | Multiple precision levels available |
+| Date | date32, date64 | date32 is days since epoch |
+| BigDecimal | decimal128, decimal256 | Preserves precision |
+| true/false | boolean | - |
+| nil | null | Allowed if field is nullable |
+| Array | list | Nested arrays supported |
+| Hash | map, struct | map for key-value, struct for fixed fields |
+
+### Practical Examples
+
+```ruby
+# Integer types - choose based on your data range
+schema = {
+  "small_number" => {type: "int8"},     # -128 to 127
+  "medium_number" => {type: "int32"},   # -2^31 to 2^31-1
+  "large_number" => {type: "int64"},    # -2^63 to 2^63-1
+  "positive_only" => {type: "uint32"}   # 0 to 2^32-1
+}
+
+# Timestamp types - choose based on precision needs
+schema = {
+  "created_at" => {type: "timestamp_millis"},     # Millisecond precision
+  "high_precision" => {type: "timestamp_nanos"},  # Nanosecond precision
+  "with_timezone" => {type: "timestamp_millis", timezone: "UTC"}
+}
+
+# Complex types
+schema = {
+  "tags" => {type: "list<string>"},
+  "metadata" => {type: "map<string,string>"},
+  "address" => {
+    type: "struct",
+    fields: [
+      {name: "street", type: "string"},
+      {name: "city", type: "string"},
+      {name: "zip", type: "int32"}
+    ]
+  }
+}
+```
+
+### Type Conversion Details
+
+The conversion happens in `parquet-ruby-adapter/src/converter.rs`:
+
+1. **Ruby to Parquet**: The converter examines the Ruby value and schema to determine the correct Parquet type
+2. **Type Validation**: Ensures Ruby values match schema expectations
+3. **Automatic Conversions**: Some types are automatically converted (e.g., Ruby Integer to appropriate int size)
+4. **Error Handling**: Type mismatches result in clear error messages
+
+### Schema Definition
+
+The library supports three ways to define schemas:
+
+#### 1. Hash Format (Recommended)
+
+```ruby
+schema = {
+  "name" => {type: "string", nullable: false},
+  "age" => {type: "int32"},
+  "email" => {type: "string", nullable: true}
+}
+```
+
+#### 2. DSL Format
+
+```ruby
+schema = Parquet::Schema.define do
+  column "name", :string, nullable: false
+  column "age", :int32
+  column "email", :string, nullable: true
+end
+```
+
+#### 3. Legacy Array Format
+
+```ruby
+# Still supported for backward compatibility
+schema = [
+  {name: "name", type: "string", nullable: false},
+  {name: "age", type: "int32"},
+  {name: "email", type: "string", nullable: true}
+]
+```
+
+---
+
+## Important Implementation Details
+
+### Timestamp and Timezone Handling ⚠️
+
+**Critical limitation from the Parquet specification:**
+
+Parquet can only store timestamps in two ways:
+1. **UTC-normalized** (`isAdjustedToUTC = true`) - When ANY timezone is specified
+2. **Local/unzoned** (`isAdjustedToUTC = false`) - When NO timezone is specified
+
+**What this means for you:**
+
+```ruby
+# Writing with timezone - timezone info is LOST!
+schema = {"time" => {type: "timestamp_millis", timezone: "+09:00"}}
+data = [{"time" => Time.now}]  # e.g., 2024-01-01 09:00:00 +0900
+# Written as: 2024-01-01 00:00:00 UTC (converted to UTC, timezone lost)
+
+# Reading back
+Parquet.each_row("file.parquet") do |row|
+  puts row["time"]  # 2024-01-01 00:00:00 UTC (no +09:00!)
+end
+```
+
+**Workaround:** Store timezone separately if needed:
+```ruby
+schema = {
+  "time" => {type: "timestamp_millis", timezone: "UTC"},
+  "timezone" => {type: "string"}
+}
+```
+
+### Memory Allocators
+
+The library uses platform-specific allocators for performance:
+
+- **Linux**: jemalloc (with `disable_initial_exec_tls` for Ruby compatibility)
+- **macOS/Unix**: mimalloc
+- **Windows**: System allocator
+
+Configured in `ext/parquet/src/allocator.rs`.
+
+### Thread Safety
+
+Key considerations:
+- Ruby GIL is properly managed in FFI layer
+- String cache is thread-safe (Arc<Mutex>)
+- IO operations are wrapped for thread safety
+- Parquet reading can use multiple threads internally
+
+### String Interning
+
+The library automatically interns strings in Ruby's VM for memory efficiency:
+- Duplicate strings share memory in Ruby
+- Cache statistics available for debugging
+- Happens transparently during reading
+
+---
+
+## Deep Dive: Module Reference
+
+For developers who need to understand or modify specific components.
+
+### Memory Management Architecture
+
+```mermaid
+graph LR
+    A[Your Data] --> B[BatchSizeManager]
+    B --> C[Allocator<br/>jemalloc/mimalloc]
+    C --> D[StringCache]
+    D --> E[Ruby VM]
+
+    style B fill:#9ff,stroke:#333,stroke-width:2px
+    style D fill:#9ff,stroke:#333,stroke-width:2px
+```
+
+**Key components:**
+
+1. **BatchSizeManager** (`batch_manager.rs`)
+   - Uses reservoir sampling for size estimation
+   - Dynamically adjusts batch sizes
+   - Prevents OOM errors on large datasets
+
+2. **Platform Allocators** (`allocator.rs`)
+   - Linux: jemalloc with Ruby-compatible flags
+   - Others: mimalloc for performance
+
+3. **StringCache** (`string_cache.rs`)
+   - Interns strings in Ruby VM
+   - Reduces memory usage for repeated strings
+   - Thread-safe with performance metrics
+
+### IO Handling
+
+The library handles various input sources intelligently:
+
+```ruby
+# File path - most efficient
+Parquet.each_row("/path/to/file.parquet")
+
+# Ruby IO object - works with any IO
+File.open("file.parquet", "rb") do |f|
+  Parquet.each_row(f)
+end
+
+# In-memory string
+data = File.read("file.parquet")
+Parquet.each_row(data)
+```
+
+**How it works:**
+- File paths: Direct memory-mapped access
+- Seekable IO: Wrapped with thread safety
+- Non-seekable IO: Copied to temp file first
+- Strings: Treated as in-memory buffers
+
+### Detailed Crate Descriptions
+
+#### ext/parquet - FFI Extension
+
+**What it does:** The glue between Ruby and Rust.
+
+**Key files:**
+- `lib.rs` - Registers Ruby methods
+- `adapter_ffi.rs` - Thin wrappers for each Ruby method
+- `allocator.rs` - Memory allocator setup
+
+**Design principle:** Keep it minimal - just parse arguments and delegate to the adapter crate.
+
+#### parquet-core - Core Library
+
+**What it does:** Pure Rust implementation of Parquet operations. Language-agnostic.
+
+**Key modules:**
+- `reader.rs` - High-performance file reading
+- `writer.rs` - Efficient writing with compression
+- `types.rs` - The `ParquetValue` enum (all Parquet types)
+- `arrow_conversion.rs` - Converts between Arrow and Parquet formats
+- `schema.rs` - Type-safe schema representation
+
+**Special note about arrow_conversion.rs:**
+This module is the single source of truth for all type conversions. It eliminated 900+ lines of duplicate code by consolidating conversion logic used by both reader and writer.
+
+**Design principles:**
+- Zero-cost abstractions
+- Type safety at compile time
+- Memory-efficient streaming
+- No Ruby-specific code
+
+#### parquet-ruby-adapter - Ruby Integration
+
+**What it does:** All Ruby-specific logic that the core library shouldn't know about.
+
+**Key modules and their purpose:**
+
+| Module | Purpose | Key Features |
+|--------|---------|-------------|
+| `converter.rs` | Ruby ↔ Parquet conversions | Handles BigDecimal, Time, UUID, etc. |
+| `io.rs` | Ruby IO wrapper | Makes Ruby IO objects work with Rust |
+| `schema.rs` | Schema parsing | Supports DSL, hash, and array formats |
+| `batch_manager.rs` | Smart batching | Prevents OOM with large datasets |
+| `string_cache.rs` | String interning | Saves memory in Ruby VM |
+| `reader.rs` | Read operations | Row and column iteration |
+| `writer.rs` | Write operations | Handles batching and compression |
+| `chunk_reader.rs` | Parallel reading | Enables multi-threaded operations |
+| `types.rs` | Type definitions | Common structs and enums |
+| `utils.rs` | Helper functions | Argument parsing, memory estimation |
+
+**Design notes:**
+- Manages Ruby GIL properly
+- Thread-safe where needed
+- Handles non-seekable IO by copying to temp files
+
+---
+
+## Development Guide
+
+### Building and Testing
+
+```bash
+# Build the Rust extension
+direnv exec . rake compile
+
+# Run all tests
+direnv exec . rake test
+
+# Run specific Ruby test
+direnv exec . ruby -Ilib:test test/parquet_test.rb
+
+# Run Rust tests
+direnv exec . cargo nextest run
+```
+
+### Common Development Scenarios
+
+#### Adding a New Schema Type
+
+1. Update `ParquetValue` enum in `parquet-core/src/types.rs`
+2. Add conversion logic in `parquet-ruby-adapter/src/converter.rs`
+3. Update Arrow conversions in `parquet-core/src/arrow_conversion.rs`
+4. Add tests for the new type
+
+#### Debugging Type Conversion Issues
+
+1. Check `converter.rs` for Ruby → Parquet logic
+2. Look at `arrow_conversion.rs` for Parquet ↔ Arrow logic
+3. Enable debug logging to see conversion steps
+4. Use `Parquet.metadata` to inspect file schemas
+
+#### Memory Optimization
+
+1. Review `BatchSizeManager` settings in `batch_manager.rs`
+2. Check string cache hit rates in logs
+3. Profile with Ruby memory profilers
+4. Consider adjusting batch sizes for your use case
+
+### Error Handling Philosophy
+
+The library follows these principles:
+
+1. **Fail fast with clear messages** - Type mismatches are caught early
+2. **Preserve context** - Errors include file names, column names, etc.
+3. **Map to Ruby exceptions** - IOError, TypeError, etc. as appropriate
+4. **No silent failures** - All errors are propagated to Ruby
+
+### Performance Tips
+
+1. **Use appropriate batch sizes** - Larger batches are faster but use more memory
+2. **Choose the right compression** - Snappy for speed, gzip/brotli for size
+3. **Project columns** - Only read columns you need
+4. **Use column iteration** - More efficient for analytics
+
+### Contributing
+
+When contributing:
+
+1. Follow existing patterns in the codebase
+2. Add tests for new functionality
+3. Update this ARCH.md if you change architecture
+4. Run `cargo fmt` and `cargo clippy` before submitting
+5. Ensure all tests pass on Linux, macOS, and Windows
+
+---
+
+## Conclusion
+
+This architecture provides a clean separation between Ruby and Rust concerns while maintaining high performance. The three-layer design allows for:
+
+- Easy maintenance and debugging
+- Potential reuse of the core library for other languages
+- Clear ownership of different concerns
+- Type-safe, memory-safe operations
+
+For questions or clarifications, please refer to the inline documentation in the source code or open an issue on GitHub.
