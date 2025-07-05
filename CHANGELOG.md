@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.3
+- Read both arrow metadata and parquet metadata in case only one of the two has relevant information for parsing
+
 ## 0.7.2
 - Get rid of a debug log that shouldn't ever happen, but just in case.
 

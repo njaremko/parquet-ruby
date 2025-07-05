@@ -3,6 +3,7 @@ use arrow_schema::{DataType, Field, TimeUnit};
 use bytes::Bytes;
 use num::BigInt;
 use ordered_float::OrderedFloat;
+use parquet::schema::types::Type;
 use parquet_core::arrow_conversion::{arrow_to_parquet_value, parquet_values_to_arrow_array};
 use parquet_core::*;
 use std::sync::Arc;
@@ -99,7 +100,19 @@ fn test_decimal256_large_values() {
 
     // Verify roundtrip
     for i in 0..4 {
-        let value = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
+        // Create a dummy parquet type for testing
+        let parquet_type =
+            Type::primitive_type_builder("test", parquet::basic::Type::FIXED_LEN_BYTE_ARRAY)
+                .with_length(32)
+                .with_precision(76)
+                .with_scale(0)
+                .with_logical_type(Some(parquet::basic::LogicalType::Decimal {
+                    scale: 0,
+                    precision: 76,
+                }))
+                .build()
+                .unwrap();
+        let value = arrow_to_parquet_value(&field, &parquet_type, array.as_ref(), i).unwrap();
         match (i, value) {
             (0, ParquetValue::Decimal256(v, _)) => assert_eq!(v, large_positive.clone()),
             (1, ParquetValue::Decimal256(v, _)) => assert_eq!(v, large_negative.clone()),
@@ -173,7 +186,15 @@ fn test_timestamp_with_timezone() {
 
     // Verify roundtrip preserves timezone
     for i in 0..3 {
-        let value = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
+        // Create a dummy parquet type for testing
+        let parquet_type = Type::primitive_type_builder("test", parquet::basic::Type::INT64)
+            .with_logical_type(Some(parquet::basic::LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::basic::TimeUnit::MILLIS(Default::default()),
+            }))
+            .build()
+            .unwrap();
+        let value = arrow_to_parquet_value(&field, &parquet_type, array.as_ref(), i).unwrap();
         match value {
             ParquetValue::TimestampMillis(_, Some(tz)) => {
                 assert_eq!(tz.as_ref(), "America/New_York");
@@ -209,7 +230,19 @@ fn test_nested_list_of_lists() {
     assert_eq!(array.len(), 1);
 
     // Verify roundtrip
-    let value = arrow_to_parquet_value(&outer_field, array.as_ref(), 0).unwrap();
+    // Create a dummy parquet type for testing - a list of list of int32
+    let int_type = Type::primitive_type_builder("item", parquet::basic::Type::INT32)
+        .build()
+        .unwrap();
+    let inner_list = Type::group_type_builder("inner_list")
+        .with_fields(vec![Arc::new(int_type)])
+        .build()
+        .unwrap();
+    let parquet_type = Type::group_type_builder("outer_list")
+        .with_fields(vec![Arc::new(inner_list)])
+        .build()
+        .unwrap();
+    let value = arrow_to_parquet_value(&outer_field, &parquet_type, array.as_ref(), 0).unwrap();
     match value {
         ParquetValue::List(items) => assert_eq!(items.len(), 5),
         _ => panic!("Expected list"),
@@ -357,7 +390,16 @@ fn test_unsupported_arrow_types() {
     )
     .unwrap();
 
-    let result = arrow_to_parquet_value(&Field::new("int", DataType::Int32, false), &array, 0);
+    // Create a dummy parquet type for testing
+    let parquet_type = Type::primitive_type_builder("int", parquet::basic::Type::INT32)
+        .build()
+        .unwrap();
+    let result = arrow_to_parquet_value(
+        &Field::new("int", DataType::Int32, false),
+        &parquet_type,
+        &array,
+        0,
+    );
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

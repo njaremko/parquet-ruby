@@ -12,11 +12,14 @@ use arrow_schema::{DataType, Field};
 use bytes::Bytes;
 use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
+use parquet::basic::LogicalType;
+use parquet::schema::types::Type;
 use std::sync::Arc;
 
 /// Convert a single value from an Arrow array at the given index to a ParquetValue
 pub fn arrow_to_parquet_value(
-    field: &Field,
+    arrow_field: &Field,
+    parquet_field: &Type,
     array: &dyn Array,
     index: usize,
 ) -> Result<ParquetValue> {
@@ -91,13 +94,20 @@ pub fn arrow_to_parquet_value(
         DataType::FixedSizeBinary(_) => {
             let array = downcast_array::<FixedSizeBinaryArray>(array)?;
             let value = array.value(index);
-            match field.try_extension_type::<ArrowUuid>() {
-                Ok(_) => {
-                    let uuid = uuid::Uuid::from_slice(value)
-                        .map_err(|e| ParquetError::Conversion(format!("Invalid UUID: {}", e)))?;
-                    Ok(ParquetValue::Uuid(uuid))
+            if let Some(LogicalType::Uuid) = parquet_field.get_basic_info().logical_type() {
+                let uuid = uuid::Uuid::from_slice(value)
+                    .map_err(|e| ParquetError::Conversion(format!("Invalid UUID: {}", e)))?;
+                Ok(ParquetValue::Uuid(uuid))
+            } else {
+                match arrow_field.try_extension_type::<ArrowUuid>() {
+                    Ok(_) => {
+                        let uuid = uuid::Uuid::from_slice(value).map_err(|e| {
+                            ParquetError::Conversion(format!("Invalid UUID: {}", e))
+                        })?;
+                        Ok(ParquetValue::Uuid(uuid))
+                    }
+                    Err(_) => Ok(ParquetValue::Bytes(Bytes::copy_from_slice(value))),
                 }
-                Err(_) => Ok(ParquetValue::Bytes(Bytes::copy_from_slice(value))),
             }
         }
 
@@ -192,8 +202,43 @@ pub fn arrow_to_parquet_value(
             let list_values = array.value(index);
 
             let mut values = Vec::with_capacity(list_values.len());
+
+            // Get the list's element type from parquet schema
+            let element_type = match parquet_field {
+                parquet::schema::types::Type::GroupType { fields, .. } => {
+                    // List has a repeated group containing the element
+                    // The structure is: LIST -> repeated group -> element
+                    if let Some(repeated_group) = fields.first() {
+                        match repeated_group.as_ref() {
+                            parquet::schema::types::Type::GroupType {
+                                fields: inner_fields,
+                                ..
+                            } => {
+                                // This is the repeated group, get the actual element
+                                inner_fields.first().ok_or_else(|| {
+                                    ParquetError::Conversion(
+                                        "List repeated group missing element field".to_string(),
+                                    )
+                                })?
+                            }
+                            _ => repeated_group, // If it's not a group, use it directly
+                        }
+                    } else {
+                        return Err(ParquetError::Conversion(
+                            "List type missing fields".to_string(),
+                        ));
+                    }
+                }
+                _ => parquet_field, // Fallback for cases where it's not a proper list structure
+            };
+
             for i in 0..list_values.len() {
-                values.push(arrow_to_parquet_value(item_field, &list_values, i)?);
+                values.push(arrow_to_parquet_value(
+                    item_field,
+                    element_type,
+                    &list_values,
+                    i,
+                )?);
             }
 
             Ok(ParquetValue::List(values))
@@ -210,7 +255,7 @@ pub fn arrow_to_parquet_value(
                 .fields()
                 .iter()
                 .find(|f| f.name() == "key")
-                .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
+                .ok_or_else(|| ParquetError::Conversion("No key field found".to_string()))?;
 
             let value_field = map_value
                 .fields()
@@ -219,9 +264,59 @@ pub fn arrow_to_parquet_value(
                 .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
 
             let mut map_vec = Vec::with_capacity(keys.len());
+
+            // Get key and value types from parquet schema
+            // Map structure is: MAP -> key_value (repeated group) -> key, value
+            let (key_type, value_type) = match parquet_field {
+                parquet::schema::types::Type::GroupType { fields, .. } => {
+                    // Get the key_value repeated group
+                    match fields.first() {
+                        Some(key_value_group) => match key_value_group.as_ref() {
+                            parquet::schema::types::Type::GroupType {
+                                fields: kv_fields, ..
+                            } => {
+                                // Find key and value fields by name
+                                let key_field = kv_fields
+                                    .iter()
+                                    .find(|f| f.name() == "key")
+                                    .ok_or_else(|| {
+                                        ParquetError::Conversion(
+                                            "Map missing key field".to_string(),
+                                        )
+                                    })?;
+                                let value_field = kv_fields
+                                    .iter()
+                                    .find(|f| f.name() == "value")
+                                    .ok_or_else(|| {
+                                        ParquetError::Conversion(
+                                            "Map missing value field".to_string(),
+                                        )
+                                    })?;
+                                (key_field.as_ref(), value_field.as_ref())
+                            }
+                            _ => {
+                                return Err(ParquetError::Conversion(
+                                    "Map key_value should be a group".to_string(),
+                                ))
+                            }
+                        },
+                        None => {
+                            return Err(ParquetError::Conversion(
+                                "Map type missing key_value field".to_string(),
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    return Err(ParquetError::Conversion(
+                        "Map type must be a group".to_string(),
+                    ))
+                }
+            };
+
             for i in 0..keys.len() {
-                let key = arrow_to_parquet_value(key_field, keys, i)?;
-                let value = arrow_to_parquet_value(value_field, values, i)?;
+                let key = arrow_to_parquet_value(key_field, key_type, keys, i)?;
+                let value = arrow_to_parquet_value(value_field, value_type, values, i)?;
                 map_vec.push((key, value));
             }
 
@@ -231,10 +326,34 @@ pub fn arrow_to_parquet_value(
             let array = downcast_array::<StructArray>(array)?;
 
             let mut map = IndexMap::new();
-            for (col_idx, field) in array.fields().iter().enumerate() {
+
+            // Get struct fields from parquet schema
+            let parquet_fields = match parquet_field {
+                parquet::schema::types::Type::GroupType { fields, .. } => fields,
+                _ => {
+                    return Err(ParquetError::Conversion(
+                        "Struct type must be a group".to_string(),
+                    ))
+                }
+            };
+
+            for (col_idx, arrow_field) in array.fields().iter().enumerate() {
                 let column = array.column(col_idx);
-                let value = arrow_to_parquet_value(field, column, index)?;
-                map.insert(Arc::from(field.name().as_str()), value);
+
+                // Find matching parquet field by name
+                let nested_parquet_field = parquet_fields
+                    .iter()
+                    .find(|f| f.name() == arrow_field.name())
+                    .ok_or_else(|| {
+                        ParquetError::Conversion(format!(
+                            "No matching parquet field for struct field '{}'",
+                            arrow_field.name()
+                        ))
+                    })?;
+
+                let value =
+                    arrow_to_parquet_value(arrow_field, nested_parquet_field, column, index)?;
+                map.insert(Arc::from(arrow_field.name().as_str()), value);
             }
 
             Ok(ParquetValue::Record(map))
@@ -1121,6 +1240,7 @@ pub fn append_parquet_value_to_builder(
 mod tests {
     use super::*;
     use arrow_array::*;
+    use parquet::basic::Type as PhysicalType;
 
     #[test]
     fn test_primitive_conversion_roundtrip() {
@@ -1132,9 +1252,12 @@ mod tests {
         ];
         let field = Field::new("test", DataType::Boolean, true);
         let array = parquet_values_to_arrow_array(values.clone(), &field).unwrap();
+        let type_ = Type::primitive_type_builder("test", PhysicalType::BOOLEAN)
+            .build()
+            .unwrap();
 
         for (i, expected) in values.iter().enumerate() {
-            let actual = arrow_to_parquet_value(&field, array.as_ref(), i).unwrap();
+            let actual = arrow_to_parquet_value(&field, &type_, array.as_ref(), i).unwrap();
             assert_eq!(&actual, expected);
         }
     }
