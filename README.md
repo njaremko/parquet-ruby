@@ -340,7 +340,7 @@ Parquet.write_rows(data.each, schema: schema, write_to: "complex.parquet")
 
 ### Timezone Handling in Parquet
 
-**Critical**: The Parquet specification has a fundamental limitation with timezone storage:
+The Parquet specification has a fundamental limitation with timezone storage:
 
 1. **UTC-normalized**: Any timestamp with timezone info (including "+09:00" or "America/New_York") is converted to UTC
 2. **Local/unzoned**: Timestamps without timezone info are stored as-is
