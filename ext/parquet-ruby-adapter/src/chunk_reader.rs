@@ -11,6 +11,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::io::ThreadSafeRubyIOReader;
+use crate::remote::{RemoteRangeReader, ThreadSafeRemoteSource};
 
 /// A ChunkReader that can be cloned for parallel reading
 #[derive(Clone)]
@@ -19,6 +20,8 @@ pub enum CloneableChunkReader {
     File(FileChunkReader),
     /// Ruby IO-based reader using thread-safe wrapper
     RubyIO(RubyIOChunkReader),
+    /// Remote reader backed by Ruby read_range callbacks
+    Remote(RemoteChunkReader),
     /// In-memory bytes (fallback for small files)
     Bytes(bytes::Bytes),
 }
@@ -46,6 +49,18 @@ impl FileChunkReader {
 pub struct RubyIOChunkReader {
     reader: ThreadSafeRubyIOReader,
     len: u64,
+}
+/// Remote chunk reader built on top of custom read_range callbacks
+#[derive(Clone)]
+pub struct RemoteChunkReader {
+    source: ThreadSafeRemoteSource,
+    len: u64,
+}
+
+impl RemoteChunkReader {
+    pub(crate) fn new(source: ThreadSafeRemoteSource, len: u64) -> Self {
+        Self { source, len }
+    }
 }
 
 impl RubyIOChunkReader {
@@ -101,11 +116,18 @@ impl Length for RubyIOChunkReader {
     }
 }
 
+impl Length for RemoteChunkReader {
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
 impl Length for CloneableChunkReader {
     fn len(&self) -> u64 {
         match self {
             CloneableChunkReader::File(f) => f.len(),
             CloneableChunkReader::RubyIO(r) => r.len(),
+            CloneableChunkReader::Remote(r) => r.len(),
             CloneableChunkReader::Bytes(b) => b.len() as u64,
         }
     }
@@ -117,21 +139,21 @@ impl ChunkReader for FileChunkReader {
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
         let file = File::open(&self.path)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         let reader = RangeReader::new(file, start, self.file_len - start)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         Ok(Box::new(reader))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
         let mut file = File::open(&self.path)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         file.seek(SeekFrom::Start(start))
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
 
         let mut buf = vec![0; length];
         file.read_exact(&mut buf)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         Ok(Bytes::from(buf))
     }
 }
@@ -147,11 +169,11 @@ impl ChunkReader for RubyIOChunkReader {
         // Seek to the start position
         reader
             .seek(SeekFrom::Start(start))
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
 
         // Create a range reader that limits reading to the available data
         let reader = RangeReader::new(reader, start, self.len - start)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         Ok(Box::new(reader))
     }
 
@@ -159,13 +181,45 @@ impl ChunkReader for RubyIOChunkReader {
         let mut reader = self.reader.clone();
         reader
             .seek(SeekFrom::Start(start))
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
 
         let mut buf = vec![0; length];
         reader
             .read_exact(&mut buf)
-            .map_err(|e| parquet::errors::ParquetError::External(Box::new(e)))?;
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))?;
         Ok(Bytes::from(buf))
+    }
+}
+
+// Implement ChunkReader for RemoteChunkReader
+impl ChunkReader for RemoteChunkReader {
+    type T = Box<dyn Read + Send>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        if start > self.len {
+            return Err(parquet::errors::ParquetError::EOF(format!(
+                "Attempted to read beyond remote object length (start {}, len {})",
+                start, self.len
+            )));
+        }
+
+        let reader = RemoteRangeReader::new(self.source.clone(), start, self.len - start);
+        Ok(Box::new(reader))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        if start > self.len {
+            return Err(parquet::errors::ParquetError::EOF(format!(
+                "Attempted to read beyond remote object length (start {}, len {})",
+                start, self.len
+            )));
+        }
+
+        let end = start.saturating_add(length as u64).min(self.len);
+        let length = (end - start) as usize;
+        self.source
+            .read_range(start, length)
+            .map_err(|e| parquet::errors::ParquetError::General(e.to_string()))
     }
 }
 
@@ -177,6 +231,7 @@ impl ChunkReader for CloneableChunkReader {
         match self {
             CloneableChunkReader::File(f) => f.get_read(start),
             CloneableChunkReader::RubyIO(r) => r.get_read(start),
+            CloneableChunkReader::Remote(r) => r.get_read(start),
             CloneableChunkReader::Bytes(b) => {
                 // For bytes, we can use the built-in implementation
                 let bytes = b.clone();
@@ -197,6 +252,7 @@ impl ChunkReader for CloneableChunkReader {
         match self {
             CloneableChunkReader::File(f) => f.get_bytes(start, length),
             CloneableChunkReader::RubyIO(r) => r.get_bytes(start, length),
+            CloneableChunkReader::Remote(r) => r.get_bytes(start, length),
             CloneableChunkReader::Bytes(b) => {
                 // For bytes, use the built-in slice functionality
                 let end = (start as usize).saturating_add(length).min(b.len());
@@ -228,6 +284,16 @@ impl CloneableChunkReader {
     /// Create from bytes (for small files or testing)
     pub fn from_bytes(bytes: Bytes) -> Self {
         CloneableChunkReader::Bytes(bytes)
+    }
+
+    /// Create from a remote source implementing read_range and length
+    pub(crate) fn from_remote(source: ThreadSafeRemoteSource) -> Result<Self> {
+        let len = source
+            .len()
+            .map_err(|e| parquet_core::ParquetError::invalid_argument(e.to_string()))?;
+        Ok(CloneableChunkReader::Remote(RemoteChunkReader::new(
+            source, len,
+        )))
     }
 
     /// Check if this reader should use streaming (based on size threshold)

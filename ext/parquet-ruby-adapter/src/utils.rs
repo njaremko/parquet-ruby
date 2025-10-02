@@ -188,8 +188,8 @@ pub fn create_column_enumerator(
     if let Some(columns) = args.columns {
         kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
     }
-    if let Some(batch_size) = args.batch_size {
-        kwargs.aset(Symbol::new("batch_size"), batch_size)?;
+    if let Some(row_groups) = args.row_groups {
+        kwargs.aset(Symbol::new("row_groups"), RArray::from_vec(row_groups))?;
     }
     if args.strict {
         kwargs.aset(Symbol::new("strict"), true)?;

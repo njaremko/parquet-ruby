@@ -23,6 +23,7 @@ pub struct RowEnumeratorArgs {
     pub to_read: Value,
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
+    pub row_groups: Option<Vec<usize>>,
     pub strict: bool,
     pub logger: Option<Value>,
 }
@@ -34,6 +35,7 @@ pub struct ColumnEnumeratorArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
+    pub row_groups: Option<Vec<usize>>,
     pub strict: bool,
     pub logger: Option<Value>,
 }

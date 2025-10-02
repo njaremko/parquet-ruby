@@ -2,6 +2,7 @@ use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, IntoValue, RArray, RHash, Ruby, TryConvert, Value};
 use parquet_core::reader::Reader;
 
+use crate::remote::{RemoteSource, ThreadSafeRemoteSource};
 use crate::StringCache;
 use crate::{
     converter::parquet_to_ruby,
@@ -19,6 +20,7 @@ pub fn each_row(
     to_read: Value,
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
+    row_groups: Option<Vec<usize>>,
     strict: bool,
     logger: RubyLogger,
 ) -> Result<Value, MagnusError> {
@@ -28,6 +30,7 @@ pub fn each_row(
             to_read,
             result_type,
             columns: columns.clone(),
+            row_groups: row_groups.clone(),
             strict,
             logger: logger.inner(),
         })
@@ -53,6 +56,13 @@ pub fn each_row(
         let thread_safe_reader = ThreadSafeRubyIOReader::new(ruby_reader);
 
         CloneableChunkReader::from_ruby_io(thread_safe_reader)
+            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+    } else if to_read.respond_to("read_range", false)? {
+        // Treat as remote source
+        let source = RemoteSource::new(to_read)
+            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let reader = ThreadSafeRemoteSource::new(source);
+        CloneableChunkReader::from_remote(reader)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
     } else {
         return Err(MagnusError::new(
@@ -80,17 +90,60 @@ pub fn each_row(
 
     let _ = logger.info(|| format!("Processing {} columns", all_column_names.len()));
 
-    // Get the row iterator
-    let (row_iter, column_names) = if let Some(ref cols) = columns {
-        let iter = reader
-            .read_rows_with_projection(cols)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        (iter, cols.clone())
+    // Validate requested columns when strict mode is enabled
+    if let Some(ref cols) = columns {
+        if strict {
+            for col in cols {
+                if !all_column_names.iter().any(|name| name == col) {
+                    return Err(MagnusError::new(
+                        ruby.exception_runtime_error(),
+                        format!("Column #{col} not found in Parquet schema"),
+                    ));
+                }
+            }
+        }
+    }
+
+    let effective_columns = if let Some(cols) = columns.clone() {
+        if strict {
+            Some(cols)
+        } else {
+            let filtered: Vec<String> = cols
+                .into_iter()
+                .filter(|col| all_column_names.iter().any(|name| name == col))
+                .collect();
+            Some(filtered)
+        }
     } else {
-        let iter = reader
-            .read_rows()
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        (iter, all_column_names)
+        None
+    };
+
+    // Get the row iterator
+    let (row_iter, column_names) = match (effective_columns.as_ref(), row_groups.as_ref()) {
+        (Some(cols), Some(groups)) => {
+            let iter = reader
+                .read_rows_with_selection(Some(cols), Some(groups))
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, cols.clone())
+        }
+        (Some(cols), None) => {
+            let iter = reader
+                .read_rows_with_selection(Some(cols), None)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, cols.clone())
+        }
+        (None, Some(groups)) => {
+            let iter = reader
+                .read_rows_with_selection(None, Some(groups))
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, all_column_names.clone())
+        }
+        (None, None) => {
+            let iter = reader
+                .read_rows_with_selection(None, None)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, all_column_names)
+        }
     };
 
     // Process with block
@@ -158,6 +211,7 @@ struct EachColumnArgs {
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
     batch_size: Option<usize>,
+    row_groups: Option<Vec<usize>>,
     strict: bool,
     logger: RubyLogger,
 }
@@ -171,6 +225,7 @@ pub fn each_column(
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
     batch_size: Option<usize>,
+    row_groups: Option<Vec<usize>>,
     strict: bool,
     logger: RubyLogger,
 ) -> Result<Value, MagnusError> {
@@ -180,6 +235,7 @@ pub fn each_column(
         result_type,
         columns,
         batch_size,
+        row_groups,
         strict,
         logger,
     };
@@ -194,6 +250,7 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
             result_type: args.result_type,
             columns: args.columns.clone(),
             batch_size: args.batch_size,
+            row_groups: args.row_groups.clone(),
             strict: args.strict,
             logger: args.logger.inner(),
         })
@@ -226,6 +283,12 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
 
         CloneableChunkReader::from_ruby_io(thread_safe_reader)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+    } else if args.to_read.respond_to("read_range", false)? {
+        let source = RemoteSource::new(args.to_read)
+            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let reader = ThreadSafeRemoteSource::new(source);
+        CloneableChunkReader::from_remote(reader)
+            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
     } else {
         return Err(MagnusError::new(
             ruby.exception_runtime_error(),
@@ -250,17 +313,53 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         .map(|f| f.name().to_string())
         .collect();
 
-    // Get the column iterator
-    let (col_iter, _column_names) = if let Some(ref cols) = args.columns {
-        let iter = reader
-            .read_columns_with_projection(cols, args.batch_size)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        (iter, cols.clone())
+    // Determine effective columns under strict/non-strict behavior
+    let effective_columns: Option<Vec<String>> = if let Some(cols) = args.columns.clone() {
+        if args.strict {
+            Some(cols)
+        } else {
+            let filtered: Vec<String> = cols
+                .into_iter()
+                .filter(|c| all_column_names.iter().any(|n| n == c))
+                .collect();
+            Some(filtered)
+        }
     } else {
-        let iter = reader
-            .read_columns(args.batch_size)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        (iter, all_column_names)
+        None
+    };
+    let force_empty = args.columns.is_some()
+        && effective_columns
+            .as_ref()
+            .map(|v| v.is_empty())
+            .unwrap_or(false)
+        && !args.strict;
+
+    // Get the column iterator
+    let (col_iter, _column_names) = match (if force_empty { None } else { effective_columns.as_ref() }, args.row_groups.as_ref()) {
+        (Some(cols), Some(groups)) => {
+            let iter = reader
+                .read_columns_with_selection(Some(cols), Some(groups), args.batch_size)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, cols.clone())
+        }
+        (Some(cols), None) => {
+            let iter = reader
+                .read_columns_with_selection(Some(cols), None, args.batch_size)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, cols.clone())
+        }
+        (None, Some(groups)) => {
+            let iter = reader
+                .read_columns_with_selection(None, Some(groups), args.batch_size)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, all_column_names.clone())
+        }
+        (None, None) => {
+            let iter = reader
+                .read_columns_with_selection(None, None, args.batch_size)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            (iter, all_column_names)
+        }
     };
 
     // Process with block
@@ -277,34 +376,41 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
         // Convert batch to Ruby value based on result_type
-        let ruby_batch = match args.result_type {
-            ParserResultType::Array => {
-                let array: RArray = ruby.ary_new_capa(batch.columns.len());
-                for (_name, values) in batch.columns {
-                    let col_array: RArray = ruby.ary_new_capa(values.len());
-                    for value in values {
-                        let ruby_value = parquet_to_ruby(value).map_err(|e| {
-                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                        })?;
-                        col_array.push(ruby_value)?;
-                    }
-                    array.push(col_array)?;
-                }
-                array.as_value()
+        let ruby_batch = if force_empty {
+            match args.result_type {
+                ParserResultType::Array => ruby.ary_new().as_value(),
+                ParserResultType::Hash => ruby.hash_new().as_value(),
             }
-            ParserResultType::Hash => {
-                let hash: RHash = ruby.hash_new();
-                for (name, values) in batch.columns {
-                    let col_array: RArray = ruby.ary_new_capa(values.len());
-                    for value in values {
-                        let ruby_value = parquet_to_ruby(value).map_err(|e| {
-                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                        })?;
-                        col_array.push(ruby_value)?;
+        } else {
+            match args.result_type {
+                ParserResultType::Array => {
+                    let array: RArray = ruby.ary_new_capa(batch.columns.len());
+                    for (_name, values) in batch.columns {
+                        let col_array: RArray = ruby.ary_new_capa(values.len());
+                        for value in values {
+                            let ruby_value = parquet_to_ruby(value).map_err(|e| {
+                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                            })?;
+                            col_array.push(ruby_value)?;
+                        }
+                        array.push(col_array)?;
                     }
-                    hash.aset(name, col_array)?;
+                    array.as_value()
                 }
-                hash.as_value()
+                ParserResultType::Hash => {
+                    let hash: RHash = ruby.hash_new();
+                    for (name, values) in batch.columns {
+                        let col_array: RArray = ruby.ary_new_capa(values.len());
+                        for value in values {
+                            let ruby_value = parquet_to_ruby(value).map_err(|e| {
+                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                            })?;
+                            col_array.push(ruby_value)?;
+                        }
+                        hash.aset(name, col_array)?;
+                    }
+                    hash.as_value()
+                }
             }
         };
 

@@ -43,6 +43,8 @@ pub use error::{ErrorContext, IntoMagnusError, Result, RubyAdapterError};
 pub mod chunk_reader;
 pub use chunk_reader::CloneableChunkReader;
 
+mod remote;
+
 pub mod converter;
 pub use converter::RubyValueConverter;
 

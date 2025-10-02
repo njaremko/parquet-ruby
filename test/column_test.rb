@@ -55,6 +55,10 @@ class ColumnTest < Minitest::Test
     assert_kind_of Hash, batches.first
     assert_equal batches.first.keys.sort, %w[id].sort # Only id column
     assert_equal [1, 2, 3], batches.first["id"]
+
+    # row_groups: on small single-row-group files it should be equivalent
+    first_batch_rg = Parquet.each_column("test/data.parquet", columns: ["id"], row_groups: [0], result_type: :hash).first
+    assert_equal ["id"], first_batch_rg.keys.sort
   end
 
   def test_each_column_empty_file

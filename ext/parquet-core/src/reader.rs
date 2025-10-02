@@ -32,17 +32,7 @@ where
     ///
     /// Returns an iterator over rows where each row is a vector of ParquetValues
     pub fn read_rows(self) -> Result<RowIterator<R>> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let metadata = builder.metadata().clone();
-        let reader = builder.build()?;
-
-        Ok(RowIterator {
-            batch_reader: reader,
-            metadata,
-            current_batch: None,
-            current_row: 0,
-            _phantom: std::marker::PhantomData,
-        })
+        self.read_rows_with_selection(None, None)
     }
 
     /// Read rows with column projection
@@ -50,22 +40,46 @@ where
     /// Only the specified columns will be read, which can significantly
     /// improve performance for wide tables.
     pub fn read_rows_with_projection(self, columns: &[String]) -> Result<RowIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let arrow_schema = builder.schema();
+        self.read_rows_with_selection(Some(columns), None)
+    }
 
-        // Create projection mask based on column names
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if columns.contains(&field.name().to_string()) {
-                column_indices.push(idx);
+    /// Read rows with optional projection and row-group pruning
+    pub fn read_rows_with_selection(
+        self,
+        columns: Option<&[String]>,
+        row_groups: Option<&[usize]>,
+    ) -> Result<RowIterator<R>> {
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+
+        if let Some(groups) = row_groups {
+            if !groups.is_empty() {
+                builder = builder.with_row_groups(groups.to_vec());
             }
         }
 
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
+        if let Some(cols) = columns {
+            let arrow_schema = builder.schema();
+            let mut column_indices = Vec::new();
+            for (idx, field) in arrow_schema.fields().iter().enumerate() {
+                if cols.contains(&field.name().to_string()) {
+                    column_indices.push(idx);
+                }
+            }
 
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
+            if column_indices.is_empty() {
+                // Ensure at least one column is requested for Arrow reader
+                if !arrow_schema.fields().is_empty() {
+                    column_indices.push(0);
+                }
+            }
+
+            if !column_indices.is_empty() {
+                let mask =
+                    parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
+                builder = builder.with_projection(mask);
+            }
+        }
+
         let metadata = builder.metadata().clone();
         let reader = builder.build()?;
 
@@ -83,26 +97,7 @@ where
     /// Returns an iterator over column batches where each batch contains
     /// arrays of values for each column.
     pub fn read_columns(self, batch_size: Option<usize>) -> Result<ColumnIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-
-        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
-
-        if let Some(size) = batch_size {
-            builder = builder.with_batch_size(size);
-        }
-
-        let schema = builder.schema().clone();
-        let metadata = builder.metadata().clone();
-        let reader = builder.build()?;
-
-        Ok(ColumnIterator {
-            batch_reader: reader,
-            metadata,
-            schema,
-            returned_empty_batch: false,
-            is_empty_file: is_empty,
-            _phantom: std::marker::PhantomData,
-        })
+        self.read_columns_with_selection(None, None, batch_size)
     }
 
     /// Read columns with projection
@@ -111,24 +106,47 @@ where
         columns: &[String],
         batch_size: Option<usize>,
     ) -> Result<ColumnIterator<R>> {
+        self.read_columns_with_selection(Some(columns), None, batch_size)
+    }
+
+    /// Read columns with optional projection and row-group pruning
+    pub fn read_columns_with_selection(
+        self,
+        columns: Option<&[String]>,
+        row_groups: Option<&[usize]>,
+        batch_size: Option<usize>,
+    ) -> Result<ColumnIterator<R>> {
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let arrow_schema = builder.schema();
 
-        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
-
-        // Create projection mask
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if columns.contains(&field.name().to_string()) {
-                column_indices.push(idx);
+        if let Some(groups) = row_groups {
+            if !groups.is_empty() {
+                builder = builder.with_row_groups(groups.to_vec());
             }
         }
 
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
+        if let Some(cols) = columns {
+            let arrow_schema = builder.schema();
+            let mut column_indices = Vec::new();
+            for (idx, field) in arrow_schema.fields().iter().enumerate() {
+                if cols.contains(&field.name().to_string()) {
+                    column_indices.push(idx);
+                }
+            }
 
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
+            if column_indices.is_empty() {
+                if !arrow_schema.fields().is_empty() {
+                    column_indices.push(0);
+                }
+            }
+
+            if !column_indices.is_empty() {
+                let mask =
+                    parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
+                builder = builder.with_projection(mask);
+            }
+        }
+
+        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
 
         if let Some(size) = batch_size {
             builder = builder.with_batch_size(size);

@@ -462,6 +462,59 @@ impl TryIntoValue for RubyParquetMetaData {
                 .aset("columns", columns_array)
                 .map_err(|e| RubyAdapterError::metadata(format!("Failed to set columns: {}", e)))?;
 
+            // Add row group level statistics for quick pruning
+            let stats_hash = handle.hash_new();
+            let mut has_stats = false;
+            for (col_idx, column) in row_group.columns().iter().enumerate() {
+                if let Some(stats) = column.statistics() {
+                    let col_stats_hash = handle.hash_new();
+                    if let Some(min_bytes) = stats.min_bytes_opt() {
+                        col_stats_hash
+                            .aset("min_bytes", handle.str_from_slice(min_bytes))
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set min_bytes for column {}: {}",
+                                    col_idx, e
+                                ))
+                            })?;
+                    }
+                    if let Some(max_bytes) = stats.max_bytes_opt() {
+                        col_stats_hash
+                            .aset("max_bytes", handle.str_from_slice(max_bytes))
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set max_bytes for column {}: {}",
+                                    col_idx, e
+                                ))
+                            })?;
+                    }
+                    if let Some(null_count) = stats.null_count_opt() {
+                        col_stats_hash.aset("null_count", null_count).map_err(|e| {
+                            RubyAdapterError::metadata(format!(
+                                "Failed to set null_count for column {}: {}",
+                                col_idx, e
+                            ))
+                        })?;
+                    }
+                    if !col_stats_hash.is_empty() {
+                        has_stats = true;
+                        stats_hash
+                            .aset(col_idx as i64, col_stats_hash)
+                            .map_err(|e| {
+                                RubyAdapterError::metadata(format!(
+                                    "Failed to set column stats for column {}: {}",
+                                    col_idx, e
+                                ))
+                            })?;
+                    }
+                }
+            }
+            if has_stats {
+                rg_hash.aset("statistics", stats_hash).map_err(|e| {
+                    RubyAdapterError::metadata(format!("Failed to set row group statistics: {}", e))
+                })?;
+            }
+
             row_groups_array.push(rg_hash).map_err(|e| {
                 RubyAdapterError::metadata(format!("Failed to push rg_hash: {}", e))
             })?;

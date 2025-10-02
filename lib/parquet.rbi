@@ -133,4 +133,52 @@ module Parquet
   end
   def self.write_columns(read_from, schema:, write_to:, flush_threshold: nil, compression: nil)
   end
+
+  sig do
+    params(
+      source: T.any(String, File, StringIO, IO),
+      result_type: T.nilable(T.any(String, Symbol)),
+      columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
+      strict: T.nilable(T::Boolean),
+      logger: T.nilable(T.untyped)
+    ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
+  end
+  sig do
+    params(
+      source: T.any(String, File, StringIO, IO),
+      result_type: T.nilable(T.any(String, Symbol)),
+      columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
+      strict: T.nilable(T::Boolean),
+      logger: T.nilable(T.untyped),
+      blk: T.nilable(T.proc.params(row: T.any(T::Hash[String, T.untyped], T::Array[T.untyped])).void)
+    ).returns(NilClass)
+  end
+  def self.each_row(source, result_type: nil, columns: nil, row_groups: nil, strict: nil, logger: nil, &blk); end
+
+  sig do
+    params(
+      source: T.any(String, File, StringIO, IO),
+      result_type: T.nilable(T.any(String, Symbol)),
+      columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
+      batch_size: T.nilable(Integer),
+      strict: T.nilable(T::Boolean),
+      logger: T.nilable(T.untyped)
+    ).returns(T::Enumerator[T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])])
+  end
+  sig do
+    params(
+      source: T.any(String, File, StringIO, IO),
+      result_type: T.nilable(T.any(String, Symbol)),
+      columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
+      batch_size: T.nilable(Integer),
+      strict: T.nilable(T::Boolean),
+      logger: T.nilable(T.untyped),
+      blk: T.nilable(T.proc.params(batch: T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])).void)
+    ).returns(NilClass)
+  end
+  def self.each_column(source, result_type: nil, columns: nil, row_groups: nil, batch_size: nil, strict: nil, logger: nil, &blk); end
 end
