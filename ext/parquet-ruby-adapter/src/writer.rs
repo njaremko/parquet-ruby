@@ -8,6 +8,10 @@ use tempfile::NamedTempFile;
 use crate::io::RubyIOWriter;
 use crate::types::WriterOutput;
 use crate::utils::parse_compression;
+use crate::{
+    logger::RubyLogger,
+    schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet},
+};
 
 /// Create a writer based on the output type (file path or IO object)
 pub fn create_writer(
@@ -432,4 +436,237 @@ pub fn write_columns(
     finalize_writer(writer_output)?;
 
     Ok(ruby.qnil().as_value())
+}
+
+// =========================
+// Incremental File Writer
+// =========================
+
+use crate::batch_manager::BatchSizeManager;
+use crate::converter::RubyValueConverter;
+use crate::string_cache::StringCache;
+use magnus::RArray;
+use parquet_core::SchemaNode;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct IncrementalWriter {
+    writer_output: WriterOutput,
+    field_schemas: Vec<SchemaNode>,
+    converter: RubyValueConverter,
+    batch_manager: BatchSizeManager,
+    batch: Vec<Vec<parquet_core::ParquetValue>>,
+    batch_memory_size: usize,
+    closed: bool,
+}
+
+impl IncrementalWriter {
+    fn write_batch_to_core(&mut self) -> Result<(), MagnusError> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        match &mut self.writer_output {
+            WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
+                writer
+                    .write_rows(std::mem::take(&mut self.batch))
+                    .map_err(|e| MagnusError::new(magnus::exception::runtime_error(), e.to_string()))?;
+            }
+        }
+        self.batch_memory_size = 0;
+        Ok(())
+    }
+}
+
+thread_local! {
+    static FW_REGISTRY: RefCell<HashMap<u64, IncrementalWriter>> = RefCell::new(HashMap::new());
+}
+static FW_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn file_writer_create(
+    ruby: &Ruby,
+    write_to: Value,
+    schema_value: Value,
+    compression: Option<String>,
+    row_group_target_bytes: Option<usize>,
+    sample_size: Option<usize>,
+    string_cache: Option<bool>,
+    logger: Option<Value>,
+) -> Result<u64, MagnusError> {
+    // Build schema from Ruby value
+    let schema_hash = process_schema_value(ruby, schema_value, None)
+        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+    let schema = ruby_schema_to_parquet(schema_hash)
+        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+    let field_schemas = extract_field_schemas(&schema);
+
+    let writer_output = create_writer(ruby, write_to, schema.clone(), compression)?;
+
+    let use_cache = string_cache.unwrap_or(false);
+    let converter = if use_cache {
+        RubyValueConverter::with_string_cache(StringCache::new(true))
+    } else {
+        RubyValueConverter::new()
+    };
+
+    // Batch manager: row_group_target_bytes maps to memory_threshold
+    let batch_manager = BatchSizeManager::new(None, row_group_target_bytes, sample_size);
+
+    // Optional log
+    let logger = RubyLogger::new(logger)?;
+    let _ = logger.info(|| format!(
+        "FileWriter created: target_bytes={:?} sample_size={:?}",
+        row_group_target_bytes, sample_size
+    ));
+
+    let writer = IncrementalWriter {
+        writer_output,
+        field_schemas,
+        converter,
+        batch_manager,
+        batch: Vec::new(),
+        batch_memory_size: 0,
+        closed: false,
+    };
+
+    let id = FW_NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    FW_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, writer);
+    });
+    Ok(id)
+}
+
+pub fn file_writer_write_rows(ruby: &Ruby, id: u64, rows: Value) -> Result<(), MagnusError> {
+    let mut_opt = FW_REGISTRY.with(|reg| reg.borrow_mut().remove(&id));
+    let mut writer = if let Some(w) = mut_opt { w } else {
+        return Err(MagnusError::new(
+            magnus::exception::runtime_error(),
+            format!("Invalid writer id {id}"),
+        ));
+    };
+    if writer.closed {
+        return Err(MagnusError::new(
+            magnus::exception::runtime_error(),
+            "Writer is closed",
+        ));
+    }
+
+    let rows_ary: RArray = if rows.is_kind_of(ruby.class_array()) {
+        magnus::TryConvert::try_convert(rows)?
+    } else if rows.respond_to("to_a", false)? {
+        let array_value: Value = rows.funcall("to_a", ())?;
+        magnus::TryConvert::try_convert(array_value)?
+    } else {
+        return Err(MagnusError::new(
+            ruby.exception_type_error(),
+            "rows must be an array or respond to 'to_a'",
+        ));
+    };
+
+    for row_value in rows_ary.into_iter() {
+        if !row_value.is_kind_of(ruby.class_array()) {
+            return Err(MagnusError::new(
+                ruby.exception_type_error(),
+                "each row must be an array",
+            ));
+        }
+        let row_array: RArray = magnus::TryConvert::try_convert(row_value)?;
+        let mut values = Vec::with_capacity(row_array.len());
+        for (idx, item) in row_array.into_iter().enumerate() {
+            let schema_hint = writer.field_schemas.get(idx);
+            let pq_value = writer.converter.to_parquet_with_schema_hint(item, schema_hint).map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("EncodingError") || msg.contains("invalid utf-8") {
+                    if let Some(pos) = msg.find("EncodingError: ") {
+                        let encoding_msg = msg[pos + 15..].to_string();
+                        MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
+                    } else {
+                        MagnusError::new(ruby.exception_encoding_error(), msg)
+                    }
+                } else {
+                    MagnusError::new(ruby.exception_runtime_error(), msg)
+                }
+            })?;
+            values.push(pq_value);
+        }
+
+        // Estimate size
+        let row_size = crate::utils::estimate_row_size(&values);
+        writer.batch_manager.record_row_size(row_size);
+        writer.batch_memory_size += row_size;
+        writer.batch.push(values);
+
+        if writer
+            .batch_manager
+            .should_flush(writer.batch.len(), writer.batch_memory_size)
+        {
+            // Flush to core and seal row group
+            writer.write_batch_to_core()?;
+            match &mut writer.writer_output {
+                WriterOutput::File(w) | WriterOutput::TempFile(w, _, _) => {
+                    w.flush()
+                        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+                }
+            }
+        }
+    }
+
+    // Put back
+    FW_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, writer);
+    });
+    Ok(())
+}
+
+pub fn file_writer_flush_row_group(_ruby: &Ruby, id: u64) -> Result<(), MagnusError> {
+    let mut_opt = FW_REGISTRY.with(|reg| reg.borrow_mut().remove(&id));
+    let mut writer = if let Some(w) = mut_opt { w } else {
+        return Err(MagnusError::new(
+            magnus::exception::runtime_error(),
+            format!("Invalid writer id {id}"),
+        ));
+    };
+    if writer.closed {
+        // Put back in case of duplicate calls
+        FW_REGISTRY.with(|reg| {
+            reg.borrow_mut().insert(id, writer);
+        });
+        return Err(MagnusError::new(magnus::exception::runtime_error(), "Writer is closed"));
+    }
+
+    writer.write_batch_to_core()?;
+    match &mut writer.writer_output {
+        WriterOutput::File(w) | WriterOutput::TempFile(w, _, _) => {
+            w.flush()
+                .map_err(|e| MagnusError::new(magnus::exception::runtime_error(), e.to_string()))?;
+        }
+    }
+
+    // Put back
+    FW_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, writer);
+    });
+    Ok(())
+}
+
+pub fn file_writer_close(_ruby: &Ruby, id: u64) -> Result<(), MagnusError> {
+    let mut writer = FW_REGISTRY
+        .with(|reg| reg.borrow_mut().remove(&id))
+        .ok_or_else(|| {
+            MagnusError::new(
+                magnus::exception::runtime_error(),
+                format!("Invalid writer id {id}"),
+            )
+        })?;
+    if writer.closed {
+        return Ok(());
+    }
+
+    // Flush remaining
+    writer.write_batch_to_core()?;
+
+    // Finalize
+    finalize_writer(writer.writer_output)?;
+    writer.closed = true;
+    Ok(())
 }

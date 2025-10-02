@@ -30,4 +30,30 @@ module Parquet
       __original_each_column__(source, result_type: result_type, columns: columns, row_groups: row_groups, batch_size: batch_size, strict: strict, logger: logger, &block)
     end
   end
+
+  class FileWriter
+    def initialize(schema:, write_to:, compression: nil, row_group_target_bytes: nil, sample_size: nil, string_cache: false, logger: nil)
+      @id = Parquet._fw_create(schema, write_to,
+        compression: compression,
+        row_group_target_bytes: row_group_target_bytes,
+        sample_size: sample_size,
+        string_cache: string_cache,
+        logger: logger)
+    end
+
+    def write_rows(rows)
+      Parquet._fw_write_rows(@id, rows)
+      self
+    end
+
+    def flush_row_group
+      Parquet._fw_flush_row_group(@id)
+      self
+    end
+
+    def close
+      Parquet._fw_close(@id)
+      self
+    end
+  end
 end

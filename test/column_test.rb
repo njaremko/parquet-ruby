@@ -291,3 +291,39 @@ class ColumnTest < Minitest::Test
     end
   end
 end
+
+class FileWriterRowGroupTest < Minitest::Test
+  def test_row_group_target_bytes_enforced
+    schema = {
+      type: :struct,
+      fields: [
+        { name: "id", type: :int64, nullable: false },
+        { name: "payload", type: :string, nullable: true },
+      ],
+    }
+
+    rows1 = Array.new(200) { |i| [i, "x" * 800] }
+    rows2 = Array.new(200) { |i| [1000 + i, "y" * 800] }
+
+    Tempfile.create(["rg_target", ".parquet"]) do |tmp|
+      writer = Parquet::FileWriter.new(
+        schema: schema,
+        write_to: tmp.path,
+        compression: "snappy",
+        row_group_target_bytes: 512 * 1024,
+      )
+      writer.write_rows(rows1)
+      writer.flush_row_group
+      writer.write_rows(rows2)
+      writer.close
+
+      md = Parquet.metadata(tmp.path)
+      rgs = md["row_groups"] || []
+      assert_operator rgs.size, :>=, 2
+      sizes = rgs.map { |rg| rg["total_byte_size"].to_i }
+      assert sizes.all? { |b| b > 0 }
+      # Expect each RG roughly within a few MB, certainly < 6MB for this tiny fixture
+      assert sizes.all? { |b| b < 6 * 1024 * 1024 }, "row groups too large: #{sizes.inspect}"
+    end
+  end
+end
