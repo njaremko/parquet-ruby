@@ -13,7 +13,7 @@ GEM
     bigdecimal (3.1.5)
     csv (3.3.2)
     memory_profiler (1.1.0)
-    minitest (5.25.4)
+    minitest (5.27.0)
     rake (13.2.1)
     rake-compiler (1.2.9)
       rake

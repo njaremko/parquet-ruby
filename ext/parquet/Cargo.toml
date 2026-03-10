@@ -19,7 +19,7 @@ bytes = "^1.9"
 either = "1.9"
 itertools = "^0.14"
 jiff = "0.2"
-magnus = { version = "0.7", features = ["rb-sys"] }
+magnus = { version = "0.8", features = ["rb-sys", "old-api"] }
 parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["json"] }
 parquet-ruby-adapter = { path = "../parquet-ruby-adapter" }
 rand = "0.9"
