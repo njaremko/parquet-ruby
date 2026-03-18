@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-static STRING_CACHE: LazyLock<Mutex<HashSet<Arc<str>>>> =
-    LazyLock::new(|| Mutex::new(HashSet::with_capacity(100)));
+use magnus::RString;
 
-/// A cache for interning strings to reduce memory usage
+static STRING_CACHE: LazyLock<Mutex<HashMap<String, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::with_capacity(100)));
+
+/// A cache for interning strings in the Ruby VM to reduce memory usage
 /// when there are many repeated strings
 #[derive(Debug)]
 pub struct StringCache {
@@ -23,37 +25,46 @@ impl StringCache {
         }
     }
 
-    /// Intern a string, returning a shared reference.
-    /// Deduplicates repeated strings via an internal cache.
+    /// Intern a string in Ruby's VM, returning the same string for tracking
+    /// Note: We return the input string to maintain API compatibility,
+    /// but internally we ensure it's interned in Ruby's VM
     pub fn intern(&mut self, s: String) -> Arc<str> {
         if !self.enabled {
             return Arc::from(s.as_str());
         }
 
-        let result = (|| -> Result<Arc<str>, String> {
+        // Try to get or create the interned string
+        let result = (|| -> Result<(), String> {
             let mut cache = STRING_CACHE.lock().map_err(|e| e.to_string())?;
 
-            if let Some(cached) = cache.get(s.as_str()) {
+            if cache.contains_key(s.as_str()) {
                 let mut hits = self.hits.lock().map_err(|e| e.to_string())?;
                 *hits += 1;
-                Ok(Arc::clone(cached))
             } else {
-                let arc: Arc<str> = Arc::from(s.as_str());
-                cache.insert(Arc::clone(&arc));
+                // Create Ruby string and intern it
+                let rstring = RString::new(&s);
+                let interned = rstring.to_interned_str();
+                // SAFETY: `to_interned_str` returns a frozen, VM-interned string that
+                // Ruby guarantees will not be garbage collected. The resulting &str is
+                // therefore valid for the lifetime of the process ('static).
+                let static_str: &'static str = unsafe {
+                    std::mem::transmute(interned.as_str().map_err(|e| e.to_string())?)
+                };
+
+                cache.insert(s.clone(), static_str);
 
                 let mut misses = self.misses.lock().map_err(|e| e.to_string())?;
                 *misses += 1;
-                Ok(arc)
             }
+            Ok(())
         })();
 
-        match result {
-            Ok(arc) => arc,
-            Err(e) => {
-                eprintln!("String cache error: {}", e);
-                Arc::from(s.as_str())
-            }
+        // Log any errors but don't fail - just return the string
+        if let Err(e) = result {
+            eprintln!("String cache error: {}", e);
         }
+
+        Arc::from(s.as_str())
     }
 
     /// Get cache statistics
