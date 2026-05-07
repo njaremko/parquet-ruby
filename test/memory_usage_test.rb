@@ -179,7 +179,6 @@ class MemoryUsageTest < Minitest::Test
   end
 
   def test_concurrent_reading_memory_efficiency
-    # Create a moderately large file
     row_count = 100_000
     data = (0...row_count).map do |i|
       [i, "Name #{i}", "Description #{i}", i * 2.5]
@@ -196,28 +195,43 @@ class MemoryUsageTest < Minitest::Test
 
     Parquet.write_rows(data, schema: schema, write_to: @test_file)
 
-    # Test multiple concurrent readers don't multiply memory usage
-    memory_stats = measure_memory_growth do
-      threads = 4.times.map do |thread_id|
+    read_with = lambda do |thread_count|
+      threads = thread_count.times.map do
         Thread.new do
           count = 0
           Parquet.each_row(@test_file) do |row|
             count += 1
-            # Minimal processing
             _ = row['id']
           end
           count
         end
       end
-
       results = threads.map(&:value)
-      assert_equal [row_count] * 4, results
+      assert_equal [row_count] * thread_count, results
     end
 
-    puts "Concurrent reading memory growth: #{memory_stats[:memory_growth_mb].round(2)}MB" if ENV["VERBOSE"]
-    # Memory shouldn't grow linearly with thread count
-    assert memory_stats[:memory_growth_mb] < 100,
-           "Memory grew by #{memory_stats[:memory_growth_mb].round(2)}MB with 4 threads"
+    # Warm up so subsequent measurements reflect steady-state, not first-run
+    # allocator setup, page-cache misses, or Ruby heap growth.
+    read_with.call(1)
+
+    baseline   = measure_memory_growth { read_with.call(1) }[:memory_growth_mb]
+    concurrent = measure_memory_growth { read_with.call(4) }[:memory_growth_mb]
+
+    if ENV["VERBOSE"]
+      puts "1-thread growth: #{baseline.round(2)}MB"
+      puts "4-thread growth: #{concurrent.round(2)}MB"
+    end
+
+    # Test the property in this test's name: concurrent reads should scale
+    # sub-linearly. 4 readers should cost less than 2x a single reader.
+    # The 30MB floor protects against the case where the baseline measurement
+    # is in the RSS-noise band (a few MB) — without it a 1MB baseline plus
+    # 20MB concurrent (both noise) would look like 20x scaling and fire
+    # spuriously on shared CI runners where mimalloc holds per-thread arenas.
+    ceiling = [baseline * 2, 30].max
+    assert_operator concurrent, :<, ceiling,
+                    "4-thread growth #{concurrent.round(1)}MB exceeded ceiling " \
+                    "#{ceiling.round(1)}MB (2x baseline of #{baseline.round(1)}MB or 30MB floor)"
   end
 
   def test_memory_with_complex_types
