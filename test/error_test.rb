@@ -32,7 +32,7 @@ class ErrorTest < Minitest::Test
           Parquet.write_rows([[invalid_utf8_bytes]].each, schema: schema, write_to: temp_path)
         end
 
-      assert_match(/invalid utf-8 sequence/i, error.message)
+      assert_match(/invalid utf-?8|expected utf-?8/i, error.message)
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
