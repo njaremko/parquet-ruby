@@ -1,12 +1,12 @@
 use magnus::value::ReprValue;
 use magnus::{
     scan_args::{get_kwargs, scan_args},
-    Error as MagnusError, KwArgs, RArray, RHash, Ruby, Symbol, Value,
+    Error as MagnusError, KwArgs, RArray, RHash, Ruby, Symbol, TryConvert, Value,
 };
 use parquet::basic::Compression;
 use parquet_core::ParquetValue;
 
-use crate::types::{ColumnEnumeratorArgs, ParquetWriteArgs, RowEnumeratorArgs};
+use crate::types::{BloomFilterConfig, ColumnEnumeratorArgs, ParquetWriteArgs, RowEnumeratorArgs};
 
 /// Estimate the memory size of a ParquetValue
 pub fn estimate_parquet_value_size(value: &ParquetValue) -> usize {
@@ -96,6 +96,7 @@ pub fn parse_parquet_write_args(
             Option<Option<usize>>,
             Option<Option<Value>>,
             Option<Option<bool>>,
+            Option<Option<Value>>, // bloom_filters
         ),
         (),
     >(
@@ -108,8 +109,62 @@ pub fn parse_parquet_write_args(
             "sample_size",
             "logger",
             "string_cache",
+            "bloom_filters",
         ],
     )?;
+
+    // Parse bloom_filters: array of hashes
+    let bloom_filters = if let Some(bf_val) = kwargs.optional.6.flatten() {
+        if bf_val.is_kind_of(_ruby.class_array()) {
+            let arr: RArray = <RArray as TryConvert>::try_convert(bf_val)?;
+            let mut out: Vec<BloomFilterConfig> = Vec::with_capacity(arr.len());
+            for entry in arr.into_iter() {
+                let hash: RHash = <RHash as TryConvert>::try_convert(entry)?;
+                // path should always be an array of strings
+                let path_value = hash
+                    .fetch::<_, Value>(Symbol::new("path"))
+                    .map_err(|e| MagnusError::new(magnus::exception::arg_error(), format!("bloom_filters entry missing 'path' key: {}", e)))?;
+                
+                // Expect path to always be an array
+                if !path_value.is_kind_of(_ruby.class_array()) {
+                    return Err(MagnusError::new(
+                        magnus::exception::arg_error(),
+                        "bloom_filters 'path' must be an Array of column name parts (e.g., ['column_name'] or ['parent', 'child'])",
+                    ));
+                }
+                
+                let pa: RArray = <RArray as TryConvert>::try_convert(path_value)?;
+                let mut path = Vec::with_capacity(pa.len());
+                for p in pa.into_iter() {
+                    let s: String = <String as TryConvert>::try_convert(p)?;
+                    path.push(s);
+                };
+
+                let fpp = hash
+                    .fetch::<_, Value>(Symbol::new("false_positive_probability"))
+                    .ok()
+                    .and_then(|v| <f64 as TryConvert>::try_convert(v).ok());
+                let ndv = hash
+                    .fetch::<_, Value>(Symbol::new("n_distinct_values"))
+                    .ok()
+                    .and_then(|v| <u64 as TryConvert>::try_convert(v).ok());
+
+                out.push(BloomFilterConfig {
+                    path,
+                    false_positive_probability: fpp,
+                    n_distinct_values: ndv,
+                });
+            }
+            Some(out)
+        } else {
+            return Err(MagnusError::new(
+                magnus::exception::arg_error(),
+                "bloom_filters must be an Array of Hashes",
+            ));
+        }
+    } else {
+        None
+    };
 
     Ok(ParquetWriteArgs {
         read_from,
@@ -121,6 +176,7 @@ pub fn parse_parquet_write_args(
         sample_size: kwargs.optional.3.flatten(),
         logger: kwargs.optional.4.flatten(),
         string_cache: kwargs.optional.5.flatten(),
+        bloom_filters,
     })
 }
 

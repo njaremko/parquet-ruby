@@ -15,6 +15,7 @@ pub struct ParquetWriteArgs {
     pub sample_size: Option<usize>,
     pub logger: Option<Value>,
     pub string_cache: Option<bool>,
+    pub bloom_filters: Option<Vec<BloomFilterConfig>>, 
 }
 
 /// Arguments for creating row enumerators
@@ -49,6 +50,14 @@ pub enum WriterOutput {
 pub enum ParserResultType {
     Hash,
     Array,
+}
+
+/// Bloom filter configuration for a single column
+#[derive(Debug, Clone)]
+pub struct BloomFilterConfig {
+    pub path: Vec<String>,
+    pub false_positive_probability: Option<f64>,
+    pub n_distinct_values: Option<u64>,
 }
 
 impl ParserResultType {

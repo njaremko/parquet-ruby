@@ -1,6 +1,7 @@
 use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, Ruby, TryConvert, Value};
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
 use parquet_core::Schema;
 use std::io::{BufReader, BufWriter, Write};
 use tempfile::NamedTempFile;
@@ -15,11 +16,32 @@ pub fn create_writer(
     write_to: Value,
     schema: Schema,
     compression: Option<String>,
+    bloom_filters: Option<Vec<crate::types::BloomFilterConfig>>,
 ) -> Result<WriterOutput, MagnusError> {
     let compression_setting = parse_compression(compression)?;
-    let props = WriterProperties::builder()
-        .set_compression(compression_setting)
-        .build();
+    let mut builder = WriterProperties::builder();
+    builder = builder.set_compression(compression_setting);
+
+    const DEFAULT_MAX_ROW_GROUP_SIZE: u64 = 1048576;
+
+    if let Some(configs) = bloom_filters {
+        for cfg in configs {
+            let col_path = ColumnPath::new(cfg.path.clone());
+            builder = builder.set_column_bloom_filter_enabled(col_path.clone(), true);
+
+            if let Some(fpp) = cfg.false_positive_probability {
+                builder = builder.set_column_bloom_filter_fpp(col_path.clone(), fpp);
+            }
+            if let Some(ndv) = cfg.n_distinct_values {
+                // Cap NDV to row group size since bloom filters are per row group
+                // This prevents creating unnecessarily large bloom filters
+                let capped_ndv = ndv.min(DEFAULT_MAX_ROW_GROUP_SIZE);
+                builder = builder.set_column_bloom_filter_ndv(col_path.clone(), capped_ndv);
+            }
+        }
+    }
+
+    let props = builder.build();
 
     if write_to.is_kind_of(ruby.class_string()) {
         // Direct file path
@@ -147,6 +169,7 @@ pub fn write_rows(
         write_args.write_to,
         schema.clone(),
         write_args.compression,
+        write_args.bloom_filters.clone(),
     )?;
 
     // Create logger
@@ -335,6 +358,7 @@ pub fn write_columns(
         write_args.write_to,
         schema.clone(),
         write_args.compression,
+        write_args.bloom_filters.clone(),
     )?;
 
     // Get column names from schema

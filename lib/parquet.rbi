@@ -92,7 +92,8 @@ module Parquet
       batch_size: T.nilable(Integer),
       flush_threshold: T.nilable(Integer),
       compression: T.nilable(String),
-      sample_size: T.nilable(Integer)
+      sample_size: T.nilable(Integer),
+      bloom_filters: T.nilable(T::Array[T::Hash[Symbol, T.untyped]])
     ).void
   end
   def self.write_rows(
@@ -102,7 +103,8 @@ module Parquet
     batch_size: nil,
     flush_threshold: nil,
     compression: nil,
-    sample_size: nil
+    sample_size: nil,
+    bloom_filters: nil
   )
   end
 
@@ -128,9 +130,10 @@ module Parquet
       schema: T::Array[T::Hash[String, String]],
       write_to: T.any(String, IO),
       flush_threshold: T.nilable(Integer),
-      compression: T.nilable(String)
+      compression: T.nilable(String),
+      bloom_filters: T.nilable(T::Array[T::Hash[Symbol, T.untyped]])
     ).void
   end
-  def self.write_columns(read_from, schema:, write_to:, flush_threshold: nil, compression: nil)
+  def self.write_columns(read_from, schema:, write_to:, flush_threshold: nil, compression: nil, bloom_filters: nil)
   end
 end

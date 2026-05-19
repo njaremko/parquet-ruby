@@ -196,7 +196,7 @@ schema = [
 Parquet.write_columns(batches.each,
   schema: schema,
   write_to: "output.parquet",
-  compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd
+  compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd, brotli
 )
 ```
 
@@ -364,6 +364,88 @@ schema = Parquet::Schema.define do
 end
 ```
 
+## Bloom Filters
+
+Bloom filters are probabilistic data structures that can significantly speed up queries by allowing readers to skip row groups that definitely don't contain the data they're looking for. They're particularly useful for high-cardinality columns like UUIDs, email addresses, or device IDs.
+
+**Important**: Bloom filters are created **per row group**, not per file. This means each row group (default size: 1M rows) has its own bloom filter for each configured column, allowing fine-grained filtering during queries.
+
+### Basic Usage
+
+```ruby
+# Add bloom filters when writing data
+Parquet.write_rows(data,
+  schema: schema,
+  write_to: "output.parquet",
+  bloom_filters: [
+    { path: ["uuid"], false_positive_probability: 0.01, n_distinct_values: 10_000 },
+    { path: ["email"], false_positive_probability: 0.01, n_distinct_values: 5_000 }
+  ]
+)
+```
+
+### Configuration Options
+
+Each bloom filter configuration supports:
+- `path`: Array of column name parts (required). For top-level columns use a single-element array: `['column_name']`. For nested columns use multiple elements: `['user', 'email']`
+- `false_positive_probability`: Target false positive rate (default: 0.05). Lower values = more accurate but larger filters
+- `n_distinct_values`: Expected number of distinct values (default: 1,000,000). Helps optimize filter size. **Note**: This value is automatically capped to the row group size (default 1M rows) to prevent creating unnecessarily large bloom filters
+
+### Examples
+
+```ruby
+# Using defaults - simplest approach
+bloom_filters: [
+  { path: ["user_id"] }  # Uses default fpp: 0.05, ndv: 1,000,000
+]
+
+# Custom configuration for better accuracy
+bloom_filters: [
+  { path: ["uuid"], false_positive_probability: 0.001, n_distinct_values: 100_000 }
+]
+
+# Multiple columns with different settings
+bloom_filters: [
+  { path: ["user_id"], false_positive_probability: 0.01, n_distinct_values: 50_000 },
+  { path: ["session_id"], false_positive_probability: 0.05, n_distinct_values: 200_000 },
+  { path: ["device_type"] }  # Low cardinality column with defaults
+]
+
+# Nested columns in structured data
+bloom_filters: [
+  { path: ["user", "email"], false_positive_probability: 0.01, n_distinct_values: 10_000 }
+]
+```
+
+### When to Use Bloom Filters
+
+**Good candidates:**
+- High-cardinality columns (UUIDs, email addresses, user IDs)
+- Columns frequently used in WHERE clauses
+- Columns with mostly unique values
+
+**Not recommended for:**
+- Low-cardinality columns (boolean, status codes with few values)
+- Columns rarely used in queries
+- Very small datasets where the overhead isn't worth it
+
+### Trade-offs
+
+- **Storage**: Bloom filters increase file size. A filter for 10,000 values with 0.01 FPP adds ~16KB
+- **Write performance**: Slightly slower writes due to filter computation
+- **Query performance**: Can dramatically improve read performance when filtering data
+
+### Size Estimation
+
+Approximate bloom filter sizes for common configurations:
+
+| Distinct Values | FPP = 0.01 | FPP = 0.05 | FPP = 0.1 |
+|-----------------|------------|------------|-----------|
+| 1,000           | 1.5 KB     | 1 KB       | 0.7 KB    |
+| 10,000          | 16 KB      | 10 KB      | 7 KB      |
+| 100,000         | 150 KB     | 100 KB     | 70 KB     |
+| 1,000,000       | 1.5 MB     | 1 MB       | 700 KB    |
+
 ## Performance Tips
 
 1. **Use column-wise reading** when you need only a few columns from wide tables
@@ -372,6 +454,7 @@ end
    - Larger batches = better throughput but more memory
    - Smaller batches = less memory but more overhead
 4. **Pre-sort data** by commonly filtered columns for better compression
+5. **Add bloom filters** to high-cardinality columns used in WHERE clauses
 
 
 ## Memory Management
