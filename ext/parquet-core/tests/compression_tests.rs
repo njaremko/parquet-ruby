@@ -2,8 +2,8 @@ use bytes::Bytes;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use parquet_core::*;
-use std::sync::Arc;
 use std::time::Instant;
+use triomphe::Arc;
 
 #[test]
 fn test_compression_effectiveness() {

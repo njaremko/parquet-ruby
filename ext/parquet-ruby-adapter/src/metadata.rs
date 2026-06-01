@@ -7,6 +7,14 @@ use crate::error::{IntoMagnusError, Result, RubyAdapterError};
 use crate::io::{RubyIOReader, ThreadSafeRubyIOReader};
 use crate::TryIntoValue;
 
+fn parquet_time_unit_name(unit: &parquet::basic::TimeUnit) -> &'static str {
+    match unit {
+        parquet::basic::TimeUnit::MILLIS => "millis",
+        parquet::basic::TimeUnit::MICROS => "micros",
+        parquet::basic::TimeUnit::NANOS => "nanos",
+    }
+}
+
 /// Wrapper for ParquetMetaData to implement IntoValue trait
 pub struct RubyParquetMetaData(pub ParquetMetaData);
 
@@ -116,17 +124,17 @@ impl TryIntoValue for RubyParquetMetaData {
                     RubyAdapterError::metadata(format!("Failed to set converted_type: {}", e))
                 })?;
 
-            if let Some(logical_type) = basic_info.logical_type() {
+            if let Some(logical_type) = basic_info.logical_type_ref() {
                 let logical_type_value = match logical_type {
                     parquet::basic::LogicalType::Decimal { scale, precision } => {
                         let logical_hash = handle.hash_new();
                         logical_hash.aset("type", "Decimal").map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set type: {}", e))
                         })?;
-                        logical_hash.aset("scale", scale).map_err(|e| {
+                        logical_hash.aset("scale", *scale).map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set scale: {}", e))
                         })?;
-                        logical_hash.aset("precision", precision).map_err(|e| {
+                        logical_hash.aset("precision", *precision).map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set precision: {}", e))
                         })?;
                         logical_hash.as_value()
@@ -151,11 +159,7 @@ impl TryIntoValue for RubyParquetMetaData {
                                 ))
                             })?;
 
-                        let unit_str = match unit {
-                            parquet::basic::TimeUnit::MILLIS(_) => "millis",
-                            parquet::basic::TimeUnit::MICROS(_) => "micros",
-                            parquet::basic::TimeUnit::NANOS(_) => "nanos",
-                        };
+                        let unit_str = parquet_time_unit_name(unit);
                         logical_hash.aset("unit", unit_str).map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set unit: {}", e))
                         })?;
@@ -170,18 +174,14 @@ impl TryIntoValue for RubyParquetMetaData {
                             RubyAdapterError::metadata(format!("Failed to set type: {}", e))
                         })?;
                         logical_hash
-                            .aset("is_adjusted_to_utc", is_adjusted_to_u_t_c)
+                            .aset("is_adjusted_to_utc", *is_adjusted_to_u_t_c)
                             .map_err(|e| {
                                 RubyAdapterError::metadata(format!(
                                     "Failed to set is_adjusted_to_u_t_c: {}",
                                     e
                                 ))
                             })?;
-                        let unit_str = match unit {
-                            parquet::basic::TimeUnit::MILLIS(_) => "millis",
-                            parquet::basic::TimeUnit::MICROS(_) => "micros",
-                            parquet::basic::TimeUnit::NANOS(_) => "nanos",
-                        };
+                        let unit_str = parquet_time_unit_name(unit);
                         logical_hash.aset("unit", unit_str).map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set unit: {}", e))
                         })?;
@@ -195,7 +195,7 @@ impl TryIntoValue for RubyParquetMetaData {
                         logical_hash.aset("type", "Integer").map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set type: {}", e))
                         })?;
-                        logical_hash.aset("bit_width", bit_width).map_err(|e| {
+                        logical_hash.aset("bit_width", *bit_width).map_err(|e| {
                             RubyAdapterError::metadata(format!("Failed to set bit_width: {}", e))
                         })?;
                         logical_hash

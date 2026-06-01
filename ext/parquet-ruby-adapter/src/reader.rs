@@ -1,16 +1,17 @@
-use magnus::value::ReprValue;
+use magnus::value::{BoxValue, ReprValue};
 use magnus::{Error as MagnusError, IntoValue, RArray, RHash, Ruby, TryConvert, Value};
 use parquet_core::reader::Reader;
 
-use crate::StringCache;
 use crate::{
     converter::parquet_to_ruby,
     io::{RubyIOReader, ThreadSafeRubyIOReader},
     logger::RubyLogger,
+    string_storage::{StringStorage, StringStorageConfig},
     types::{ColumnEnumeratorArgs, ParserResultType, RowEnumeratorArgs},
     utils::{create_column_enumerator, create_row_enumerator, handle_block_or_enum},
     CloneableChunkReader,
 };
+use std::collections::HashSet;
 
 /// Read parquet file row by row
 pub fn each_row(
@@ -20,17 +21,22 @@ pub fn each_row(
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
     strict: bool,
+    string_storage: StringStorageConfig,
     logger: RubyLogger,
 ) -> Result<Value, MagnusError> {
     if let Some(enum_value) = handle_block_or_enum(ruby.block_given(), || {
-        create_row_enumerator(RowEnumeratorArgs {
-            rb_self,
-            to_read,
-            result_type,
-            columns: columns.clone(),
-            strict,
-            logger: logger.inner(),
-        })
+        create_row_enumerator(
+            ruby,
+            RowEnumeratorArgs {
+                rb_self,
+                to_read,
+                result_type,
+                columns: columns.clone(),
+                strict,
+                string_storage,
+                logger: logger.inner(),
+            },
+        )
         .map(|yield_enum| yield_enum.into_value_with(ruby))
     })? {
         return Ok(enum_value);
@@ -80,12 +86,20 @@ pub fn each_row(
 
     let _ = logger.info(|| format!("Processing {} columns", all_column_names.len()));
 
-    // Get the row iterator
+    // Get the row iterator. Projected rows are yielded in file-schema order, not
+    // request order, so the hash keys must follow file order too — derive them by
+    // filtering the file columns, never from the request-ordered `cols`.
     let (row_iter, column_names) = if let Some(ref cols) = columns {
+        let requested = cols.iter().map(String::as_str).collect::<HashSet<_>>();
+        let projected_names = all_column_names
+            .iter()
+            .filter(|name| requested.contains(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
         let iter = reader
             .read_rows_with_projection(cols)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        (iter, cols.clone())
+        (iter, projected_names)
     } else {
         let iter = reader
             .read_rows()
@@ -93,19 +107,15 @@ pub fn each_row(
         (iter, all_column_names)
     };
 
-    // Process with block
-    let proc = ruby.block_proc().map_err(|e| {
-        MagnusError::new(
-            ruby.exception_runtime_error(),
-            format!("Failed to get block: {}", e),
-        )
-    })?;
     let mut row_count = 0u64;
+    let mut string_storage = StringStorage::new(string_storage);
 
-    let mut cache = StringCache::new(true);
+    // BoxValue registers each interned key with the GC so it survives a
+    // GC.compact triggered by user code inside the yield loop; a bare RString
+    // held in this Vec would be relocated and dangle.
     let interned_column_names = column_names
         .iter()
-        .map(|name| cache.intern(name.clone()))
+        .map(|name| BoxValue::new(ruby.str_new(name).to_interned_str()))
         .collect::<Vec<_>>();
 
     for row_result in row_iter {
@@ -117,7 +127,7 @@ pub fn each_row(
             ParserResultType::Array => {
                 let array: RArray = ruby.ary_new_capa(row.len());
                 for value in row {
-                    let ruby_value = parquet_to_ruby(value).map_err(|e| {
+                    let ruby_value = parquet_to_ruby(value, &mut string_storage).map_err(|e| {
                         MagnusError::new(ruby.exception_runtime_error(), e.to_string())
                     })?;
                     array.push(ruby_value)?;
@@ -125,20 +135,21 @@ pub fn each_row(
                 array.as_value()
             }
             ParserResultType::Hash => {
-                let hash: RHash = ruby.hash_new();
+                let hash: RHash = ruby.hash_new_capa(row.len());
                 for (idx, value) in row.into_iter().enumerate() {
                     if idx < interned_column_names.len() {
-                        let ruby_value = parquet_to_ruby(value).map_err(|e| {
-                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                        })?;
-                        hash.aset(interned_column_names[idx].as_ref(), ruby_value)?;
+                        let ruby_value =
+                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
+                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                            })?;
+                        hash.aset(interned_column_names[idx].as_value(), ruby_value)?;
                     }
                 }
                 hash.as_value()
             }
         };
 
-        proc.call::<_, Value>((ruby_row,))?;
+        let _: Value = ruby.yield_value(ruby_row)?;
 
         row_count += 1;
         if row_count % 1000 == 0 {
@@ -159,6 +170,7 @@ struct EachColumnArgs {
     columns: Option<Vec<String>>,
     batch_size: Option<usize>,
     strict: bool,
+    string_storage: StringStorageConfig,
     logger: RubyLogger,
 }
 
@@ -172,6 +184,7 @@ pub fn each_column(
     columns: Option<Vec<String>>,
     batch_size: Option<usize>,
     strict: bool,
+    string_storage: StringStorageConfig,
     logger: RubyLogger,
 ) -> Result<Value, MagnusError> {
     let args = EachColumnArgs {
@@ -181,6 +194,7 @@ pub fn each_column(
         columns,
         batch_size,
         strict,
+        string_storage,
         logger,
     };
     each_column_impl(ruby, args)
@@ -188,15 +202,19 @@ pub fn each_column(
 
 fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusError> {
     if let Some(enum_value) = handle_block_or_enum(ruby.block_given(), || {
-        create_column_enumerator(ColumnEnumeratorArgs {
-            rb_self: args.rb_self,
-            to_read: args.to_read,
-            result_type: args.result_type,
-            columns: args.columns.clone(),
-            batch_size: args.batch_size,
-            strict: args.strict,
-            logger: args.logger.inner(),
-        })
+        create_column_enumerator(
+            ruby,
+            ColumnEnumeratorArgs {
+                rb_self: args.rb_self,
+                to_read: args.to_read,
+                result_type: args.result_type,
+                columns: args.columns.clone(),
+                batch_size: args.batch_size,
+                strict: args.strict,
+                string_storage: args.string_storage,
+                logger: args.logger.inner(),
+            },
+        )
         .map(|yield_enum| yield_enum.into_value_with(ruby))
     })? {
         return Ok(enum_value);
@@ -263,14 +281,8 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         (iter, all_column_names)
     };
 
-    // Process with block
-    let proc = ruby.block_proc().map_err(|e| {
-        MagnusError::new(
-            ruby.exception_runtime_error(),
-            format!("Failed to get block: {}", e),
-        )
-    })?;
     let mut batch_count = 0u64;
+    let mut string_storage = StringStorage::new(args.string_storage);
 
     for batch_result in col_iter {
         let batch = batch_result
@@ -283,9 +295,10 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 for (_name, values) in batch.columns {
                     let col_array: RArray = ruby.ary_new_capa(values.len());
                     for value in values {
-                        let ruby_value = parquet_to_ruby(value).map_err(|e| {
-                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                        })?;
+                        let ruby_value =
+                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
+                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                            })?;
                         col_array.push(ruby_value)?;
                     }
                     array.push(col_array)?;
@@ -297,18 +310,20 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 for (name, values) in batch.columns {
                     let col_array: RArray = ruby.ary_new_capa(values.len());
                     for value in values {
-                        let ruby_value = parquet_to_ruby(value).map_err(|e| {
-                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                        })?;
+                        let ruby_value =
+                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
+                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                            })?;
                         col_array.push(ruby_value)?;
                     }
-                    hash.aset(name, col_array)?;
+                    let ruby_key = string_storage.ruby_key(ruby, &name);
+                    hash.aset(ruby_key, col_array)?;
                 }
                 hash.as_value()
             }
         };
 
-        proc.call::<_, Value>((ruby_batch,))?;
+        let _: Value = ruby.yield_value(ruby_batch)?;
 
         batch_count += 1;
         let _ = args

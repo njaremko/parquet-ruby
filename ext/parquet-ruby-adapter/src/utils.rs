@@ -1,68 +1,53 @@
 use magnus::value::ReprValue;
 use magnus::{
     scan_args::{get_kwargs, scan_args},
-    Error as MagnusError, KwArgs, RArray, RHash, Ruby, Symbol, Value,
+    Error as MagnusError, KwArgs, Ruby, TryConvert, Value,
 };
 use parquet::basic::Compression;
-use parquet_core::ParquetValue;
+use parquet_core::{MAX_BATCH_SIZE, MAX_SAMPLE_SIZE};
 
+use crate::string_cache::{DEFAULT_STRING_CACHE_CAPACITY, STRING_CACHE_CAPACITY_MAX};
+use crate::string_storage::{
+    StringStorageConfig, StringStorageMode, DEFAULT_SHARED_MAX_ENTRIES,
+    DEFAULT_SHARED_MAX_VALUE_BYTES,
+};
 use crate::types::{ColumnEnumeratorArgs, ParquetWriteArgs, RowEnumeratorArgs};
 
-/// Estimate the memory size of a ParquetValue
-pub fn estimate_parquet_value_size(value: &ParquetValue) -> usize {
-    match value {
-        ParquetValue::Null => 1,
-        ParquetValue::Boolean(_) => 1,
-        ParquetValue::Int8(_) => 1,
-        ParquetValue::Int16(_) => 2,
-        ParquetValue::Int32(_) => 4,
-        ParquetValue::Int64(_) => 8,
-        ParquetValue::UInt8(_) => 1,
-        ParquetValue::UInt16(_) => 2,
-        ParquetValue::UInt32(_) => 4,
-        ParquetValue::UInt64(_) => 8,
-        ParquetValue::Float16(_) => 4,
-        ParquetValue::Float32(_) => 4,
-        ParquetValue::Float64(_) => 8,
-        ParquetValue::String(s) => s.len() + 24, // String overhead
-        ParquetValue::Bytes(b) => b.len() + 24,  // Vec overhead
-        ParquetValue::Uuid(_) => 16,
-        ParquetValue::Date32(_) => 4,
-        ParquetValue::Date64(_) => 8,
-        ParquetValue::Decimal128(_, _) => 16 + 1, // value + scale
-        ParquetValue::Decimal256(_, _) => 32 + 1, // approx size for BigInt + scale
-        ParquetValue::TimestampSecond(_, tz) => 8 + tz.as_ref().map_or(0, |s| s.len() + 24),
-        ParquetValue::TimestampMillis(_, tz) => 8 + tz.as_ref().map_or(0, |s| s.len() + 24),
-        ParquetValue::TimestampMicros(_, tz) => 8 + tz.as_ref().map_or(0, |s| s.len() + 24),
-        ParquetValue::TimestampNanos(_, tz) => 8 + tz.as_ref().map_or(0, |s| s.len() + 24),
-        ParquetValue::TimeMillis(_) => 4,
-        ParquetValue::TimeMicros(_) => 8,
-        ParquetValue::TimeNanos(_) => 8,
-        ParquetValue::List(items) => {
-            24 + items.iter().map(estimate_parquet_value_size).sum::<usize>()
-        }
-        ParquetValue::Map(entries) => {
-            48 + entries
-                .iter()
-                .map(|(k, v)| estimate_parquet_value_size(k) + estimate_parquet_value_size(v))
-                .sum::<usize>()
-        }
-        ParquetValue::Record(fields) => {
-            48 + fields
-                .iter()
-                .map(|(k, v)| k.len() + 24 + estimate_parquet_value_size(v))
-                .sum::<usize>()
-        }
+/// Reconstruct the `string_storage:` kwarg value for an enumerator so a
+/// block-less call round-trips losslessly: a plain symbol for the mode, or a
+/// hash when a `:shared` budget differs from the default. Returns `None` for the
+/// default (`:copy`) config so the kwarg is simply omitted.
+fn string_storage_kwarg(
+    ruby: &Ruby,
+    config: StringStorageConfig,
+) -> Result<Option<Value>, MagnusError> {
+    if config == StringStorageConfig::default() {
+        return Ok(None);
+    }
+    let default_budget = config.shared_max_entries == DEFAULT_SHARED_MAX_ENTRIES
+        && config.shared_max_value_bytes == DEFAULT_SHARED_MAX_VALUE_BYTES;
+    if config.mode == StringStorageMode::Shared && !default_budget {
+        let hash = ruby.hash_new();
+        hash.aset(
+            ruby.to_symbol("mode"),
+            ruby.to_symbol(config.mode.to_string()),
+        )?;
+        hash.aset(ruby.to_symbol("max_entries"), config.shared_max_entries)?;
+        hash.aset(
+            ruby.to_symbol("max_value_bytes"),
+            config.shared_max_value_bytes,
+        )?;
+        Ok(Some(hash.as_value()))
+    } else {
+        Ok(Some(ruby.to_symbol(config.mode.to_string()).as_value()))
     }
 }
 
-/// Estimate the memory size of a row
-pub fn estimate_row_size(row: &[ParquetValue]) -> usize {
-    row.iter().map(estimate_parquet_value_size).sum()
-}
-
 /// Parse compression type from string
-pub fn parse_compression(compression: Option<String>) -> Result<Compression, MagnusError> {
+pub fn parse_compression(
+    ruby: &Ruby,
+    compression: Option<String>,
+) -> Result<Compression, MagnusError> {
     match compression.map(|s| s.to_lowercase()).as_deref() {
         Some("none") | Some("uncompressed") => Ok(Compression::UNCOMPRESSED),
         Some("snappy") => Ok(Compression::SNAPPY),
@@ -72,7 +57,7 @@ pub fn parse_compression(compression: Option<String>) -> Result<Compression, Mag
         Some("brotli") => Ok(Compression::BROTLI(parquet::basic::BrotliLevel::default())),
         None => Ok(Compression::SNAPPY), // Default to SNAPPY
         Some(other) => Err(MagnusError::new(
-            magnus::exception::arg_error(),
+            ruby.exception_arg_error(),
             format!("Invalid compression option: '{}'. Valid options are: none, snappy, gzip, lz4, zstd, brotli", other),
         )),
     }
@@ -80,7 +65,7 @@ pub fn parse_compression(compression: Option<String>) -> Result<Compression, Mag
 
 /// Parse arguments for Parquet writing
 pub fn parse_parquet_write_args(
-    _ruby: &Ruby,
+    ruby: &Ruby,
     args: &[Value],
 ) -> Result<ParquetWriteArgs, MagnusError> {
     let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
@@ -95,7 +80,7 @@ pub fn parse_parquet_write_args(
             Option<Option<String>>,
             Option<Option<usize>>,
             Option<Option<Value>>,
-            Option<Option<bool>>,
+            Option<Option<Value>>,
         ),
         (),
     >(
@@ -115,13 +100,88 @@ pub fn parse_parquet_write_args(
         read_from,
         write_to: kwargs.required.1,
         schema_value: kwargs.required.0,
-        batch_size: kwargs.optional.0.flatten(),
+        batch_size: parse_positive_bounded_usize(
+            ruby,
+            "batch_size",
+            kwargs.optional.0.flatten(),
+            MAX_BATCH_SIZE,
+        )?,
         flush_threshold: kwargs.optional.1.flatten(),
         compression: kwargs.optional.2.flatten(),
-        sample_size: kwargs.optional.3.flatten(),
+        sample_size: parse_positive_bounded_usize(
+            ruby,
+            "sample_size",
+            kwargs.optional.3.flatten(),
+            MAX_SAMPLE_SIZE,
+        )?,
         logger: kwargs.optional.4.flatten(),
-        string_cache: kwargs.optional.5.flatten(),
+        string_cache: parse_string_cache(ruby, kwargs.optional.5.flatten())?,
     })
+}
+
+fn parse_positive_bounded_usize(
+    ruby: &Ruby,
+    name: &str,
+    value: Option<usize>,
+    max: usize,
+) -> Result<Option<usize>, MagnusError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == 0 {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            format!("{name} must be positive"),
+        ));
+    }
+    if value > max {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            format!("{name} must be at most {max}"),
+        ));
+    }
+    Ok(Some(value))
+}
+
+/// Parse the `string_cache:` write option. `false`/`nil`/absent disables it,
+/// `true` enables it with the default capacity, and a positive Integer enables
+/// it with that capacity. Returns the requested capacity, or `None` when
+/// disabled.
+pub fn parse_string_cache(ruby: &Ruby, value: Option<Value>) -> Result<Option<usize>, MagnusError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    // Strict: only true/false/nil and Integer are accepted (no Ruby truthiness
+    // coercion, so a stray String is a clear error rather than "enabled").
+    if value.is_nil() || value.eql(ruby.qfalse())? {
+        return Ok(None);
+    }
+    if value.eql(ruby.qtrue())? {
+        return Ok(Some(DEFAULT_STRING_CACHE_CAPACITY));
+    }
+    if value.is_kind_of(ruby.class_integer()) {
+        let capacity: usize = TryConvert::try_convert(value)?;
+        if capacity == 0 {
+            return Err(MagnusError::new(
+                ruby.exception_arg_error(),
+                "string_cache capacity must be positive",
+            ));
+        }
+        if capacity > STRING_CACHE_CAPACITY_MAX {
+            return Err(MagnusError::new(
+                ruby.exception_arg_error(),
+                format!(
+                    "string_cache capacity must be at most {}",
+                    STRING_CACHE_CAPACITY_MAX
+                ),
+            ));
+        }
+        return Ok(Some(capacity));
+    }
+    Err(MagnusError::new(
+        ruby.exception_type_error(),
+        "string_cache must be true, false, or a positive Integer",
+    ))
 }
 
 /// Convert a Ruby Value to a String, handling both String and Symbol types
@@ -133,7 +193,7 @@ pub fn parse_string_or_symbol(ruby: &Ruby, value: Value) -> Result<Option<String
         Ok(Some(stringed))
     } else {
         Err(MagnusError::new(
-            magnus::exception::type_error(),
+            ruby.exception_type_error(),
             "Value must be a String or Symbol",
         ))
     }
@@ -155,20 +215,26 @@ where
 }
 
 /// Create a row enumerator
-pub fn create_row_enumerator(args: RowEnumeratorArgs) -> Result<magnus::Enumerator, MagnusError> {
-    let kwargs = RHash::new();
+pub fn create_row_enumerator(
+    ruby: &Ruby,
+    args: RowEnumeratorArgs,
+) -> Result<magnus::Enumerator, MagnusError> {
+    let kwargs = ruby.hash_new();
     kwargs.aset(
-        Symbol::new("result_type"),
-        Symbol::new(args.result_type.to_string()),
+        ruby.to_symbol("result_type"),
+        ruby.to_symbol(args.result_type.to_string()),
     )?;
     if let Some(columns) = args.columns {
-        kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
+        kwargs.aset(ruby.to_symbol("columns"), ruby.ary_from_vec(columns))?;
     }
     if args.strict {
-        kwargs.aset(Symbol::new("strict"), true)?;
+        kwargs.aset(ruby.to_symbol("strict"), true)?;
+    }
+    if let Some(value) = string_storage_kwarg(ruby, args.string_storage)? {
+        kwargs.aset(ruby.to_symbol("string_storage"), value)?;
     }
     if let Some(logger) = args.logger {
-        kwargs.aset(Symbol::new("logger"), logger)?;
+        kwargs.aset(ruby.to_symbol("logger"), logger)?;
     }
     Ok(args
         .rb_self
@@ -178,24 +244,28 @@ pub fn create_row_enumerator(args: RowEnumeratorArgs) -> Result<magnus::Enumerat
 /// Create a column enumerator
 #[inline]
 pub fn create_column_enumerator(
+    ruby: &Ruby,
     args: ColumnEnumeratorArgs,
 ) -> Result<magnus::Enumerator, MagnusError> {
-    let kwargs = RHash::new();
+    let kwargs = ruby.hash_new();
     kwargs.aset(
-        Symbol::new("result_type"),
-        Symbol::new(args.result_type.to_string()),
+        ruby.to_symbol("result_type"),
+        ruby.to_symbol(args.result_type.to_string()),
     )?;
     if let Some(columns) = args.columns {
-        kwargs.aset(Symbol::new("columns"), RArray::from_vec(columns))?;
+        kwargs.aset(ruby.to_symbol("columns"), ruby.ary_from_vec(columns))?;
     }
     if let Some(batch_size) = args.batch_size {
-        kwargs.aset(Symbol::new("batch_size"), batch_size)?;
+        kwargs.aset(ruby.to_symbol("batch_size"), batch_size)?;
     }
     if args.strict {
-        kwargs.aset(Symbol::new("strict"), true)?;
+        kwargs.aset(ruby.to_symbol("strict"), true)?;
+    }
+    if let Some(value) = string_storage_kwarg(ruby, args.string_storage)? {
+        kwargs.aset(ruby.to_symbol("string_storage"), value)?;
     }
     if let Some(logger) = args.logger {
-        kwargs.aset(Symbol::new("logger"), logger)?;
+        kwargs.aset(ruby.to_symbol("logger"), logger)?;
     }
     Ok(args
         .rb_self

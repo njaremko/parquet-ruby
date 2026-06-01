@@ -61,9 +61,10 @@ pub use schema::{
 pub mod string_cache;
 pub use string_cache::StringCache;
 
-pub mod batch_manager;
-pub use batch_manager::{
-    BatchSizeManager, DEFAULT_MEMORY_THRESHOLD, INITIAL_BATCH_SIZE, MIN_BATCH_SIZE, SAMPLE_SIZE,
+pub mod string_storage;
+pub use string_storage::{
+    StringStorage, StringStorageConfig, StringStorageMode, DEFAULT_SHARED_MAX_ENTRIES,
+    DEFAULT_SHARED_MAX_VALUE_BYTES,
 };
 
 pub mod metadata;
@@ -76,8 +77,8 @@ pub use types::{
 
 pub mod utils;
 pub use utils::{
-    create_column_enumerator, create_row_enumerator, estimate_parquet_value_size,
-    estimate_row_size, handle_block_or_enum, parse_compression, parse_parquet_write_args,
+    create_column_enumerator, create_row_enumerator, handle_block_or_enum, parse_compression,
+    parse_parquet_write_args,
 };
 
 pub mod reader;

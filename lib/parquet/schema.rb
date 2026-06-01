@@ -116,8 +116,12 @@ module Parquet
           key_type = kwargs[:key]
           value_type = kwargs[:value]
           raise ArgumentError, "map field `#{name}` requires `key:` and `value:`" if key_type.nil? || value_type.nil?
-          # Pass key_nullable and value_nullable if provided, otherwise use true as default
-          key_nullable = kwargs[:key_nullable].nil? ? true : !!kwargs[:key_nullable]
+          # Map keys are required by the Parquet spec. Reject an explicit nullable
+          # key at this boundary rather than letting it fail deep in the writer.
+          if kwargs[:key_nullable]
+            raise ArgumentError, "map field `#{name}` keys are always required; remove `key_nullable: true`"
+          end
+          key_nullable = false
           value_nullable = kwargs[:value_nullable].nil? ? true : !!kwargs[:value_nullable]
 
           field_hash[:key] = wrap_subtype(key_type, nullable: key_nullable)

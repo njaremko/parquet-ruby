@@ -149,7 +149,7 @@ class DecimalTest < Minitest::Test
         { "dec_val" => "decimal(10,4)" }, # Standard decimal
         { "small_dec" => "decimal(5,2)" }, # Small decimal
         { "tiny_dec" => "decimal(5,3)" }, # Tiny decimal
-        { "std_dec" => "decimal(6,3)" }, # Standard decimal
+        { "std_dec" => "decimal(7,3)" }, # Standard decimal
         { "special_val" => "decimal(10,5)" } # Special values with padding
       ]
 
@@ -688,7 +688,7 @@ class DecimalTest < Minitest::Test
       # Schema with different scale specifications
       schema = [
         { "decimal_scale_2" => "decimal(5,2)" }, # 123.45 stored as 12345 with scale 2
-        { "decimal_scale_4" => "decimal(6,4)" } # 123.45 stored as 1234500 with scale 4
+        { "decimal_scale_4" => "decimal(7,4)" } # 123.45 stored as 1234500 with scale 4
       ]
 
       Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path)
@@ -852,8 +852,9 @@ class DecimalTest < Minitest::Test
 
       error = assert_raises(RuntimeError) { Parquet.write_rows(test_data.each, schema: schema, write_to: temp_path) }
 
-      # Assert that the error contains this specific message about invalid scale
-      assert_match(/Invalid DECIMAL scale: -2/, error.message, "Error should mention that scale -2 is invalid")
+      # Assert that the error reports the invalid negative scale. Schema
+      # validation now rejects it up front with a clear message.
+      assert_match(/scale must be non-negative/, error.message, "Error should mention that scale -2 is invalid")
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

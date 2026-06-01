@@ -2,9 +2,9 @@ inputs:
 [
   (import inputs.rust-overlay)
   (final: prev: {
-    bundler = prev.bundler.override { ruby = final.ruby_3_4; };
+    bundler = prev.bundler.override { ruby = final.ruby_4_0; };
     bundix = prev.bundix.overrideAttrs (oldAtts: {
-      ruby = final.ruby_3_4;
+      ruby = final.ruby_4_0;
     });
     craneLib = (inputs.crane.mkLib final).overrideToolchain final.rust-bin.stable.latest.default;
     rust-toolchain = prev.rust-bin.stable.latest.default;

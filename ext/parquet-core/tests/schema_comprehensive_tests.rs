@@ -260,6 +260,7 @@ fn test_primitive_type_names_and_format_requirements() {
     );
     assert_eq!(PrimitiveType::TimeMillis.type_name(), "TimeMillis");
     assert_eq!(PrimitiveType::TimeMicros.type_name(), "TimeMicros");
+    assert_eq!(PrimitiveType::TimeNanos.type_name(), "TimeNanos");
     assert_eq!(
         PrimitiveType::FixedLenByteArray(16).type_name(),
         "FixedLenByteArray"
@@ -280,6 +281,7 @@ fn test_primitive_type_names_and_format_requirements() {
     assert!(PrimitiveType::TimestampNanos(None).requires_format());
     assert!(PrimitiveType::TimeMillis.requires_format());
     assert!(PrimitiveType::TimeMicros.requires_format());
+    assert!(PrimitiveType::TimeNanos.requires_format());
 }
 
 #[test]
@@ -502,6 +504,12 @@ fn test_all_primitive_types_in_schema() {
         SchemaNode::Primitive {
             name: "time_micros".to_string(),
             primitive_type: PrimitiveType::TimeMicros,
+            nullable: false,
+            format: Some("time".to_string()),
+        },
+        SchemaNode::Primitive {
+            name: "time_nanos".to_string(),
+            primitive_type: PrimitiveType::TimeNanos,
             nullable: false,
             format: Some("time".to_string()),
         },

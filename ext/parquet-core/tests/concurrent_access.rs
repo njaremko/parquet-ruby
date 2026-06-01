@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use parquet_core::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc as StdArc, Mutex};
 use std::thread;
+use triomphe::Arc;
 
 #[test]
 fn test_concurrent_readers() {
@@ -46,13 +47,13 @@ fn test_concurrent_readers() {
         writer.close().unwrap();
     }
 
-    let bytes = Arc::new(Bytes::from(buffer));
+    let bytes = StdArc::new(Bytes::from(buffer));
     let num_threads = 10;
     let mut handles = vec![];
 
     // Spawn multiple reader threads
     for thread_id in 0..num_threads {
-        let bytes_clone = Arc::clone(&bytes);
+        let bytes_clone = StdArc::clone(&bytes);
 
         let handle = thread::spawn(move || {
             let reader = Reader::new((*bytes_clone).clone());
@@ -226,14 +227,14 @@ fn test_concurrent_column_readers() {
         writer.close().unwrap();
     }
 
-    let bytes = Arc::new(Bytes::from(buffer));
+    let bytes = StdArc::new(Bytes::from(buffer));
     let mut handles = vec![];
 
     // Each thread reads a different column
     let columns = ["col1", "col2", "col3"];
 
     for (thread_id, column_name) in columns.iter().enumerate() {
-        let bytes_clone = Arc::clone(&bytes);
+        let bytes_clone = StdArc::clone(&bytes);
         let column = column_name.to_string();
 
         let handle = thread::spawn(move || {
@@ -303,11 +304,11 @@ fn test_shared_writer_safety() {
         .unwrap();
 
     // Writers should not implement Send/Sync, so wrapping in Arc<Mutex<>> is necessary
-    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let buffer = StdArc::new(Mutex::new(Vec::new()));
 
     // Create a writer wrapped in Arc<Mutex<>>
     {
-        let buffer_clone = Arc::clone(&buffer);
+        let buffer_clone = StdArc::clone(&buffer);
         let mut buf = buffer_clone.lock().unwrap();
 
         let mut writer = Writer::new(&mut *buf, schema).unwrap();
@@ -398,12 +399,12 @@ fn test_metadata_concurrent_access() {
         writer.close().unwrap();
     }
 
-    let bytes = Arc::new(Bytes::from(buffer));
+    let bytes = StdArc::new(Bytes::from(buffer));
     let mut handles = vec![];
 
     // Multiple threads accessing metadata
     for thread_id in 0..5 {
-        let bytes_clone = Arc::clone(&bytes);
+        let bytes_clone = StdArc::clone(&bytes);
 
         let handle = thread::spawn(move || {
             let mut reader = Reader::new((*bytes_clone).clone());

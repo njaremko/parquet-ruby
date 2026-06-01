@@ -76,27 +76,20 @@ impl RubyAdapterError {
 /// Convert RubyAdapterError to MagnusError
 impl From<RubyAdapterError> for MagnusError {
     fn from(err: RubyAdapterError) -> Self {
-        match Ruby::get() {
-            Ok(ruby) => match &err {
-                RubyAdapterError::Io(_) => {
-                    MagnusError::new(ruby.exception_io_error(), err.to_string())
-                }
-                RubyAdapterError::TypeConversion(_) => {
-                    MagnusError::new(ruby.exception_type_error(), err.to_string())
-                }
-                RubyAdapterError::InvalidInput(_) => {
-                    MagnusError::new(ruby.exception_arg_error(), err.to_string())
-                }
-                _ => MagnusError::new(ruby.exception_runtime_error(), err.to_string()),
-            },
-            Err(_) => {
-                // Fallback if we can't get Ruby runtime
-                MagnusError::new(
-                    magnus::exception::runtime_error(),
-                    format!("Failed to get Ruby runtime: {}", err),
-                )
-            }
-        }
+        // This conversion only runs at the FFI boundary, where the GVL is held
+        // and a Ruby handle is always available. A Ruby exception cannot be
+        // constructed without that handle, so an unavailable runtime is an
+        // impossible state we fail fast on rather than paper over.
+        let ruby = Ruby::get().unwrap_or_else(|unavailable| {
+            panic!("cannot build Ruby exception off the Ruby thread ({unavailable}); source error: {err}")
+        });
+        let class = match &err {
+            RubyAdapterError::Io(_) => ruby.exception_io_error(),
+            RubyAdapterError::TypeConversion(_) => ruby.exception_type_error(),
+            RubyAdapterError::InvalidInput(_) => ruby.exception_arg_error(),
+            _ => ruby.exception_runtime_error(),
+        };
+        MagnusError::new(class, err.to_string())
     }
 }
 

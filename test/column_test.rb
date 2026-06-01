@@ -281,9 +281,30 @@ class ColumnTest < Minitest::Test
       temp_path = "test_mismatched_columns.parquet"
 
       error = assert_raises(RuntimeError) { Parquet.write_columns(enumerator, schema: schema, write_to: temp_path) }
-      assert_match(/Failed to create record batch|mismatched.*length|all columns in a record batch must have the same length/i, error.message)
+      assert_match(
+        /Failed to create record batch|mismatched.*length|all columns in a record batch must have the same length|values but expected/i,
+        error.message
+      )
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
+  end
+
+  def test_write_columns_rejects_row_only_write_options
+    schema = [{ "id" => "int64" }]
+    batches = [[[1, 2, 3]]]
+    temp_path = "test_row_only_column_options.parquet"
+
+    assert_raises(ArgumentError) do
+      Parquet.write_columns(batches.each, schema: schema, write_to: temp_path, batch_size: 1)
+    end
+    assert_raises(ArgumentError) do
+      Parquet.write_columns(batches.each, schema: schema, write_to: temp_path, sample_size: 1)
+    end
+    assert_raises(ArgumentError) do
+      Parquet.write_columns(batches.each, schema: schema, write_to: temp_path, string_cache: true)
+    end
+  ensure
+    File.delete(temp_path) if File.exist?(temp_path)
   end
 end

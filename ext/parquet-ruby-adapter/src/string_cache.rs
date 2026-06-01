@@ -1,85 +1,92 @@
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashSet;
+use triomphe::Arc;
 
-use magnus::RString;
+/// Default cap on distinct strings retained for reuse when `string_cache: true`.
+/// The cap is a deliberate memory bound (safety over hit rate): a high-cardinality
+/// column cannot grow the cache without limit. Once full, further distinct strings
+/// are not retained but already-cached values still reuse their shared storage.
+/// Callers can override it (`string_cache: <Integer>`). Reported statistics expose
+/// the cumulative miss count rather than pretending to know exact distinct
+/// cardinality after the bounded cache fills.
+pub const DEFAULT_STRING_CACHE_CAPACITY: usize = 100;
 
-static STRING_CACHE: LazyLock<Mutex<HashMap<String, &'static str>>> =
-    LazyLock::new(|| Mutex::new(HashMap::with_capacity(100)));
+/// Hard capacity ceiling for `string_cache:`. Each retained entry owns hash-table
+/// metadata plus one shared string allocation, so an explicit upper bound keeps a
+/// caller-provided capacity from becoming an eager unbounded allocation.
+pub const STRING_CACHE_CAPACITY_MAX: usize = 65_536;
 
-/// A cache for interning strings in the Ruby VM to reduce memory usage
+/// Per-value byte ceiling for retained cache entries. Oversized values still
+/// write correctly, but they are not retained for reuse across later rows.
+pub const STRING_CACHE_VALUE_BYTES_MAX: usize = 4096;
+
+/// Total retained UTF-8 bytes for cached string contents. This does not include
+/// hash-table metadata, which is separately bounded by `STRING_CACHE_CAPACITY_MAX`.
+pub const STRING_CACHE_RETAINED_BYTES_MAX: usize = 16 * 1024 * 1024;
+
+/// A cache for reusing string storage to reduce memory usage
 /// when there are many repeated strings
 #[derive(Debug)]
 pub struct StringCache {
-    enabled: bool,
-    hits: Arc<Mutex<usize>>,
-    misses: Arc<Mutex<usize>>,
+    capacity: usize,
+    entries: HashSet<Arc<str>>,
+    retained_bytes: usize,
+    hits: usize,
+    misses: usize,
 }
 
 impl StringCache {
-    /// Create a new string cache
-    pub fn new(enabled: bool) -> Self {
+    /// Create a new string cache that retains at most `capacity` distinct
+    /// strings. The caller only constructs a cache when caching is enabled; a
+    /// disabled cache is represented by not creating one at all.
+    pub fn new(capacity: usize) -> Self {
+        debug_assert!(capacity > 0);
+        let capacity = capacity.min(STRING_CACHE_CAPACITY_MAX);
+
         Self {
-            enabled,
-            hits: Arc::new(Mutex::new(0)),
-            misses: Arc::new(Mutex::new(0)),
+            capacity,
+            entries: HashSet::with_capacity(capacity),
+            retained_bytes: 0,
+            hits: 0,
+            misses: 0,
         }
     }
 
-    /// Intern a string in Ruby's VM, returning the same string for tracking
-    /// Note: We return the input string to maintain API compatibility,
-    /// but internally we ensure it's interned in Ruby's VM
+    /// Intern a string, returning shared storage for repeated values.
     pub fn intern(&mut self, s: String) -> Arc<str> {
-        if !self.enabled {
-            return Arc::from(s.as_str());
+        debug_assert!(self.entries.len() <= self.capacity);
+
+        if let Some(interned) = self.entries.get(s.as_str()) {
+            self.hits += 1;
+            return Arc::clone(interned);
         }
 
-        // Try to get or create the interned string
-        let result = (|| -> Result<(), String> {
-            let mut cache = STRING_CACHE.lock().map_err(|e| e.to_string())?;
+        let interned = Arc::<str>::from(s);
+        self.misses += 1;
 
-            if cache.contains_key(s.as_str()) {
-                let mut hits = self.hits.lock().map_err(|e| e.to_string())?;
-                *hits += 1;
-            } else {
-                // Create Ruby string and intern it
-                let rstring = RString::new(&s);
-                let interned = rstring.to_interned_str();
-                // SAFETY: `to_interned_str` returns a frozen, VM-interned string that
-                // Ruby guarantees will not be garbage collected. The resulting &str is
-                // therefore valid for the lifetime of the process ('static).
-                let static_str: &'static str = unsafe {
-                    std::mem::transmute(interned.as_str().map_err(|e| e.to_string())?)
-                };
-
-                cache.insert(s.clone(), static_str);
-
-                let mut misses = self.misses.lock().map_err(|e| e.to_string())?;
-                *misses += 1;
-            }
-            Ok(())
-        })();
-
-        // Log any errors but don't fail - just return the string
-        if let Err(e) = result {
-            eprintln!("String cache error: {}", e);
+        let retained_bytes_next = self.retained_bytes.saturating_add(interned.len());
+        if self.entries.len() < self.capacity
+            && interned.len() <= STRING_CACHE_VALUE_BYTES_MAX
+            && retained_bytes_next <= STRING_CACHE_RETAINED_BYTES_MAX
+        {
+            self.retained_bytes = retained_bytes_next;
+            self.entries.insert(Arc::clone(&interned));
         }
 
-        Arc::from(s.as_str())
+        debug_assert!(self.entries.len() <= self.capacity);
+        debug_assert!(self.retained_bytes <= STRING_CACHE_RETAINED_BYTES_MAX);
+        interned
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        let cache_size = STRING_CACHE.lock().map(|c| c.len()).unwrap_or(0);
-        let hits = self.hits.lock().map(|h| *h).unwrap_or(0);
-        let misses = self.misses.lock().map(|m| *m).unwrap_or(0);
+        debug_assert!(self.entries.len() <= self.capacity);
 
         CacheStats {
-            enabled: self.enabled,
-            size: cache_size,
-            hits,
-            misses,
-            hit_rate: if hits + misses > 0 {
-                hits as f64 / (hits + misses) as f64
+            size: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            hit_rate: if self.hits + self.misses > 0 {
+                self.hits as f64 / (self.hits + self.misses) as f64
             } else {
                 0.0
             },
@@ -88,23 +95,21 @@ impl StringCache {
 
     /// Clear the cache
     pub fn clear(&mut self) {
-        if let Ok(mut cache) = STRING_CACHE.lock() {
-            cache.clear();
-        }
-        if let Ok(mut hits) = self.hits.lock() {
-            *hits = 0;
-        }
-        if let Ok(mut misses) = self.misses.lock() {
-            *misses = 0;
-        }
+        self.entries.clear();
+        self.retained_bytes = 0;
+        self.hits = 0;
+        self.misses = 0;
     }
 }
 
 #[derive(Debug)]
 pub struct CacheStats {
-    pub enabled: bool,
     pub size: usize,
     pub hits: usize,
     pub misses: usize,
     pub hit_rate: f64,
 }
+
+#[cfg(test)]
+#[path = "./string_cache_test.rs"]
+mod tests;

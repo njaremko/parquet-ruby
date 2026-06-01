@@ -3,7 +3,7 @@ use ordered_float::OrderedFloat;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 mod test_helpers;
 use test_helpers::*;

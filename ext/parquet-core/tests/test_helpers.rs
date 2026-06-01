@@ -2,7 +2,7 @@ use bytes::Bytes;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 /// Create a test schema with common field types
 pub fn create_test_schema() -> Schema {

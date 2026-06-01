@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use ordered_float::OrderedFloat;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 // =============================================================================
 // Boolean Type Tests

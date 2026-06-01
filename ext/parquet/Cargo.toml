@@ -11,16 +11,16 @@ rb-sys-env = "^0.2"
 
 [dependencies]
 ahash = "0.8"
-arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-buffer = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-ipc = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["lz4"] }
-arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+arrow-array = "58.3.0"
+arrow-buffer = "58.3.0"
+arrow-ipc = { version = "58.3.0", features = ["lz4"] }
+arrow-schema = "58.3.0"
 bytes = "^1.9"
 either = "1.9"
 itertools = "^0.14"
 jiff = "0.2"
 magnus = { version = "0.8", features = ["rb-sys"] }
-parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["json"] }
+parquet = { version = "58.3.0", features = ["json"] }
 parquet-ruby-adapter = { path = "../parquet-ruby-adapter" }
 rand = "0.9"
 rb-sys = "^0.9"

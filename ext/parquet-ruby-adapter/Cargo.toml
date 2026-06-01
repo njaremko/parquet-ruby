@@ -7,17 +7,18 @@ edition = "2021"
 rb-sys-env = "^0.2"
 
 [dependencies]
-arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-buffer = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
+arrow-array = "58.3.0"
+arrow-buffer = "58.3.0"
+arrow-schema = "58.3.0"
 bytes = "1.5"
 magnus = { version = "0.8", features = ["rb-sys"] }
 num = "0.4.3"
 ordered-float = "5.0.0"
-parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["arrow"] }
+parquet = { version = "58.3.0", features = ["arrow"] }
 parquet-core = { path = "../parquet-core" }
 rb-sys = { version = "0.9", features = ["stable-api-compiled-fallback"] }
 tempfile = "^3.15"
 thiserror = "2.0"
 indexmap = "2.2"
+triomphe = "0.1.15"
 uuid = "*"

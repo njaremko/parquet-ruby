@@ -16,5 +16,6 @@ end
 
 group :test do
   gem "csv"
+  gem "logger"
   gem "minitest", "~> 5.0"
 end

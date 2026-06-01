@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+- `string_cache:` on `Parquet.write_rows` now also accepts an Integer to set the cache
+  capacity (`true` uses the default, `false` disables); a non-positive, excessive,
+  or non-boolean/non-integer value is rejected. Retention is bounded by entry count,
+  per-value byte size, and total cached string bytes. String-cache logs now report
+  cache misses instead of mislabeling bounded-cache misses as exact unique strings.
+- `string_storage:` on `Parquet.each_row`/`each_column` now also accepts a hash to set the
+  process-wide `:shared` leak budget, e.g. `{ mode: :shared, max_entries: 16_384,
+  max_value_bytes: 1024 }`; each read enforces that budget for returned zero-copy
+  values, and new process-wide leaks also have hard process entry/byte ceilings.
+  Values past either bound fall back to frozen copies, and fallback caching is
+  bounded by both entry count and retained bytes.
+- Unify write batch sizing: the core writer now owns all batching/flushing (the adapter no
+  longer keeps a second, separately-tuned batch manager), and `batch_size:`/`flush_threshold:`/
+  `sample_size:` are forwarded to it. `flush_threshold` now bounds the writer's in-progress
+  (encoded) buffer rather than an estimate of pre-encode row bytes, and its default is 100MB
+  (was 64MB). Per-batch debug log lines are no longer emitted.
+- Add a `string_storage:` option to `Parquet.each_row`/`each_column` controlling how
+  string values become Ruby strings: `:copy` (default, unchanged), `:intern`
+  (dedup low-cardinality equal values through a bounded intern cache, then fall
+  back to frozen copies), and `:shared` (frozen, zero-copy strings backed by Rust
+  memory for short, repeated, low-cardinality values, with a bounded leak that
+  falls back to frozen copies).
+- Fix `each_row(..., columns: [...], result_type: :hash)` mislabeling values when the
+  requested column order differed from the file schema order: projected rows are
+  yielded in file order, so hash keys now follow file order too.
+- Struct field-name keys are now interned and reused across rows on read, including
+  in the default mode.
+- Writing a decimal whose unscaled value exceeds the declared precision, or whose
+  scale disagrees with the schema, now raises a clear error instead of silently
+  storing an out-of-precision value. Negative decimal scales are rejected up front.
+- Map keys now default to required (non-nullable) in the schema DSL, matching the
+  Parquet spec and what the writer already produced.
+- Reading is faster on wide tables: the parquet field lookup is computed once per
+  read instead of rescanning per row.
+- A fixed-size-binary value of the wrong length is now rejected at `write_row`
+  (fail fast) instead of failing later at flush.
+- Dynamic and fixed write batch sizes are bounded by total buffered value slots, and
+  invalid `batch_size:`/`sample_size:` values are rejected before allocation.
+  `write_columns` now rejects row-only sizing/cache options instead of accepting
+  inert values, and accepts `logger:` for column-write progress logs.
+
 ## 0.7.3
 - Read both arrow metadata and parquet metadata in case only one of the two has relevant information for parsing
 

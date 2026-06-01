@@ -2,7 +2,7 @@ use bytes::Bytes;
 use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_read_with_missing_columns() {

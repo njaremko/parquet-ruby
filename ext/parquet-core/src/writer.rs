@@ -10,13 +10,23 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use rand::Rng;
-use std::sync::Arc;
+use std::collections::{hash_map::Entry, HashMap};
+use std::sync::Arc as StdArc;
 
 // Default configuration constants
 const DEFAULT_BATCH_SIZE: usize = 1000;
 const DEFAULT_MEMORY_THRESHOLD: usize = 100 * 1024 * 1024; // 100MB
 const DEFAULT_SAMPLE_SIZE: usize = 100;
 const MIN_BATCH_SIZE: usize = 10;
+// Ceiling for a fixed or dynamically-estimated batch size on a single-column
+// schema. The effective cap is also limited by schema width below.
+pub const MAX_BATCH_SIZE: usize = 1_000_000;
+// `sample_size` also backs an eager Vec reservation during writer creation.
+// Keep user-provided estimates from becoming an unbounded upfront allocation.
+pub const MAX_SAMPLE_SIZE: usize = 10_000;
+// Total slots eagerly reserved across all per-column buffers. This keeps wide
+// schemas from multiplying a row-count cap into an unbounded allocation.
+const MAX_BUFFERED_VALUE_SLOTS: usize = 1_000_000;
 const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
 
 /// Builder for creating a configured Writer
@@ -78,14 +88,23 @@ impl WriterBuilder {
 
         let arrow_writer = ArrowWriter::try_new(writer, arrow_schema.clone(), Some(props))?;
 
+        validate_column_count(arrow_schema.fields().len())?;
+        let current_batch_size = match self.batch_size {
+            Some(size) => validate_fixed_batch_size(size, arrow_schema.fields().len())?,
+            None => default_batch_size_for_column_count(arrow_schema.fields().len()),
+        };
+        let sample_size = validate_sample_size(self.sample_size)?;
+        let buffered_columns = new_buffered_columns(&arrow_schema, current_batch_size);
+
         Ok(Writer {
             arrow_writer: Some(arrow_writer),
             arrow_schema,
-            buffered_rows: Vec::new(),
-            current_batch_size: self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+            buffered_columns,
+            buffered_row_count: 0,
+            current_batch_size,
             memory_threshold: self.memory_threshold,
-            sample_size: self.sample_size,
-            size_samples: Vec::with_capacity(self.sample_size),
+            sample_size,
+            size_samples: Vec::with_capacity(sample_size),
             total_rows_written: 0,
             fixed_batch_size: self.batch_size,
         })
@@ -95,8 +114,9 @@ impl WriterBuilder {
 /// Core Parquet writer that works with any type implementing Write
 pub struct Writer<W: std::io::Write> {
     arrow_writer: Option<ArrowWriter<W>>,
-    arrow_schema: Arc<arrow_schema::Schema>,
-    buffered_rows: Vec<Vec<ParquetValue>>,
+    arrow_schema: StdArc<arrow_schema::Schema>,
+    buffered_columns: Vec<Vec<ParquetValue>>,
+    buffered_row_count: usize,
     current_batch_size: usize,
     memory_threshold: usize,
     sample_size: usize,
@@ -120,11 +140,16 @@ where
 
         let arrow_writer = ArrowWriter::try_new(writer, arrow_schema.clone(), Some(props))?;
 
+        validate_column_count(arrow_schema.fields().len())?;
+        let current_batch_size = default_batch_size_for_column_count(arrow_schema.fields().len());
+        let buffered_columns = new_buffered_columns(&arrow_schema, current_batch_size);
+
         Ok(Self {
             arrow_writer: Some(arrow_writer),
             arrow_schema,
-            buffered_rows: Vec::new(),
-            current_batch_size: DEFAULT_BATCH_SIZE,
+            buffered_columns,
+            buffered_row_count: 0,
+            current_batch_size,
             memory_threshold: DEFAULT_MEMORY_THRESHOLD,
             sample_size: DEFAULT_SAMPLE_SIZE,
             size_samples: Vec::with_capacity(DEFAULT_SAMPLE_SIZE),
@@ -167,11 +192,13 @@ where
             self.sample_row_size(&row)?;
         }
 
-        // Add row to buffer
-        self.buffered_rows.push(row);
+        for (col_idx, value) in row.into_iter().enumerate() {
+            self.buffered_columns[col_idx].push(value);
+        }
+        self.buffered_row_count += 1;
 
         // Check if we need to flush
-        if self.buffered_rows.len() >= self.current_batch_size {
+        if self.buffered_row_count >= self.current_batch_size {
             self.flush_buffered_rows()?;
         }
 
@@ -193,8 +220,11 @@ where
             }
         }
 
-        // Update batch size if we have enough samples
-        if self.size_samples.len() >= MIN_SAMPLES_FOR_ESTIMATE {
+        // Update batch size once the requested sample has been collected. Small
+        // explicit sample sizes are valid because they bound how long large rows
+        // may keep using the default batch size.
+        let samples_required = self.sample_size.min(MIN_SAMPLES_FOR_ESTIMATE);
+        if self.size_samples.len() >= samples_required {
             self.update_batch_size();
         }
 
@@ -326,33 +356,22 @@ where
         let total_size: usize = self.size_samples.iter().sum();
         let avg_row_size = (total_size as f64 / self.size_samples.len() as f64).max(1.0);
         let suggested_batch_size = (self.memory_threshold as f64 / avg_row_size).floor() as usize;
-        self.current_batch_size = suggested_batch_size.max(MIN_BATCH_SIZE);
+        self.current_batch_size = dynamic_batch_size_for_column_count(
+            suggested_batch_size,
+            self.arrow_schema.fields().len(),
+        );
     }
 
     /// Flush buffered rows to the Parquet file
     fn flush_buffered_rows(&mut self) -> Result<()> {
-        if self.buffered_rows.is_empty() {
+        if self.buffered_row_count == 0 {
             return Ok(());
         }
 
-        let rows = std::mem::take(&mut self.buffered_rows);
-        let num_rows = rows.len();
-        self.total_rows_written += num_rows;
-
-        // Convert rows to columnar format
-        let num_cols = self.arrow_schema.fields().len();
-        let mut columns: Vec<Vec<ParquetValue>> = vec![Vec::with_capacity(num_rows); num_cols];
-
-        // Transpose rows to columns
-        for row in rows {
-            for (col_idx, value) in row.into_iter().enumerate() {
-                columns[col_idx].push(value);
-            }
-        }
-
         // Convert columns to Arrow arrays
-        let arrow_columns = columns
-            .into_iter()
+        let arrow_columns = self
+            .buffered_columns
+            .iter()
             .zip(self.arrow_schema.fields())
             .map(|(values, field)| parquet_values_to_arrow_array(values, field))
             .collect::<Result<Vec<_>>>()?;
@@ -363,6 +382,16 @@ where
         // Write the batch
         if let Some(writer) = &mut self.arrow_writer {
             writer.write(&batch)?;
+
+            let num_rows = self.buffered_row_count;
+            self.buffered_row_count = 0;
+            self.total_rows_written += num_rows;
+            let reserve_target = self.current_batch_size;
+            for column in &mut self.buffered_columns {
+                column.clear();
+                let additional_capacity = reserve_target.saturating_sub(column.capacity());
+                column.reserve(additional_capacity);
+            }
 
             // Check if we need to flush based on memory usage
             if writer.in_progress_size() >= self.memory_threshold
@@ -384,6 +413,8 @@ where
     ///
     /// Each element is a tuple of (column_name, values)
     pub fn write_columns(&mut self, columns: Vec<(String, Vec<ParquetValue>)>) -> Result<()> {
+        self.flush_buffered_rows()?;
+
         if columns.is_empty() {
             return Ok(());
         }
@@ -398,16 +429,58 @@ where
             )));
         }
 
+        let mut columns_by_name = HashMap::with_capacity(columns.len());
+        for (name, values) in columns {
+            match columns_by_name.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(values);
+                }
+                Entry::Occupied(entry) => {
+                    return Err(ParquetError::Schema(format!(
+                        "Duplicate column: {}",
+                        entry.key()
+                    )));
+                }
+            }
+        }
+
+        // Anchor the expected length to the first schema column and report
+        // mismatches in schema order, so the error is deterministic regardless
+        // of HashMap iteration order.
+        let expected_len = schema_fields
+            .first()
+            .and_then(|field| columns_by_name.get(field.name().as_str()))
+            .map_or(0, Vec::len);
+        for field in schema_fields {
+            if let Some(values) = columns_by_name.get(field.name().as_str()) {
+                if values.len() != expected_len {
+                    return Err(ParquetError::Schema(format!(
+                        "Column '{}' has {} values but expected {}",
+                        field.name(),
+                        values.len(),
+                        expected_len
+                    )));
+                }
+            }
+        }
+
         // Sort columns to match schema order and convert to arrays
-        let mut arrow_columns = Vec::with_capacity(columns.len());
+        let mut arrow_columns = Vec::with_capacity(schema_fields.len());
 
         for field in schema_fields {
-            let column_data = columns
-                .iter()
-                .find(|(name, _)| name == field.name())
+            let values = columns_by_name
+                .remove(field.name().as_str())
                 .ok_or_else(|| ParquetError::Schema(format!("Missing column: {}", field.name())))?;
 
-            let array = parquet_values_to_arrow_array(column_data.1.clone(), field)?;
+            for (idx, value) in values.iter().enumerate() {
+                validate_value_against_field(
+                    value,
+                    field,
+                    &format!("column '{}'[{}]", field.name(), idx),
+                )?;
+            }
+
+            let array = parquet_values_to_arrow_array(&values, field)?;
             arrow_columns.push(array);
         }
 
@@ -492,7 +565,19 @@ fn validate_value_against_field(value: &ParquetValue, field: &Field, path: &str)
         // String and binary
         (String(_), DataType::Utf8) => Ok(()),
         (Bytes(_), DataType::Binary) => Ok(()),
-        (Bytes(_), DataType::FixedSizeBinary(_)) => Ok(()), // Size check done during conversion
+        (Bytes(b), DataType::FixedSizeBinary(size)) => {
+            // Validate up front so a wrong-length value is rejected at write_row
+            // rather than poisoning the buffer at flush time.
+            if b.len() != *size as usize {
+                return Err(ParquetError::Schema(format!(
+                    "Fixed size binary expected {} bytes, got {} at {}",
+                    size,
+                    b.len(),
+                    path
+                )));
+            }
+            Ok(())
+        }
 
         // Date/time types
         (Date32(_), DataType::Date32) => Ok(()),
@@ -506,8 +591,12 @@ fn validate_value_against_field(value: &ParquetValue, field: &Field, path: &str)
         (TimestampNanos(_, _), DataType::Timestamp(_, _)) => Ok(()),
 
         // Decimal types
-        (Decimal128(_, _), DataType::Decimal128(_, _)) => Ok(()),
-        (Decimal256(_, _), DataType::Decimal256(_, _)) => Ok(()),
+        (Decimal128(decimal, value_scale), DataType::Decimal128(precision, scale)) => {
+            validate_decimal128_schema(*decimal, *value_scale, *precision, *scale, path)
+        }
+        (Decimal256(decimal, value_scale), DataType::Decimal256(precision, scale)) => {
+            validate_decimal256_schema(decimal, *value_scale, *precision, *scale, path)
+        }
 
         // List type
         (List(items), DataType::List(item_field)) => {
@@ -572,7 +661,8 @@ fn validate_value_against_field(value: &ParquetValue, field: &Field, path: &str)
 }
 
 /// Convert our Schema to Arrow Schema
-fn schema_to_arrow(schema: &Schema) -> Result<Arc<arrow_schema::Schema>> {
+fn schema_to_arrow(schema: &Schema) -> Result<StdArc<arrow_schema::Schema>> {
+    schema.validate().map_err(ParquetError::Schema)?;
     match &schema.root {
         SchemaNode::Struct { fields, .. } => {
             let arrow_fields = fields
@@ -580,12 +670,72 @@ fn schema_to_arrow(schema: &Schema) -> Result<Arc<arrow_schema::Schema>> {
                 .map(schema_node_to_arrow_field)
                 .collect::<Result<Vec<_>>>()?;
 
-            Ok(Arc::new(arrow_schema::Schema::new(arrow_fields)))
+            Ok(StdArc::new(arrow_schema::Schema::new(arrow_fields)))
         }
         _ => Err(ParquetError::Schema(
             "Root schema node must be a struct".to_string(),
         )),
     }
+}
+
+fn validate_column_count(column_count: usize) -> Result<()> {
+    if column_count > MAX_BUFFERED_VALUE_SLOTS {
+        return Err(ParquetError::Schema(format!(
+            "Schema has {} columns, exceeding the writer buffer slot limit of {}",
+            column_count, MAX_BUFFERED_VALUE_SLOTS
+        )));
+    }
+    Ok(())
+}
+
+fn max_batch_size_for_column_count(column_count: usize) -> usize {
+    let width = column_count.max(1);
+    (MAX_BUFFERED_VALUE_SLOTS / width)
+        .max(1)
+        .min(MAX_BATCH_SIZE)
+}
+
+fn default_batch_size_for_column_count(column_count: usize) -> usize {
+    DEFAULT_BATCH_SIZE.min(max_batch_size_for_column_count(column_count))
+}
+
+fn validate_fixed_batch_size(batch_size: usize, column_count: usize) -> Result<usize> {
+    if batch_size == 0 {
+        return Err(ParquetError::Schema(
+            "batch_size must be greater than 0".to_string(),
+        ));
+    }
+
+    let max_batch_size = max_batch_size_for_column_count(column_count);
+    if batch_size > max_batch_size {
+        return Err(ParquetError::Schema(format!(
+            "batch_size {} exceeds maximum {} for {} columns",
+            batch_size, max_batch_size, column_count
+        )));
+    }
+
+    Ok(batch_size)
+}
+
+fn validate_sample_size(sample_size: usize) -> Result<usize> {
+    if sample_size == 0 {
+        return Err(ParquetError::Schema(
+            "sample_size must be greater than 0".to_string(),
+        ));
+    }
+    if sample_size > MAX_SAMPLE_SIZE {
+        return Err(ParquetError::Schema(format!(
+            "sample_size {} exceeds maximum {}",
+            sample_size, MAX_SAMPLE_SIZE
+        )));
+    }
+    Ok(sample_size)
+}
+
+fn dynamic_batch_size_for_column_count(suggested_batch_size: usize, column_count: usize) -> usize {
+    let max_batch_size = max_batch_size_for_column_count(column_count);
+    let min_batch_size = MIN_BATCH_SIZE.min(max_batch_size);
+    suggested_batch_size.clamp(min_batch_size, max_batch_size)
 }
 
 /// Convert a SchemaNode to an Arrow Field
@@ -612,10 +762,14 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
             nullable,
         } => {
             let item_field = schema_node_to_arrow_field(item)?;
-            let list_type = DataType::List(Arc::new(Field::new(
+            // Use the conventional Arrow list element name "item" rather than the
+            // schema node's internal name (e.g. "<field>_item"), so written files
+            // interoperate with external Parquet readers. The element's data type
+            // and nullability still come from the schema node.
+            let list_type = DataType::List(StdArc::new(Field::new(
                 "item",
                 item_field.data_type().clone(),
-                true,
+                item_field.is_nullable(),
             )));
             Ok(Field::new(name, list_type, *nullable))
         }
@@ -629,12 +783,20 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
             let value_field = schema_node_to_arrow_field(value)?;
 
             let struct_fields = vec![
-                Field::new("key", key_field.data_type().clone(), false),
-                Field::new("value", value_field.data_type().clone(), true),
+                Field::new(
+                    key_field.name().clone(),
+                    key_field.data_type().clone(),
+                    false,
+                ),
+                Field::new(
+                    value_field.name().clone(),
+                    value_field.data_type().clone(),
+                    value_field.is_nullable(),
+                ),
             ];
 
             let map_type = DataType::Map(
-                Arc::new(Field::new(
+                StdArc::new(Field::new(
                     "entries",
                     DataType::Struct(struct_fields.into()),
                     false,
@@ -658,6 +820,74 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
             Ok(Field::new(name, struct_type, *nullable))
         }
     }
+}
+
+fn new_buffered_columns(
+    arrow_schema: &arrow_schema::Schema,
+    capacity: usize,
+) -> Vec<Vec<ParquetValue>> {
+    let column_count = arrow_schema.fields().len();
+    debug_assert!(column_count <= MAX_BUFFERED_VALUE_SLOTS);
+    debug_assert!(capacity <= max_batch_size_for_column_count(column_count));
+
+    arrow_schema
+        .fields()
+        .iter()
+        .map(|_| Vec::with_capacity(capacity))
+        .collect()
+}
+
+fn validate_decimal128_schema(
+    value: i128,
+    value_scale: i8,
+    precision: u8,
+    scale: i8,
+    path: &str,
+) -> Result<()> {
+    if value_scale != scale {
+        return Err(ParquetError::Schema(format!(
+            "Decimal scale mismatch at {}: schema scale {}, value scale {}",
+            path, scale, value_scale
+        )));
+    }
+
+    validate_decimal_precision(decimal128_digit_count(value), precision, path)
+}
+
+fn validate_decimal256_schema(
+    value: &num::BigInt,
+    value_scale: i8,
+    precision: u8,
+    scale: i8,
+    path: &str,
+) -> Result<()> {
+    if value_scale != scale {
+        return Err(ParquetError::Schema(format!(
+            "Decimal scale mismatch at {}: schema scale {}, value scale {}",
+            path, scale, value_scale
+        )));
+    }
+
+    validate_decimal_precision(decimal256_digit_count(value), precision, path)
+}
+
+fn validate_decimal_precision(value_digits: usize, precision: u8, path: &str) -> Result<()> {
+    if value_digits > precision as usize {
+        return Err(ParquetError::Schema(format!(
+            "Decimal precision overflow at {}: schema precision {}, value has {} digits",
+            path, precision, value_digits
+        )));
+    }
+
+    Ok(())
+}
+
+fn decimal128_digit_count(value: i128) -> usize {
+    value.unsigned_abs().to_string().len()
+}
+
+fn decimal256_digit_count(value: &num::BigInt) -> usize {
+    value.to_str_radix(10).trim_start_matches('-').len()
 }
 
 /// Convert PrimitiveType to Arrow DataType
@@ -686,13 +916,13 @@ fn primitive_type_to_arrow(ptype: &crate::PrimitiveType) -> Result<DataType> {
             arrow_schema::TimeUnit::Millisecond,
             // PARQUET SPEC: ANY timezone (e.g., "+09:00", "America/New_York") means
             // UTC-normalized storage (isAdjustedToUTC = true). Original timezone is lost.
-            tz.as_ref().map(|_| Arc::from("UTC")),
+            tz.as_ref().map(|_| StdArc::from("UTC")),
         ),
         TimestampMicros(tz) => DataType::Timestamp(
             arrow_schema::TimeUnit::Microsecond,
             // PARQUET SPEC: ANY timezone (e.g., "+09:00", "America/New_York") means
             // UTC-normalized storage (isAdjustedToUTC = true). Original timezone is lost.
-            tz.as_ref().map(|_| Arc::from("UTC")),
+            tz.as_ref().map(|_| StdArc::from("UTC")),
         ),
         Decimal128(precision, scale) => DataType::Decimal128(*precision, *scale),
         Decimal256(precision, scale) => DataType::Decimal256(*precision, *scale),
@@ -701,13 +931,13 @@ fn primitive_type_to_arrow(ptype: &crate::PrimitiveType) -> Result<DataType> {
             arrow_schema::TimeUnit::Second,
             // PARQUET SPEC: ANY timezone (e.g., "+09:00", "America/New_York") means
             // UTC-normalized storage (isAdjustedToUTC = true). Original timezone is lost.
-            tz.as_ref().map(|_| Arc::from("UTC")),
+            tz.as_ref().map(|_| StdArc::from("UTC")),
         ),
         TimestampNanos(tz) => DataType::Timestamp(
             arrow_schema::TimeUnit::Nanosecond,
             // PARQUET SPEC: ANY timezone (e.g., "+09:00", "America/New_York") means
             // UTC-normalized storage (isAdjustedToUTC = true). Original timezone is lost.
-            tz.as_ref().map(|_| Arc::from("UTC")),
+            tz.as_ref().map(|_| StdArc::from("UTC")),
         ),
         FixedLenByteArray(len) => DataType::FixedSizeBinary(*len),
     })
@@ -717,6 +947,134 @@ fn primitive_type_to_arrow(ptype: &crate::PrimitiveType) -> Result<DataType> {
 mod tests {
     use super::*;
     use crate::SchemaBuilder;
+    use triomphe::Arc;
+
+    fn int64_schema(column_count: usize) -> Schema {
+        SchemaBuilder::new()
+            .with_root(SchemaNode::Struct {
+                name: "root".to_string(),
+                nullable: false,
+                fields: (0..column_count)
+                    .map(|index| SchemaNode::Primitive {
+                        name: format!("field_{index}"),
+                        primitive_type: crate::PrimitiveType::Int64,
+                        nullable: false,
+                        format: None,
+                    })
+                    .collect(),
+            })
+            .build()
+            .unwrap()
+    }
+
+    fn single_int64_schema() -> Schema {
+        int64_schema(1)
+    }
+
+    fn single_int64_writer(buffer: Vec<u8>) -> Writer<Vec<u8>> {
+        Writer::new(buffer, single_int64_schema()).unwrap()
+    }
+
+    #[test]
+    fn dynamic_batch_size_is_clamped_to_max() {
+        let mut writer = single_int64_writer(Vec::new());
+        // A pathological tiny average row size would otherwise drive the batch
+        // size toward memory_threshold rows; it must be capped at MAX_BATCH_SIZE.
+        writer.size_samples = vec![1; MIN_SAMPLES_FOR_ESTIMATE];
+        writer.update_batch_size();
+        assert_eq!(writer.current_batch_size, MAX_BATCH_SIZE);
+
+        // A realistic average stays below the cap.
+        writer.size_samples = vec![DEFAULT_MEMORY_THRESHOLD / 1000; MIN_SAMPLES_FOR_ESTIMATE];
+        writer.update_batch_size();
+        assert!(writer.current_batch_size <= MAX_BATCH_SIZE);
+        assert!(writer.current_batch_size >= MIN_BATCH_SIZE);
+    }
+
+    #[test]
+    fn dynamic_batch_size_is_clamped_to_width_bound() {
+        let mut writer = WriterBuilder::new()
+            .build(Vec::new(), int64_schema(2))
+            .unwrap();
+
+        writer.size_samples = vec![1; MIN_SAMPLES_FOR_ESTIMATE];
+        writer.update_batch_size();
+
+        assert_eq!(
+            writer.current_batch_size,
+            max_batch_size_for_column_count(2)
+        );
+        assert_eq!(
+            writer.current_batch_size * writer.buffered_columns.len(),
+            MAX_BUFFERED_VALUE_SLOTS
+        );
+    }
+
+    #[test]
+    fn fixed_batch_size_preserves_small_user_value() {
+        let writer = WriterBuilder::new()
+            .with_batch_size(1)
+            .build(Vec::new(), single_int64_schema())
+            .unwrap();
+
+        assert_eq!(writer.current_batch_size, 1);
+        assert_eq!(writer.buffered_columns[0].capacity(), 1);
+    }
+
+    #[test]
+    fn oversized_fixed_batch_size_is_rejected_before_initial_buffer_allocation() {
+        let result = WriterBuilder::new()
+            .with_batch_size(MAX_BATCH_SIZE + 1)
+            .build(Vec::new(), single_int64_schema());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wide_schema_fixed_batch_size_is_rejected_by_total_slot_bound() {
+        let result = WriterBuilder::new()
+            .with_batch_size(MAX_BATCH_SIZE)
+            .build(Vec::new(), int64_schema(2));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sample_size_preserves_small_user_value() {
+        let writer = WriterBuilder::new()
+            .with_sample_size(1)
+            .build(Vec::new(), single_int64_schema())
+            .unwrap();
+
+        assert_eq!(writer.sample_size, 1);
+        assert_eq!(writer.size_samples.capacity(), 1);
+    }
+
+    #[test]
+    fn small_sample_size_updates_after_requested_sample_count() {
+        let mut writer = WriterBuilder::new()
+            .with_memory_threshold(128)
+            .with_sample_size(1)
+            .build(Vec::new(), single_int64_schema())
+            .unwrap();
+
+        writer.write_row(vec![ParquetValue::Int64(1)]).unwrap();
+
+        assert_eq!(writer.size_samples.len(), 1);
+        assert_eq!(
+            writer.current_batch_size,
+            dynamic_batch_size_for_column_count(16, 1)
+        );
+    }
+
+    #[test]
+    fn oversized_sample_size_is_rejected_before_initial_buffer_allocation() {
+        let result = WriterBuilder::new()
+            .with_sample_size(usize::MAX)
+            .build(Vec::new(), single_int64_schema());
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_writer_creation() {

@@ -6,7 +6,8 @@ use ordered_float::OrderedFloat;
 use parquet::schema::types::Type;
 use parquet_core::arrow_conversion::{arrow_to_parquet_value, parquet_values_to_arrow_array};
 use parquet_core::*;
-use std::sync::Arc;
+use std::sync::Arc as StdArc;
+use triomphe::Arc;
 
 #[test]
 fn test_float16_conversion() {
@@ -19,7 +20,7 @@ fn test_float16_conversion() {
 
     // Test upcast to Float32
     let field = Field::new("test", DataType::Float32, true);
-    let array = parquet_values_to_arrow_array(values.clone(), &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
     assert_eq!(array.len(), 4);
 
     let float_array = array.as_any().downcast_ref::<Float32Array>().unwrap();
@@ -30,7 +31,7 @@ fn test_float16_conversion() {
 
     // Test upcast to Float64
     let field = Field::new("test", DataType::Float64, true);
-    let array = parquet_values_to_arrow_array(values, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
     let float_array = array.as_any().downcast_ref::<Float64Array>().unwrap();
     assert_eq!(float_array.value(0), 1.0);
     assert_eq!(float_array.value(1), -2.5);
@@ -51,7 +52,7 @@ fn test_fixed_size_binary_conversion() {
     ];
 
     let field = Field::new("uuid", DataType::FixedSizeBinary(16), true);
-    let array = parquet_values_to_arrow_array(values, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
 
     let fixed_array = array
         .as_any()
@@ -69,7 +70,7 @@ fn test_fixed_size_binary_wrong_size_error() {
     ];
 
     let field = Field::new("test", DataType::FixedSizeBinary(16), true);
-    let result = parquet_values_to_arrow_array(values, &field);
+    let result = parquet_values_to_arrow_array(&values, &field);
 
     assert!(result.is_err());
     assert!(result
@@ -96,7 +97,7 @@ fn test_decimal256_large_values() {
     ];
 
     let field = Field::new("test", DataType::Decimal256(76, 0), true);
-    let array = parquet_values_to_arrow_array(values, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
 
     // Verify roundtrip
     for i in 0..4 {
@@ -124,20 +125,19 @@ fn test_decimal256_large_values() {
 }
 
 #[test]
-fn test_decimal256_too_large_error() {
-    // Create a value that's too large for 256 bits
+fn test_decimal256_precision_overflow_error() {
     let too_large = BigInt::from(2).pow(256);
 
     let values = vec![ParquetValue::Decimal256(too_large, 0)];
 
     let field = Field::new("test", DataType::Decimal256(76, 0), true);
-    let result = parquet_values_to_arrow_array(values, &field);
+    let result = parquet_values_to_arrow_array(&values, &field);
 
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Decimal256 value too large"));
+        .contains("Decimal precision overflow"));
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn test_time_type_conversions() {
     ];
 
     let field = Field::new("time", DataType::Time32(TimeUnit::Millisecond), true);
-    let array = parquet_values_to_arrow_array(values_millis, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values_millis, &field).unwrap();
     assert_eq!(array.len(), 4);
 
     // Test TimeMicros
@@ -163,7 +163,18 @@ fn test_time_type_conversions() {
     ];
 
     let field = Field::new("time", DataType::Time64(TimeUnit::Microsecond), true);
-    let array = parquet_values_to_arrow_array(values_micros, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values_micros, &field).unwrap();
+    assert_eq!(array.len(), 4);
+
+    let values_nanos = vec![
+        ParquetValue::TimeNanos(123456789),
+        ParquetValue::TimeNanos(0),
+        ParquetValue::TimeNanos(86399999999999),
+        ParquetValue::Null,
+    ];
+
+    let field = Field::new("time", DataType::Time64(TimeUnit::Nanosecond), true);
+    let array = parquet_values_to_arrow_array(&values_nanos, &field).unwrap();
     assert_eq!(array.len(), 4);
 }
 
@@ -182,7 +193,7 @@ fn test_timestamp_with_timezone() {
         DataType::Timestamp(TimeUnit::Millisecond, Some("America/New_York".into())),
         true,
     );
-    let array = parquet_values_to_arrow_array(values, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
 
     // Verify roundtrip preserves timezone
     for i in 0..3 {
@@ -190,7 +201,7 @@ fn test_timestamp_with_timezone() {
         let parquet_type = Type::primitive_type_builder("test", parquet::basic::Type::INT64)
             .with_logical_type(Some(parquet::basic::LogicalType::Timestamp {
                 is_adjusted_to_u_t_c: true,
-                unit: parquet::basic::TimeUnit::MILLIS(Default::default()),
+                unit: parquet::basic::TimeUnit::MILLIS,
             }))
             .build()
             .unwrap();
@@ -223,10 +234,10 @@ fn test_nested_list_of_lists() {
     let values = vec![ParquetValue::List(inner_lists)];
 
     let inner_field = Field::new("item", DataType::Int32, false);
-    let list_field = Field::new("inner_list", DataType::List(Arc::new(inner_field)), true);
-    let outer_field = Field::new("outer_list", DataType::List(Arc::new(list_field)), false);
+    let list_field = Field::new("inner_list", DataType::List(StdArc::new(inner_field)), true);
+    let outer_field = Field::new("outer_list", DataType::List(StdArc::new(list_field)), false);
 
-    let array = parquet_values_to_arrow_array(values, &outer_field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &outer_field).unwrap();
     assert_eq!(array.len(), 1);
 
     // Verify roundtrip
@@ -235,11 +246,11 @@ fn test_nested_list_of_lists() {
         .build()
         .unwrap();
     let inner_list = Type::group_type_builder("inner_list")
-        .with_fields(vec![Arc::new(int_type)])
+        .with_fields(vec![StdArc::new(int_type)])
         .build()
         .unwrap();
     let parquet_type = Type::group_type_builder("outer_list")
-        .with_fields(vec![Arc::new(inner_list)])
+        .with_fields(vec![StdArc::new(inner_list)])
         .build()
         .unwrap();
     let value = arrow_to_parquet_value(&outer_field, &parquet_type, array.as_ref(), 0).unwrap();
@@ -272,9 +283,13 @@ fn test_map_with_null_values() {
         DataType::Struct(vec![key_field, value_field].into()),
         false,
     );
-    let map_field = Field::new("map", DataType::Map(Arc::new(entries_field), false), true);
+    let map_field = Field::new(
+        "map",
+        DataType::Map(StdArc::new(entries_field), false),
+        true,
+    );
 
-    let array = parquet_values_to_arrow_array(values, &map_field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &map_field).unwrap();
     assert_eq!(array.len(), 2);
 
     // Verify the map was created correctly
@@ -317,7 +332,7 @@ fn test_struct_with_missing_fields() {
     ];
 
     let struct_field = Field::new("struct", DataType::Struct(fields.into()), true);
-    let array = parquet_values_to_arrow_array(values, &struct_field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &struct_field).unwrap();
 
     let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
     assert_eq!(struct_array.len(), 3);
@@ -339,7 +354,7 @@ fn test_type_mismatch_errors() {
     // Boolean field expecting String value
     let values = vec![ParquetValue::String(Arc::from("not a boolean"))];
     let field = Field::new("test", DataType::Boolean, false);
-    let result = parquet_values_to_arrow_array(values, &field);
+    let result = parquet_values_to_arrow_array(&values, &field);
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -351,7 +366,7 @@ fn test_type_mismatch_errors() {
     // Int32 field expecting Float value
     let values = vec![ParquetValue::Float32(OrderedFloat(3.14))];
     let field = Field::new("test", DataType::Int32, false);
-    let result = parquet_values_to_arrow_array(values, &field);
+    let result = parquet_values_to_arrow_array(&values, &field);
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -363,8 +378,8 @@ fn test_type_mismatch_errors() {
     // List field expecting non-list value
     let values = vec![ParquetValue::Int32(42)];
     let item_field = Field::new("item", DataType::Int32, false);
-    let list_field = Field::new("list", DataType::List(Arc::new(item_field)), false);
-    let result = parquet_values_to_arrow_array(values, &list_field);
+    let list_field = Field::new("list", DataType::List(StdArc::new(item_field)), false);
+    let result = parquet_values_to_arrow_array(&values, &list_field);
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -379,14 +394,14 @@ fn test_unsupported_arrow_types() {
     // Test arrow_to_parquet_value with unsupported types
     // Create a simple union type
     let type_ids = arrow_buffer::ScalarBuffer::from(vec![0i8, 0, 0]);
-    let fields = vec![Arc::new(Field::new("int", DataType::Int32, false))];
-    let union_fields = arrow_schema::UnionFields::new(vec![0], fields);
+    let fields = vec![StdArc::new(Field::new("int", DataType::Int32, false))];
+    let union_fields = arrow_schema::UnionFields::try_new(vec![0], fields).unwrap();
 
     let array = arrow_array::UnionArray::try_new(
         union_fields,
         type_ids,
         None,
-        vec![Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef],
+        vec![StdArc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef],
     )
     .unwrap();
 
@@ -414,7 +429,7 @@ fn test_integer_overflow_prevention() {
 
     // These should work fine in Int64
     let field = Field::new("test", DataType::Int64, false);
-    let array = parquet_values_to_arrow_array(values, &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
     let int_array = array.as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(int_array.value(0), i64::MAX);
     assert_eq!(int_array.value(1), i64::MIN);
@@ -426,10 +441,10 @@ fn test_empty_collections() {
     let values = vec![ParquetValue::List(vec![])];
     let field = Field::new(
         "list",
-        DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+        DataType::List(StdArc::new(Field::new("item", DataType::Int32, true))),
         false,
     );
-    let array = parquet_values_to_arrow_array(values.clone(), &field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &field).unwrap();
     let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
     assert_eq!(list_array.value(0).len(), 0);
 
@@ -442,8 +457,12 @@ fn test_empty_collections() {
         DataType::Struct(vec![key_field, value_field].into()),
         false,
     );
-    let map_field = Field::new("map", DataType::Map(Arc::new(entries_field), false), false);
-    let array = parquet_values_to_arrow_array(values, &map_field).unwrap();
+    let map_field = Field::new(
+        "map",
+        DataType::Map(StdArc::new(entries_field), false),
+        false,
+    );
+    let array = parquet_values_to_arrow_array(&values, &map_field).unwrap();
     let map_array = array.as_any().downcast_ref::<MapArray>().unwrap();
     assert_eq!(map_array.value(0).len(), 0);
 
@@ -456,7 +475,7 @@ fn test_empty_collections() {
         Field::new("field2", DataType::Int32, true),
     ];
     let struct_field = Field::new("struct", DataType::Struct(fields.into()), false);
-    let array = parquet_values_to_arrow_array(values, &struct_field).unwrap();
+    let array = parquet_values_to_arrow_array(&values, &struct_field).unwrap();
     let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
 
     // All fields should be null

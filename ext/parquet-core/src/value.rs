@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use indexmap::IndexMap;
 use num::BigInt;
-use std::sync::Arc;
+use triomphe::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,8 +104,12 @@ impl std::hash::Hash for ParquetValue {
             ParquetValue::List(l) => l.hash(state),
             ParquetValue::Map(m) => m.hash(state),
             ParquetValue::Record(r) => {
-                // IndexMap preserves insertion order, so hash is deterministic
-                for (k, v) in r {
+                r.len().hash(state);
+                let mut entries = r.iter().collect::<Vec<_>>();
+                entries.sort_by(|(left_key, _), (right_key, _)| {
+                    left_key.as_ref().cmp(right_key.as_ref())
+                });
+                for (k, v) in entries {
                     k.hash(state);
                     v.hash(state);
                 }

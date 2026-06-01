@@ -4,7 +4,7 @@ use ordered_float::OrderedFloat;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_event_log_pattern() {
@@ -119,7 +119,7 @@ fn test_event_log_pattern() {
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .set_dictionary_enabled(true) // Good for repeated event types
-            .set_max_row_group_size(100000) // ~1.4 hours of data per row group
+            .set_max_row_group_row_count(Some(100000)) // ~1.4 hours of data per row group
             .build();
 
         let mut writer = Writer::new_with_properties(&mut buffer, schema, props).unwrap();

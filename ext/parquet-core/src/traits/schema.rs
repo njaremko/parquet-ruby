@@ -49,8 +49,22 @@ fn count_fields(node: &SchemaNode) -> usize {
 }
 
 fn get_field_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
-    let parts: Vec<&str> = path.split('.').collect();
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut parts: Vec<&str> = path.split('.').collect();
+    // Strip a leading segment equal to the root's own name (so a path may carry
+    // the root name as a prefix or omit it), but not when the root actually has a
+    // child of that name — there the segment refers to the child, not the root.
+    if parts.first().copied() == Some(node.name()) && !has_child_named(node, node.name()) {
+        parts.remove(0);
+    }
     get_field_by_path_parts(node, &parts)
+}
+
+fn has_child_named(node: &SchemaNode, name: &str) -> bool {
+    matches!(node, SchemaNode::Struct { fields, .. } if fields.iter().any(|f| f.name() == name))
 }
 
 fn get_field_by_path_parts<'a>(node: &'a SchemaNode, parts: &[&str]) -> Option<&'a SchemaNode> {
@@ -66,10 +80,12 @@ fn get_field_by_path_parts<'a>(node: &'a SchemaNode, parts: &[&str]) -> Option<&
             .iter()
             .find(|f| f.name() == first)
             .and_then(|f| get_field_by_path_parts(f, rest)),
-        SchemaNode::List { item, .. } if first == "item" => get_field_by_path_parts(item, rest),
+        SchemaNode::List { item, .. } if first == "item" || first == item.name() => {
+            get_field_by_path_parts(item, rest)
+        }
         SchemaNode::Map { key, value, .. } => match first {
-            "key" => get_field_by_path_parts(key, rest),
-            "value" => get_field_by_path_parts(value, rest),
+            name if name == "key" || name == key.name() => get_field_by_path_parts(key, rest),
+            name if name == "value" || name == value.name() => get_field_by_path_parts(value, rest),
             _ => None,
         },
         _ => None,
@@ -92,11 +108,11 @@ fn collect_field_paths(node: &SchemaNode, prefix: String, paths: &mut Vec<String
             }
         }
         SchemaNode::List { item, .. } => {
-            collect_field_paths(item, format!("{}.item", current_path), paths);
+            collect_field_paths(item, current_path, paths);
         }
         SchemaNode::Map { key, value, .. } => {
-            collect_field_paths(key, format!("{}.key", current_path), paths);
-            collect_field_paths(value, format!("{}.value", current_path), paths);
+            collect_field_paths(key, current_path.clone(), paths);
+            collect_field_paths(value, current_path, paths);
         }
         SchemaNode::Primitive { .. } => {}
     }
@@ -147,5 +163,28 @@ mod tests {
         // Test get field by path
         let city = schema.get_field_by_path("address.city").unwrap();
         assert_eq!(city.name(), "city");
+    }
+
+    #[test]
+    fn leading_root_segment_resolves_to_child_when_root_has_such_a_child() {
+        // When the root struct has a child sharing the root's own name, a leading
+        // "root" segment must refer to that child, not be stripped as the root.
+        let schema = CoreSchemaBuilder::new()
+            .with_root(SchemaNode::Struct {
+                name: "root".to_string(),
+                nullable: false,
+                fields: vec![SchemaNode::Primitive {
+                    name: "root".to_string(),
+                    primitive_type: PrimitiveType::Int64,
+                    nullable: false,
+                    format: None,
+                }],
+            })
+            .build()
+            .unwrap();
+
+        let resolved = schema.get_field_by_path("root").unwrap();
+        assert!(matches!(resolved, SchemaNode::Primitive { .. }));
+        assert_eq!(resolved.name(), "root");
     }
 }

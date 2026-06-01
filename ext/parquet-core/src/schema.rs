@@ -1,9 +1,19 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use triomphe::Arc;
+
+const DECIMAL128_MAX_PRECISION: u8 = 38;
+const DECIMAL256_MAX_PRECISION: u8 = 76;
 
 /// Core schema representation for Parquet files
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schema {
     pub root: SchemaNode,
+}
+
+impl Schema {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_root(&self.root)
+    }
 }
 
 /// Represents a node in the Parquet schema tree
@@ -164,6 +174,7 @@ impl PrimitiveType {
                 | PrimitiveType::TimestampNanos(_)
                 | PrimitiveType::TimeMillis
                 | PrimitiveType::TimeMicros
+                | PrimitiveType::TimeNanos
         )
     }
 }
@@ -183,10 +194,13 @@ impl SchemaBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Schema, &'static str> {
+    pub fn build(self) -> Result<Schema, String> {
         match self.root {
-            Some(root) => Ok(Schema { root }),
-            None => Err("Schema must have a root node"),
+            Some(root) => {
+                validate_root(&root)?;
+                Ok(Schema { root })
+            }
+            None => Err("Schema must have a root node".to_string()),
         }
     }
 }
@@ -195,6 +209,159 @@ impl Default for SchemaBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn validate_root(root: &SchemaNode) -> Result<(), String> {
+    match root {
+        SchemaNode::Struct { name, fields, .. } => {
+            if fields.is_empty() {
+                return Err(format!(
+                    "Root struct '{}' must contain at least one field",
+                    name
+                ));
+            }
+            validate_unique_field_names(fields, name)?;
+            for field in fields {
+                validate_schema_node(field, name)?;
+            }
+            Ok(())
+        }
+        _ => Err("Root schema node must be a struct".to_string()),
+    }
+}
+
+fn validate_schema_node(node: &SchemaNode, parent_path: &str) -> Result<(), String> {
+    let path = format!("{}.{}", parent_path, node.name());
+    match node {
+        SchemaNode::Struct { fields, .. } => {
+            if fields.is_empty() {
+                return Err(format!(
+                    "Struct field '{}' must contain at least one field",
+                    path
+                ));
+            }
+            validate_unique_field_names(fields, &path)?;
+            for field in fields {
+                validate_schema_node(field, &path)?;
+            }
+        }
+        SchemaNode::List { item, .. } => {
+            validate_schema_node(item, &path)?;
+        }
+        SchemaNode::Map { key, value, .. } => {
+            if key.is_nullable() {
+                return Err(format!(
+                    "Map key field '{}.{}' must be required",
+                    path,
+                    key.name()
+                ));
+            }
+            validate_schema_node(key, &path)?;
+            validate_schema_node(value, &path)?;
+        }
+        SchemaNode::Primitive {
+            primitive_type,
+            format,
+            ..
+        } => {
+            validate_primitive_type(primitive_type, format.as_deref(), &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_field_names(fields: &[SchemaNode], path: &str) -> Result<(), String> {
+    let mut names = HashSet::with_capacity(fields.len());
+    for field in fields {
+        let name = field.name();
+        if !names.insert(name) {
+            return Err(format!(
+                "Struct field '{}' contains duplicate field '{}'",
+                path, name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_primitive_type(
+    primitive_type: &PrimitiveType,
+    format: Option<&str>,
+    path: &str,
+) -> Result<(), String> {
+    match primitive_type {
+        PrimitiveType::Decimal128(precision, scale) => validate_decimal_type(
+            "Decimal128",
+            *precision,
+            *scale,
+            DECIMAL128_MAX_PRECISION,
+            path,
+        )?,
+        PrimitiveType::Decimal256(precision, scale) => validate_decimal_type(
+            "Decimal256",
+            *precision,
+            *scale,
+            DECIMAL256_MAX_PRECISION,
+            path,
+        )?,
+        PrimitiveType::FixedLenByteArray(length) => {
+            if *length <= 0 {
+                return Err(format!(
+                    "FixedLenByteArray field '{}' must have a positive length",
+                    path
+                ));
+            }
+            if format == Some("uuid") && *length != 16 {
+                return Err(format!(
+                    "UUID field '{}' must use FixedLenByteArray(16)",
+                    path
+                ));
+            }
+        }
+        _ => {
+            if format == Some("uuid") {
+                return Err(format!(
+                    "UUID field '{}' must use FixedLenByteArray(16)",
+                    path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_decimal_type(
+    type_name: &str,
+    precision: u8,
+    scale: i8,
+    max_precision: u8,
+    path: &str,
+) -> Result<(), String> {
+    if precision == 0 {
+        return Err(format!(
+            "{} field '{}' precision must be at least 1",
+            type_name, path
+        ));
+    }
+    if precision > max_precision {
+        return Err(format!(
+            "{} field '{}' precision {} exceeds maximum precision {}",
+            type_name, path, precision, max_precision
+        ));
+    }
+    if scale < 0 {
+        return Err(format!(
+            "{} field '{}' scale must be non-negative",
+            type_name, path
+        ));
+    }
+    if scale as u8 > precision {
+        return Err(format!(
+            "{} field '{}' scale {} cannot exceed precision {}",
+            type_name, path, scale, precision
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

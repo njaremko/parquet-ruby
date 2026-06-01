@@ -18,12 +18,29 @@ module Parquet
   #                    ("hash" or "array" or :hash or :array)
   #   - `columns`: When present, only the specified columns will be included in the output.
   #                This is useful for reducing how much data is read and improving performance.
+  #   - `string_storage`: How string *values* become Ruby strings (default `:copy`). Hash keys
+  #                       (struct field names and top-level column names) are always interned and
+  #                       reused regardless of this setting.
+  #                       - `:copy` allocates a fresh mutable String per value.
+  #                       - `:intern` deduplicates low-cardinality equal values into frozen interned
+  #                         Strings up to a bounded per-read cache, then falls back to frozen copies.
+  #                         A transient copy still happens per value, so it is not a per-value speedup.
+  #                       - `:shared` returns frozen, zero-copy strings backed by Rust memory for
+  #                         short, repeated, low-cardinality values. Each read returns at most the
+  #                         configured number of shared values and only values up to the configured
+  #                         byte size; values past those bounds become frozen copies. New process-wide
+  #                         leaks are also capped by the requested budget and hard process ceilings.
+  #                         All `:shared` results are frozen. Not recommended for high-cardinality or
+  #                         large-blob string columns.
+  #                       Pass a hash to set the `:shared` leak budget, e.g.
+  #                       `{ mode: :shared, max_entries: 16_384, max_value_bytes: 1024 }`.
   sig do
     params(
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
-      strict: T.nilable(T::Boolean)
+      strict: T.nilable(T::Boolean),
+      string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped]))
     ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
   end
   sig do
@@ -32,10 +49,11 @@ module Parquet
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
       strict: T.nilable(T::Boolean),
+      string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped])),
       blk: T.nilable(T.proc.params(row: T.any(T::Hash[String, T.untyped], T::Array[T.untyped])).void)
     ).returns(NilClass)
   end
-  def self.each_row(input, result_type: nil, columns: nil, strict: nil, &blk)
+  def self.each_row(input, result_type: nil, columns: nil, strict: nil, string_storage: nil, &blk)
   end
 
   # Options:
@@ -44,13 +62,16 @@ module Parquet
   #                    ("hash" or "array" or :hash or :array)
   #   - `columns`: When present, only the specified columns will be included in the output.
   #   - `batch_size`: When present, specifies the number of rows per batch
+  #   - `string_storage`: How string values become Ruby strings (`:copy` (default), `:intern`,
+  #                       or `:shared`). See `each_row` for the semantics of each mode.
   sig do
     params(
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
       batch_size: T.nilable(Integer),
-      strict: T.nilable(T::Boolean)
+      strict: T.nilable(T::Boolean),
+      string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped]))
     ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
   end
   sig do
@@ -60,11 +81,12 @@ module Parquet
       columns: T.nilable(T::Array[String]),
       batch_size: T.nilable(Integer),
       strict: T.nilable(T::Boolean),
+      string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped])),
       blk:
         T.nilable(T.proc.params(batch: T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])).void)
     ).returns(NilClass)
   end
-  def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, strict: nil, &blk)
+  def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, strict: nil, string_storage: nil, &blk)
   end
 
   # Options:
@@ -79,11 +101,19 @@ module Parquet
   #     - `date32`
   #     - `timestamp_millis`, `timestamp_micros`
   #   - `write_to`: String path or IO object to write the parquet file to
-  #   - `batch_size`: Optional batch size for writing (defaults to 1000)
-  #   - `flush_threshold`: Optional memory threshold in bytes before flushing (defaults to 64MB)
+  #   - `batch_size`: Optional positive batch size for writing (defaults to 1000, at most 1_000_000
+  #                   for one-column schemas; wide schemas may have a lower safety cap)
+  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
+  #                        buffer before a row group is flushed (defaults to 100MB)
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
-  #   - `sample_size`: Optional number of rows to sample for size estimation (defaults to 100)
+  #   - `sample_size`: Optional positive number of rows to sample for size estimation
+  #                    (defaults to 100, at most 10_000)
+  #   - `string_cache`: Deduplicate repeated string values while writing. `false` (default)
+  #                     disables it, `true` enables it with a default capacity, and an Integer
+  #                     enables it with that many retained distinct strings (at most 65_536).
+  #                     Retention also skips values larger than 4KB and stops after 16MB of
+  #                     cached string content.
   sig do
     params(
       read_from: T::Enumerator[T::Array[T.untyped]],
@@ -92,7 +122,8 @@ module Parquet
       batch_size: T.nilable(Integer),
       flush_threshold: T.nilable(Integer),
       compression: T.nilable(String),
-      sample_size: T.nilable(Integer)
+      sample_size: T.nilable(Integer),
+      string_cache: T.nilable(T.any(T::Boolean, Integer))
     ).void
   end
   def self.write_rows(
@@ -102,7 +133,8 @@ module Parquet
     batch_size: nil,
     flush_threshold: nil,
     compression: nil,
-    sample_size: nil
+    sample_size: nil,
+    string_cache: nil
   )
   end
 
@@ -119,18 +151,28 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #     - Looks like [{"column_name" => {"type" => "date32", "format" => "%Y-%m-%d"}}, {"column_name" => "int8"}]
   #   - `write_to`: String path or IO object to write the parquet file to
-  #   - `flush_threshold`: Optional memory threshold in bytes before flushing (defaults to 64MB)
+  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
+  #                        buffer before a row group is flushed (defaults to 100MB)
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  #   - `logger`: Optional Ruby logger for column-write progress messages
   sig do
     params(
       read_from: T::Enumerator[T::Array[T::Array[T.untyped]]],
       schema: T::Array[T::Hash[String, String]],
       write_to: T.any(String, IO),
       flush_threshold: T.nilable(Integer),
-      compression: T.nilable(String)
+      compression: T.nilable(String),
+      logger: T.nilable(T.untyped)
     ).void
   end
-  def self.write_columns(read_from, schema:, write_to:, flush_threshold: nil, compression: nil)
+  def self.write_columns(
+    read_from,
+    schema:,
+    write_to:,
+    flush_threshold: nil,
+    compression: nil,
+    logger: nil
+  )
   end
 end

@@ -53,30 +53,31 @@ impl RubySchemaBuilder {
         name: String,
         hash: RHash,
     ) -> Result<SchemaNode, RubyAdapterError> {
+        let ruby = Ruby::get().map_err(|e| RubyAdapterError::Ruby(e.to_string()))?;
         // Get the type field
         let type_sym: Value = hash
-            .fetch::<_, Value>(Symbol::new("type"))
+            .fetch::<_, Value>(ruby.to_symbol("type"))
             .map_err(|e| ParquetError::Schema(format!("Schema missing 'type' field: {}", e)))?;
 
         let type_str = type_sym.to_r_string()?.to_string()?;
 
         // Get nullable field (default to true)
         let nullable = hash
-            .fetch::<_, Value>(Symbol::new("nullable"))
+            .fetch::<_, Value>(ruby.to_symbol("nullable"))
             .ok()
             .and_then(|v| <bool as TryConvert>::try_convert(v).ok())
             .unwrap_or(true);
 
         // Get format field if present
         let format = hash
-            .fetch::<_, Value>(Symbol::new("format"))
+            .fetch::<_, Value>(ruby.to_symbol("format"))
             .ok()
             .and_then(|v| <String as TryConvert>::try_convert(v).ok());
 
         match type_str.to_string().as_str() {
             "struct" => {
                 let fields_array: RArray = hash
-                    .fetch(Symbol::new("fields"))
+                    .fetch(ruby.to_symbol("fields"))
                     .map_err(|e| ParquetError::Schema(format!("Struct missing 'fields': {}", e)))?;
 
                 let mut fields = Vec::new();
@@ -87,7 +88,7 @@ impl RubySchemaBuilder {
                         })?;
 
                     let _field_name: String =
-                        field_hash.fetch(Symbol::new("name")).map_err(|e| {
+                        field_hash.fetch(ruby.to_symbol("name")).map_err(|e| {
                             ParquetError::Schema(format!("Field missing 'name': {}", e))
                         })?;
 
@@ -104,7 +105,7 @@ impl RubySchemaBuilder {
 
             "list" => {
                 let item_def = hash
-                    .fetch::<_, Value>(Symbol::new("item"))
+                    .fetch::<_, Value>(ruby.to_symbol("item"))
                     .map_err(|e| ParquetError::Schema(format!("List missing 'item': {}", e)))?;
 
                 let item_name = format!("{}_item", name);
@@ -118,15 +119,19 @@ impl RubySchemaBuilder {
             }
 
             "map" => {
-                // Parse key definition
+                // Parse key definition. Parquet requires map keys to be
+                // required (non-nullable), so enforce that invariant here
+                // regardless of what the key hash specifies. This matches the
+                // schema DSL (lib/parquet/schema.rb) and the `map<...>` string
+                // form, both of which already build required keys.
                 let key_def = hash
-                    .fetch::<_, Value>(Symbol::new("key"))
+                    .fetch::<_, Value>(ruby.to_symbol("key"))
                     .map_err(|e| ParquetError::Schema(format!("Map missing 'key': {}", e)))?;
-                let key_node = self.parse_schema_node("key".to_string(), key_def)?;
+                let key_node = into_required(self.parse_schema_node("key".to_string(), key_def)?);
 
                 // Parse value definition
                 let value_def = hash
-                    .fetch::<_, Value>(Symbol::new("value"))
+                    .fetch::<_, Value>(ruby.to_symbol("value"))
                     .map_err(|e| ParquetError::Schema(format!("Map missing 'value': {}", e)))?;
                 let value_node = self.parse_schema_node("value".to_string(), value_def)?;
 
@@ -156,19 +161,19 @@ impl RubySchemaBuilder {
 
                 // Get precision and scale for decimal types
                 let precision = hash
-                    .fetch::<_, Value>(Symbol::new("precision"))
+                    .fetch::<_, Value>(ruby.to_symbol("precision"))
                     .ok()
                     .and_then(|v| <u8 as TryConvert>::try_convert(v).ok());
 
                 let scale = hash
-                    .fetch::<_, Value>(Symbol::new("scale"))
+                    .fetch::<_, Value>(ruby.to_symbol("scale"))
                     .ok()
                     .and_then(|v| <i8 as TryConvert>::try_convert(v).ok());
 
                 // Handle timezone for timestamp types
                 // Support both new has_timezone (preferred) and legacy timezone parameters
                 let timezone =
-                    if let Ok(has_tz) = hash.fetch::<_, Value>(Symbol::new("has_timezone")) {
+                    if let Ok(has_tz) = hash.fetch::<_, Value>(ruby.to_symbol("has_timezone")) {
                         // New approach: has_timezone boolean
                         if let Ok(has_timezone) = <bool as TryConvert>::try_convert(has_tz) {
                             if has_timezone {
@@ -180,7 +185,7 @@ impl RubySchemaBuilder {
                             None
                         }
                     } else {
-                        hash.fetch::<_, Value>(Symbol::new("timezone"))
+                        hash.fetch::<_, Value>(ruby.to_symbol("timezone"))
                             .ok()
                             .map(|_| "UTC".to_string()) // Any value -> UTC
                     };
@@ -276,12 +281,13 @@ impl RubySchemaBuilder {
 
     /// Parse a field definition from a Ruby hash
     fn parse_field_definition(&self, field_hash: RHash) -> Result<SchemaNode, RubyAdapterError> {
+        let ruby = Ruby::get().map_err(|e| RubyAdapterError::Ruby(e.to_string()))?;
         let name: String = field_hash
-            .fetch(Symbol::new("name"))
+            .fetch(ruby.to_symbol("name"))
             .map_err(|e| ParquetError::Schema(format!("Field missing 'name': {}", e)))?;
 
         // Check if there's a 'type' field - if so, parse as full definition
-        if let Ok(_type_value) = field_hash.fetch::<_, Value>(Symbol::new("type")) {
+        if let Ok(_type_value) = field_hash.fetch::<_, Value>(ruby.to_symbol("type")) {
             // This is a full field definition
             self.parse_schema_node(name, field_hash.as_value())
         } else {
@@ -415,9 +421,51 @@ impl Default for RubySchemaBuilder {
     }
 }
 
+/// Return `node` with its nullability forced to required (non-nullable).
+///
+/// Parquet maps store keys with `Repetition::Required`; a nullable map key is
+/// an illegal state that the core schema validator rejects. Map keys reach this
+/// helper from a user-supplied key hash whose `nullable` field defaults to
+/// `true`, so forcing required here keeps the raw-hash path consistent with the
+/// schema DSL and the `map<...>` string form.
+fn into_required(node: SchemaNode) -> SchemaNode {
+    match node {
+        SchemaNode::Struct { name, fields, .. } => SchemaNode::Struct {
+            name,
+            nullable: false,
+            fields,
+        },
+        SchemaNode::List { name, item, .. } => SchemaNode::List {
+            name,
+            nullable: false,
+            item,
+        },
+        SchemaNode::Map {
+            name, key, value, ..
+        } => SchemaNode::Map {
+            name,
+            nullable: false,
+            key,
+            value,
+        },
+        SchemaNode::Primitive {
+            name,
+            primitive_type,
+            format,
+            ..
+        } => SchemaNode::Primitive {
+            name,
+            primitive_type,
+            nullable: false,
+            format,
+        },
+    }
+}
+
 /// Wrapper functions for Ruby FFI since SchemaBuilderTrait requires Send + Sync
 /// and Ruby Value is not Send/Sync
 pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema, RubyAdapterError> {
+    let ruby = Ruby::get().map_err(|e| RubyAdapterError::Ruby(e.to_string()))?;
     let builder = RubySchemaBuilder::new();
 
     // The Ruby schema should be a hash with a root struct
@@ -425,10 +473,10 @@ pub fn ruby_schema_to_parquet(schema_def: Value) -> Result<Schema, RubyAdapterEr
         .map_err(|e: MagnusError| ParquetError::Schema(format!("Schema must be a hash: {}", e)))?;
 
     // Check if it's already in the expected format (with type: :struct)
-    let root_node = if hash.get(Symbol::new("type")).is_some() {
+    let root_node = if hash.get(ruby.to_symbol("type")).is_some() {
         // It's a complete schema definition
         builder.parse_hash_schema_node("root".to_string(), hash)?
-    } else if let Ok(fields) = hash.fetch::<_, RArray>(Symbol::new("fields")) {
+    } else if let Ok(fields) = hash.fetch::<_, RArray>(ruby.to_symbol("fields")) {
         // It's a simplified format with just fields array
         let mut field_nodes = Vec::new();
         for field_value in fields.into_iter() {
@@ -484,8 +532,8 @@ pub fn parquet_schema_to_ruby(schema: &Schema) -> Result<Value, RubyAdapterError
     schema_node_to_ruby(&schema.root, &ruby)
 }
 
-fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAdapterError> {
-    let hash = RHash::new();
+fn schema_node_to_ruby(node: &SchemaNode, ruby: &Ruby) -> Result<Value, RubyAdapterError> {
+    let hash = ruby.hash_new();
 
     match node {
         SchemaNode::Struct {
@@ -493,22 +541,22 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
             nullable,
             fields,
         } => {
-            hash.aset(Symbol::new("type"), Symbol::new("struct"))
+            hash.aset(ruby.to_symbol("type"), ruby.to_symbol("struct"))
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set type: {}", e)))?;
-            hash.aset(Symbol::new("name"), name.as_str())
+            hash.aset(ruby.to_symbol("name"), name.as_str())
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set name: {}", e)))?;
-            hash.aset(Symbol::new("nullable"), *nullable)
+            hash.aset(ruby.to_symbol("nullable"), *nullable)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set nullable: {}", e)))?;
 
-            let fields_array = RArray::new();
+            let fields_array = ruby.ary_new();
             for field in fields {
                 fields_array
-                    .push(schema_node_to_ruby(field, _ruby)?)
+                    .push(schema_node_to_ruby(field, ruby)?)
                     .map_err(|e| {
                         ParquetError::Conversion(format!("Failed to push field: {}", e))
                     })?;
             }
-            hash.aset(Symbol::new("fields"), fields_array)
+            hash.aset(ruby.to_symbol("fields"), fields_array)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set fields: {}", e)))?;
         }
 
@@ -517,13 +565,13 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
             nullable,
             item,
         } => {
-            hash.aset(Symbol::new("type"), Symbol::new("list"))
+            hash.aset(ruby.to_symbol("type"), ruby.to_symbol("list"))
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set type: {}", e)))?;
-            hash.aset(Symbol::new("name"), name.as_str())
+            hash.aset(ruby.to_symbol("name"), name.as_str())
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set name: {}", e)))?;
-            hash.aset(Symbol::new("nullable"), *nullable)
+            hash.aset(ruby.to_symbol("nullable"), *nullable)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set nullable: {}", e)))?;
-            hash.aset(Symbol::new("item"), schema_node_to_ruby(item, _ruby)?)
+            hash.aset(ruby.to_symbol("item"), schema_node_to_ruby(item, ruby)?)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set item: {}", e)))?;
         }
 
@@ -533,15 +581,15 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
             key,
             value,
         } => {
-            hash.aset(Symbol::new("type"), Symbol::new("map"))
+            hash.aset(ruby.to_symbol("type"), ruby.to_symbol("map"))
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set type: {}", e)))?;
-            hash.aset(Symbol::new("name"), name.as_str())
+            hash.aset(ruby.to_symbol("name"), name.as_str())
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set name: {}", e)))?;
-            hash.aset(Symbol::new("nullable"), *nullable)
+            hash.aset(ruby.to_symbol("nullable"), *nullable)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set nullable: {}", e)))?;
-            hash.aset(Symbol::new("key"), schema_node_to_ruby(key, _ruby)?)
+            hash.aset(ruby.to_symbol("key"), schema_node_to_ruby(key, ruby)?)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set key: {}", e)))?;
-            hash.aset(Symbol::new("value"), schema_node_to_ruby(value, _ruby)?)
+            hash.aset(ruby.to_symbol("value"), schema_node_to_ruby(value, ruby)?)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set value: {}", e)))?;
         }
 
@@ -552,42 +600,42 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
             format,
         } => {
             let type_sym = match primitive_type {
-                PrimitiveType::Boolean => Symbol::new("boolean"),
-                PrimitiveType::Int8 => Symbol::new("int8"),
-                PrimitiveType::Int16 => Symbol::new("int16"),
-                PrimitiveType::Int32 => Symbol::new("int32"),
-                PrimitiveType::Int64 => Symbol::new("int64"),
-                PrimitiveType::UInt8 => Symbol::new("uint8"),
-                PrimitiveType::UInt16 => Symbol::new("uint16"),
-                PrimitiveType::UInt32 => Symbol::new("uint32"),
-                PrimitiveType::UInt64 => Symbol::new("uint64"),
-                PrimitiveType::Float32 => Symbol::new("float32"),
-                PrimitiveType::Float64 => Symbol::new("float64"),
-                PrimitiveType::String => Symbol::new("string"),
-                PrimitiveType::Binary => Symbol::new("binary"),
-                PrimitiveType::Date32 => Symbol::new("date32"),
-                PrimitiveType::Date64 => Symbol::new("date64"),
-                PrimitiveType::TimestampSecond(_) => Symbol::new("timestamp_second"),
-                PrimitiveType::TimestampMillis(_) => Symbol::new("timestamp_millis"),
-                PrimitiveType::TimestampMicros(_) => Symbol::new("timestamp_micros"),
-                PrimitiveType::TimestampNanos(_) => Symbol::new("timestamp_nanos"),
-                PrimitiveType::TimeMillis => Symbol::new("time_millis"),
-                PrimitiveType::TimeMicros => Symbol::new("time_micros"),
-                PrimitiveType::TimeNanos => Symbol::new("time_nanos"),
-                PrimitiveType::Decimal128(_, _) => Symbol::new("decimal128"),
-                PrimitiveType::Decimal256(_, _) => Symbol::new("decimal256"),
-                PrimitiveType::FixedLenByteArray(_) => Symbol::new("fixed_len_byte_array"),
+                PrimitiveType::Boolean => ruby.to_symbol("boolean"),
+                PrimitiveType::Int8 => ruby.to_symbol("int8"),
+                PrimitiveType::Int16 => ruby.to_symbol("int16"),
+                PrimitiveType::Int32 => ruby.to_symbol("int32"),
+                PrimitiveType::Int64 => ruby.to_symbol("int64"),
+                PrimitiveType::UInt8 => ruby.to_symbol("uint8"),
+                PrimitiveType::UInt16 => ruby.to_symbol("uint16"),
+                PrimitiveType::UInt32 => ruby.to_symbol("uint32"),
+                PrimitiveType::UInt64 => ruby.to_symbol("uint64"),
+                PrimitiveType::Float32 => ruby.to_symbol("float32"),
+                PrimitiveType::Float64 => ruby.to_symbol("float64"),
+                PrimitiveType::String => ruby.to_symbol("string"),
+                PrimitiveType::Binary => ruby.to_symbol("binary"),
+                PrimitiveType::Date32 => ruby.to_symbol("date32"),
+                PrimitiveType::Date64 => ruby.to_symbol("date64"),
+                PrimitiveType::TimestampSecond(_) => ruby.to_symbol("timestamp_second"),
+                PrimitiveType::TimestampMillis(_) => ruby.to_symbol("timestamp_millis"),
+                PrimitiveType::TimestampMicros(_) => ruby.to_symbol("timestamp_micros"),
+                PrimitiveType::TimestampNanos(_) => ruby.to_symbol("timestamp_nanos"),
+                PrimitiveType::TimeMillis => ruby.to_symbol("time_millis"),
+                PrimitiveType::TimeMicros => ruby.to_symbol("time_micros"),
+                PrimitiveType::TimeNanos => ruby.to_symbol("time_nanos"),
+                PrimitiveType::Decimal128(_, _) => ruby.to_symbol("decimal128"),
+                PrimitiveType::Decimal256(_, _) => ruby.to_symbol("decimal256"),
+                PrimitiveType::FixedLenByteArray(_) => ruby.to_symbol("fixed_len_byte_array"),
             };
 
-            hash.aset(Symbol::new("type"), type_sym)
+            hash.aset(ruby.to_symbol("type"), type_sym)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set type: {}", e)))?;
-            hash.aset(Symbol::new("name"), name.as_str())
+            hash.aset(ruby.to_symbol("name"), name.as_str())
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set name: {}", e)))?;
-            hash.aset(Symbol::new("nullable"), *nullable)
+            hash.aset(ruby.to_symbol("nullable"), *nullable)
                 .map_err(|e| ParquetError::Conversion(format!("Failed to set nullable: {}", e)))?;
 
             if let Some(fmt) = format {
-                hash.aset(Symbol::new("format"), fmt.as_str())
+                hash.aset(ruby.to_symbol("format"), fmt.as_str())
                     .map_err(|e| {
                         ParquetError::Conversion(format!("Failed to set format: {}", e))
                     })?;
@@ -596,15 +644,15 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
             // Add precision/scale for decimal types
             match primitive_type {
                 PrimitiveType::Decimal128(p, s) | PrimitiveType::Decimal256(p, s) => {
-                    hash.aset(Symbol::new("precision"), *p).map_err(|e| {
+                    hash.aset(ruby.to_symbol("precision"), *p).map_err(|e| {
                         ParquetError::Conversion(format!("Failed to set precision: {}", e))
                     })?;
-                    hash.aset(Symbol::new("scale"), *s).map_err(|e| {
+                    hash.aset(ruby.to_symbol("scale"), *s).map_err(|e| {
                         ParquetError::Conversion(format!("Failed to set scale: {}", e))
                     })?;
                 }
                 PrimitiveType::FixedLenByteArray(len) => {
-                    hash.aset(Symbol::new("length"), *len).map_err(|e| {
+                    hash.aset(ruby.to_symbol("length"), *len).map_err(|e| {
                         ParquetError::Conversion(format!("Failed to set length: {}", e))
                     })?;
                 }
@@ -620,13 +668,13 @@ fn schema_node_to_ruby(node: &SchemaNode, _ruby: &Ruby) -> Result<Value, RubyAda
 /// Old: [{ "column_name" => "type" }, ...]
 /// New: [{ name: "column_name", type: :type }, ...]
 pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray, RubyAdapterError> {
-    let new_schema = RArray::new();
+    let new_schema = ruby.ary_new();
 
     for item in schema.into_iter() {
         let hash: RHash = TryConvert::try_convert(item).map_err(|e: MagnusError| {
             ParquetError::Schema(format!("Invalid schema item: {}", e))
         })?;
-        let new_field = RHash::new();
+        let new_field = ruby.hash_new();
 
         // The old format has a single key-value pair per hash
         let process_result = hash.foreach(
@@ -634,17 +682,14 @@ pub fn convert_legacy_schema(ruby: &Ruby, schema: RArray) -> Result<RArray, Ruby
              value: Value|
              -> std::result::Result<magnus::r_hash::ForEach, MagnusError> {
                 let key_str: String = parse_string_or_symbol(ruby, key)?.ok_or_else(|| {
-                    MagnusError::new(
-                        magnus::exception::arg_error(),
-                        "Nil keys not allowed in schema",
-                    )
+                    MagnusError::new(ruby.exception_arg_error(), "Nil keys not allowed in schema")
                 })?;
                 let type_str: String = TryConvert::try_convert(value)?;
 
-                new_field.aset(Symbol::new("name"), key_str)?;
-                new_field.aset(Symbol::new("type"), Symbol::new(&type_str))?;
+                new_field.aset(ruby.to_symbol("name"), key_str)?;
+                new_field.aset(ruby.to_symbol("type"), ruby.to_symbol(&type_str))?;
                 if type_str.contains("timestamp") {
-                    new_field.aset(Symbol::new("has_timezone"), true)?;
+                    new_field.aset(ruby.to_symbol("has_timezone"), true)?;
                 }
 
                 Ok(magnus::r_hash::ForEach::Continue)
@@ -675,7 +720,7 @@ pub fn is_dsl_schema(ruby: &Ruby, schema_value: Value) -> Result<bool, RubyAdapt
     let schema_hash: RHash = TryConvert::try_convert(schema_value).map_err(|e: MagnusError| {
         ParquetError::Schema(format!("Failed to convert to hash: {}", e))
     })?;
-    if let Some(type_val) = schema_hash.get(Symbol::new("type")) {
+    if let Some(type_val) = schema_hash.get(ruby.to_symbol("type")) {
         if type_val.is_kind_of(ruby.class_symbol()) {
             let type_sym: Symbol =
                 TryConvert::try_convert(type_val).map_err(|e: MagnusError| {
@@ -710,7 +755,7 @@ pub fn process_schema_value(
 
     // Handle array format or hash with fields
     let mut schema_array = if schema_value.is_nil() {
-        RArray::new()
+        ruby.ary_new()
     } else if schema_value.is_kind_of(ruby.class_array()) {
         let array: RArray = TryConvert::try_convert(schema_value).map_err(|e: MagnusError| {
             ParquetError::Schema(format!("Failed to convert to array: {}", e))
@@ -728,8 +773,8 @@ pub fn process_schema_value(
                         ParquetError::Schema(format!("Failed to convert first item to hash: {}", e))
                     })?;
                 // Check if it has the new format keys
-                if first_hash.get(Symbol::new("name")).is_some()
-                    && first_hash.get(Symbol::new("type")).is_some()
+                if first_hash.get(ruby.to_symbol("name")).is_some()
+                    && first_hash.get(ruby.to_symbol("type")).is_some()
                 {
                     // Already in new format
                     array
@@ -750,7 +795,7 @@ pub fn process_schema_value(
         let hash: RHash = TryConvert::try_convert(schema_value).map_err(|e: MagnusError| {
             ParquetError::Schema(format!("Failed to convert to hash: {}", e))
         })?;
-        if let Some(fields) = hash.get(Symbol::new("fields")) {
+        if let Some(fields) = hash.get(ruby.to_symbol("fields")) {
             TryConvert::try_convert(fields).map_err(|e: MagnusError| {
                 ParquetError::Schema(format!("Failed to convert fields to array: {}", e))
             })?
@@ -795,16 +840,16 @@ pub fn process_schema_value(
             };
 
             // Generate default schema with String types
-            let new_schema = RArray::new();
+            let new_schema = ruby.ary_new();
             for i in 0..num_columns {
-                let field = RHash::new();
+                let field = ruby.hash_new();
                 field
-                    .aset(Symbol::new("name"), format!("f{}", i))
+                    .aset(ruby.to_symbol("name"), format!("f{}", i))
                     .map_err(|e| {
                         ParquetError::Schema(format!("Failed to set field name: {}", e))
                     })?;
                 field
-                    .aset(Symbol::new("type"), Symbol::new("string"))
+                    .aset(ruby.to_symbol("type"), ruby.to_symbol("string"))
                     .map_err(|e| {
                         ParquetError::Schema(format!("Failed to set field type: {}", e))
                     })?;
@@ -824,7 +869,7 @@ pub fn process_schema_value(
     // Convert schema to the format expected by ruby_schema_to_parquet
     let schema_hash = ruby.hash_new();
     schema_hash
-        .aset(Symbol::new("fields"), schema_array)
+        .aset(ruby.to_symbol("fields"), schema_array)
         .map_err(|e| ParquetError::Schema(format!("Failed to set fields: {}", e)))?;
     Ok(schema_hash.as_value())
 }

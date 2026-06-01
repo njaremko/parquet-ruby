@@ -14,7 +14,8 @@ use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
 use parquet::basic::LogicalType;
 use parquet::schema::types::Type;
-use std::sync::Arc;
+use std::sync::Arc as StdArc;
+use triomphe::Arc;
 
 /// Convert a single value from an Arrow array at the given index to a ParquetValue
 pub fn arrow_to_parquet_value(
@@ -94,7 +95,7 @@ pub fn arrow_to_parquet_value(
         DataType::FixedSizeBinary(_) => {
             let array = downcast_array::<FixedSizeBinaryArray>(array)?;
             let value = array.value(index);
-            if let Some(LogicalType::Uuid) = parquet_field.get_basic_info().logical_type() {
+            if let Some(LogicalType::Uuid) = parquet_field.get_basic_info().logical_type_ref() {
                 let uuid = uuid::Uuid::from_slice(value)
                     .map_err(|e| ParquetError::Conversion(format!("Invalid UUID: {}", e)))?;
                 Ok(ParquetValue::Uuid(uuid))
@@ -247,20 +248,23 @@ pub fn arrow_to_parquet_value(
             let array = downcast_array::<MapArray>(array)?;
             let map_value = array.value(index);
 
-            // Map is stored as a struct with two fields: keys and values
+            // The Arrow `MapArray` entries struct is always (key, value) by
+            // position — `MapArray::keys()`/`values()` are `column(0)`/`column(1)`
+            // and `try_new` enforces exactly two columns — so we index by position
+            // and never depend on the entry field names (which the Parquet spec
+            // does not fix).
+            debug_assert_eq!(map_value.num_columns(), 2);
             let keys = map_value.column(0);
             let values = map_value.column(1);
 
             let key_field = map_value
                 .fields()
-                .iter()
-                .find(|f| f.name() == "key")
+                .get(0)
                 .ok_or_else(|| ParquetError::Conversion("No key field found".to_string()))?;
 
             let value_field = map_value
                 .fields()
-                .iter()
-                .find(|f| f.name() == "value")
+                .get(1)
                 .ok_or_else(|| ParquetError::Conversion("No value field found".to_string()))?;
 
             let mut map_vec = Vec::with_capacity(keys.len());
@@ -275,23 +279,12 @@ pub fn arrow_to_parquet_value(
                             parquet::schema::types::Type::GroupType {
                                 fields: kv_fields, ..
                             } => {
-                                // Find key and value fields by name
-                                let key_field = kv_fields
-                                    .iter()
-                                    .find(|f| f.name() == "key")
-                                    .ok_or_else(|| {
-                                        ParquetError::Conversion(
-                                            "Map missing key field".to_string(),
-                                        )
-                                    })?;
-                                let value_field = kv_fields
-                                    .iter()
-                                    .find(|f| f.name() == "value")
-                                    .ok_or_else(|| {
-                                        ParquetError::Conversion(
-                                            "Map missing value field".to_string(),
-                                        )
-                                    })?;
+                                let key_field = kv_fields.first().ok_or_else(|| {
+                                    ParquetError::Conversion("Map missing key field".to_string())
+                                })?;
+                                let value_field = kv_fields.get(1).ok_or_else(|| {
+                                    ParquetError::Conversion("Map missing value field".to_string())
+                                })?;
                                 (key_field.as_ref(), value_field.as_ref())
                             }
                             _ => {
@@ -366,15 +359,20 @@ pub fn arrow_to_parquet_value(
     }
 }
 
-/// Convert a vector of ParquetValues to an Arrow array
-pub fn parquet_values_to_arrow_array(values: Vec<ParquetValue>, field: &Field) -> Result<ArrayRef> {
+/// Convert a slice of ParquetValues to an Arrow array
+pub fn parquet_values_to_arrow_array(values: &[ParquetValue], field: &Field) -> Result<ArrayRef> {
+    let value_refs = values.iter().collect::<Vec<_>>();
+    parquet_value_refs_to_arrow_array(&value_refs, field)
+}
+
+fn parquet_value_refs_to_arrow_array(values: &[&ParquetValue], field: &Field) -> Result<ArrayRef> {
     match field.data_type() {
         // Boolean
         DataType::Boolean => {
             let mut builder = BooleanBuilder::with_capacity(values.len());
             for value in values {
-                match value {
-                    ParquetValue::Boolean(b) => builder.append_value(b),
+                match *value {
+                    ParquetValue::Boolean(b) => builder.append_value(*b),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -384,7 +382,7 @@ pub fn parquet_values_to_arrow_array(values: Vec<ParquetValue>, field: &Field) -
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
 
         // Integer types with automatic upcasting
@@ -443,11 +441,11 @@ fn downcast_array<T: 'static>(array: &dyn Array) -> Result<&T> {
 }
 
 /// Build Int8 array
-fn build_int8_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_int8_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Int8Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Int8(i) => builder.append_value(i),
+        match *value {
+            ParquetValue::Int8(i) => builder.append_value(*i),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -457,16 +455,16 @@ fn build_int8_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Int16 array
-fn build_int16_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_int16_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Int16Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Int16(i) => builder.append_value(i),
-            ParquetValue::Int8(i) => builder.append_value(i as i16),
+        match *value {
+            ParquetValue::Int16(i) => builder.append_value(*i),
+            ParquetValue::Int8(i) => builder.append_value(*i as i16),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -476,17 +474,17 @@ fn build_int16_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Int32 array
-fn build_int32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_int32_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Int32Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Int32(i) => builder.append_value(i),
-            ParquetValue::Int16(i) => builder.append_value(i as i32),
-            ParquetValue::Int8(i) => builder.append_value(i as i32),
+        match *value {
+            ParquetValue::Int32(i) => builder.append_value(*i),
+            ParquetValue::Int16(i) => builder.append_value(*i as i32),
+            ParquetValue::Int8(i) => builder.append_value(*i as i32),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -496,18 +494,18 @@ fn build_int32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Int64 array
-fn build_int64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_int64_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Int64Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Int64(i) => builder.append_value(i),
-            ParquetValue::Int32(i) => builder.append_value(i as i64),
-            ParquetValue::Int16(i) => builder.append_value(i as i64),
-            ParquetValue::Int8(i) => builder.append_value(i as i64),
+        match *value {
+            ParquetValue::Int64(i) => builder.append_value(*i),
+            ParquetValue::Int32(i) => builder.append_value(*i as i64),
+            ParquetValue::Int16(i) => builder.append_value(*i as i64),
+            ParquetValue::Int8(i) => builder.append_value(*i as i64),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -517,15 +515,15 @@ fn build_int64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build UInt8 array
-fn build_uint8_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_uint8_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = UInt8Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::UInt8(i) => builder.append_value(i),
+        match *value {
+            ParquetValue::UInt8(i) => builder.append_value(*i),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -535,16 +533,16 @@ fn build_uint8_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build UInt16 array
-fn build_uint16_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_uint16_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = UInt16Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::UInt16(i) => builder.append_value(i),
-            ParquetValue::UInt8(i) => builder.append_value(i as u16),
+        match *value {
+            ParquetValue::UInt16(i) => builder.append_value(*i),
+            ParquetValue::UInt8(i) => builder.append_value(*i as u16),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -554,17 +552,17 @@ fn build_uint16_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build UInt32 array
-fn build_uint32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_uint32_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = UInt32Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::UInt32(i) => builder.append_value(i),
-            ParquetValue::UInt16(i) => builder.append_value(i as u32),
-            ParquetValue::UInt8(i) => builder.append_value(i as u32),
+        match *value {
+            ParquetValue::UInt32(i) => builder.append_value(*i),
+            ParquetValue::UInt16(i) => builder.append_value(*i as u32),
+            ParquetValue::UInt8(i) => builder.append_value(*i as u32),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -574,18 +572,18 @@ fn build_uint32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build UInt64 array
-fn build_uint64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_uint64_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = UInt64Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::UInt64(i) => builder.append_value(i),
-            ParquetValue::UInt32(i) => builder.append_value(i as u64),
-            ParquetValue::UInt16(i) => builder.append_value(i as u64),
-            ParquetValue::UInt8(i) => builder.append_value(i as u64),
+        match *value {
+            ParquetValue::UInt64(i) => builder.append_value(*i),
+            ParquetValue::UInt32(i) => builder.append_value(*i as u64),
+            ParquetValue::UInt16(i) => builder.append_value(*i as u64),
+            ParquetValue::UInt8(i) => builder.append_value(*i as u64),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -595,16 +593,16 @@ fn build_uint64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Float32 array with Float16 support
-fn build_float32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_float32_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Float32Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Float32(OrderedFloat(f)) => builder.append_value(f),
-            ParquetValue::Float16(OrderedFloat(f)) => builder.append_value(f),
+        match *value {
+            ParquetValue::Float32(OrderedFloat(f)) => builder.append_value(*f),
+            ParquetValue::Float16(OrderedFloat(f)) => builder.append_value(*f),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -614,17 +612,17 @@ fn build_float32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Float64 array with Float32 and Float16 support
-fn build_float64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_float64_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Float64Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Float64(OrderedFloat(f)) => builder.append_value(f),
-            ParquetValue::Float32(OrderedFloat(f)) => builder.append_value(f as f64),
-            ParquetValue::Float16(OrderedFloat(f)) => builder.append_value(f as f64),
+        match *value {
+            ParquetValue::Float64(OrderedFloat(f)) => builder.append_value(*f),
+            ParquetValue::Float32(OrderedFloat(f)) => builder.append_value(*f as f64),
+            ParquetValue::Float16(OrderedFloat(f)) => builder.append_value(*f as f64),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -634,15 +632,15 @@ fn build_float64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build string array
-fn build_string_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_string_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = StringBuilder::with_capacity(values.len(), 0);
     for value in values {
-        match value {
-            ParquetValue::String(s) => builder.append_value(&s),
+        match *value {
+            ParquetValue::String(s) => builder.append_value(s.as_ref()),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -652,15 +650,15 @@ fn build_string_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build binary array
-fn build_binary_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_binary_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = BinaryBuilder::with_capacity(values.len(), 0);
     for value in values {
-        match value {
-            ParquetValue::Bytes(b) => builder.append_value(&b),
+        match *value {
+            ParquetValue::Bytes(b) => builder.append_value(b.as_ref()),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -670,14 +668,14 @@ fn build_binary_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build fixed size binary array
-fn build_fixed_binary_array(values: Vec<ParquetValue>, size: i32) -> Result<ArrayRef> {
+fn build_fixed_binary_array(values: &[&ParquetValue], size: i32) -> Result<ArrayRef> {
     let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), size);
     for value in values {
-        match value {
+        match *value {
             ParquetValue::Bytes(b) => {
                 if b.len() != size as usize {
                     return Err(ParquetError::Conversion(format!(
@@ -686,7 +684,7 @@ fn build_fixed_binary_array(values: Vec<ParquetValue>, size: i32) -> Result<Arra
                         b.len()
                     )));
                 }
-                builder.append_value(&b)?;
+                builder.append_value(b.as_ref())?;
             }
             ParquetValue::Null => builder.append_null(),
             _ => {
@@ -697,15 +695,15 @@ fn build_fixed_binary_array(values: Vec<ParquetValue>, size: i32) -> Result<Arra
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Date32 array
-fn build_date32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_date32_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Date32Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Date32(d) => builder.append_value(d),
+        match *value {
+            ParquetValue::Date32(d) => builder.append_value(*d),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -715,15 +713,15 @@ fn build_date32_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Date64 array
-fn build_date64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
+fn build_date64_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
     let mut builder = Date64Builder::with_capacity(values.len());
     for value in values {
-        match value {
-            ParquetValue::Date64(d) => builder.append_value(d),
+        match *value {
+            ParquetValue::Date64(d) => builder.append_value(*d),
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -733,20 +731,17 @@ fn build_date64_array(values: Vec<ParquetValue>) -> Result<ArrayRef> {
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Time32 array
-fn build_time32_array(
-    values: Vec<ParquetValue>,
-    unit: &arrow_schema::TimeUnit,
-) -> Result<ArrayRef> {
+fn build_time32_array(values: &[&ParquetValue], unit: &arrow_schema::TimeUnit) -> Result<ArrayRef> {
     match unit {
         arrow_schema::TimeUnit::Millisecond => {
             let mut builder = Time32MillisecondBuilder::with_capacity(values.len());
             for value in values {
-                match value {
-                    ParquetValue::TimeMillis(t) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimeMillis(t) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -756,7 +751,7 @@ fn build_time32_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
         _ => Err(ParquetError::Conversion(format!(
             "Unsupported time32 unit: {:?}",
@@ -766,16 +761,13 @@ fn build_time32_array(
 }
 
 /// Build Time64 array
-fn build_time64_array(
-    values: Vec<ParquetValue>,
-    unit: &arrow_schema::TimeUnit,
-) -> Result<ArrayRef> {
+fn build_time64_array(values: &[&ParquetValue], unit: &arrow_schema::TimeUnit) -> Result<ArrayRef> {
     match unit {
         arrow_schema::TimeUnit::Microsecond => {
             let mut builder = Time64MicrosecondBuilder::with_capacity(values.len());
             for value in values {
-                match value {
-                    ParquetValue::TimeMicros(t) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimeMicros(t) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -785,7 +777,23 @@ fn build_time64_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
+        }
+        arrow_schema::TimeUnit::Nanosecond => {
+            let mut builder = Time64NanosecondBuilder::with_capacity(values.len());
+            for value in values {
+                match *value {
+                    ParquetValue::TimeNanos(t) => builder.append_value(*t),
+                    ParquetValue::Null => builder.append_null(),
+                    _ => {
+                        return Err(ParquetError::Conversion(format!(
+                            "Expected TimeNanos, got {:?}",
+                            value.type_name()
+                        )))
+                    }
+                }
+            }
+            Ok(StdArc::new(builder.finish()))
         }
         _ => Err(ParquetError::Conversion(format!(
             "Unsupported time64 unit: {:?}",
@@ -796,44 +804,19 @@ fn build_time64_array(
 
 /// Build timestamp array
 fn build_timestamp_array(
-    values: Vec<ParquetValue>,
+    values: &[&ParquetValue],
     unit: &arrow_schema::TimeUnit,
     timezone: Option<&str>,
 ) -> Result<ArrayRef> {
-    // First, check if all values have the same timezone (or use the field timezone)
-    let mut common_tz: Option<Option<Arc<str>>> = None;
-    for value in &values {
-        match value {
-            ParquetValue::TimestampSecond(_, tz)
-            | ParquetValue::TimestampMillis(_, tz)
-            | ParquetValue::TimestampMicros(_, tz)
-            | ParquetValue::TimestampNanos(_, tz) => {
-                match &common_tz {
-                    None => common_tz = Some(tz.clone()),
-                    Some(existing) => {
-                        // If we have mixed timezones, we'll use the field timezone
-                        if existing != tz {
-                            common_tz = Some(timezone.map(Arc::from));
-                            break;
-                        }
-                    }
-                }
-            }
-            ParquetValue::Null => {}
-            _ => {}
-        }
-    }
-
-    // Use the common timezone from values, or fall back to field timezone
-    let tz = common_tz.unwrap_or_else(|| timezone.map(Arc::from));
+    let tz = timezone.map(StdArc::from);
 
     match unit {
         arrow_schema::TimeUnit::Second => {
             let mut builder =
                 TimestampSecondBuilder::with_capacity(values.len()).with_timezone_opt(tz.clone());
             for value in values {
-                match value {
-                    ParquetValue::TimestampSecond(t, _) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimestampSecond(t, _) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -843,14 +826,14 @@ fn build_timestamp_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
         arrow_schema::TimeUnit::Millisecond => {
             let mut builder = TimestampMillisecondBuilder::with_capacity(values.len())
                 .with_timezone_opt(tz.clone());
             for value in values {
-                match value {
-                    ParquetValue::TimestampMillis(t, _) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimestampMillis(t, _) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -860,14 +843,14 @@ fn build_timestamp_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
         arrow_schema::TimeUnit::Microsecond => {
             let mut builder = TimestampMicrosecondBuilder::with_capacity(values.len())
                 .with_timezone_opt(tz.clone());
             for value in values {
-                match value {
-                    ParquetValue::TimestampMicros(t, _) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimestampMicros(t, _) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -877,14 +860,14 @@ fn build_timestamp_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
         arrow_schema::TimeUnit::Nanosecond => {
             let mut builder = TimestampNanosecondBuilder::with_capacity(values.len())
                 .with_timezone_opt(tz.clone());
             for value in values {
-                match value {
-                    ParquetValue::TimestampNanos(t, _) => builder.append_value(t),
+                match *value {
+                    ParquetValue::TimestampNanos(t, _) => builder.append_value(*t),
                     ParquetValue::Null => builder.append_null(),
                     _ => {
                         return Err(ParquetError::Conversion(format!(
@@ -894,18 +877,21 @@ fn build_timestamp_array(
                     }
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            Ok(StdArc::new(builder.finish()))
         }
     }
 }
 
 /// Build Decimal128 array
-fn build_decimal128_array(values: Vec<ParquetValue>, precision: u8, scale: i8) -> Result<ArrayRef> {
+fn build_decimal128_array(values: &[&ParquetValue], precision: u8, scale: i8) -> Result<ArrayRef> {
     let mut builder = Decimal128Builder::with_capacity(values.len())
         .with_precision_and_scale(precision, scale)?;
-    for value in values {
-        match value {
-            ParquetValue::Decimal128(d, _) => builder.append_value(d),
+    for (idx, value) in values.iter().enumerate() {
+        match *value {
+            ParquetValue::Decimal128(d, value_scale) => {
+                validate_decimal128_array_value(*d, *value_scale, precision, scale, idx)?;
+                builder.append_value(*d);
+            }
             ParquetValue::Null => builder.append_null(),
             _ => {
                 return Err(ParquetError::Conversion(format!(
@@ -915,17 +901,18 @@ fn build_decimal128_array(values: Vec<ParquetValue>, precision: u8, scale: i8) -
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
 }
 
 /// Build Decimal256 array
-fn build_decimal256_array(values: Vec<ParquetValue>, precision: u8, scale: i8) -> Result<ArrayRef> {
+fn build_decimal256_array(values: &[&ParquetValue], precision: u8, scale: i8) -> Result<ArrayRef> {
     let mut builder = Decimal256Builder::with_capacity(values.len())
         .with_precision_and_scale(precision, scale)?;
-    for value in values {
-        match value {
-            ParquetValue::Decimal256(bigint, _) => {
-                let bytes = decimal256_from_bigint(&bigint)?;
+    for (idx, value) in values.iter().enumerate() {
+        match *value {
+            ParquetValue::Decimal256(bigint, value_scale) => {
+                validate_decimal256_array_value(bigint, *value_scale, precision, scale, idx)?;
+                let bytes = decimal256_from_bigint(bigint)?;
                 builder.append_value(bytes);
             }
             ParquetValue::Null => builder.append_null(),
@@ -937,7 +924,64 @@ fn build_decimal256_array(values: Vec<ParquetValue>, precision: u8, scale: i8) -
             }
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Ok(StdArc::new(builder.finish()))
+}
+
+fn validate_decimal128_array_value(
+    value: i128,
+    value_scale: i8,
+    precision: u8,
+    scale: i8,
+    index: usize,
+) -> Result<()> {
+    if value_scale != scale {
+        return Err(ParquetError::Conversion(format!(
+            "Decimal scale mismatch at value[{}]: array scale {}, value scale {}",
+            index, scale, value_scale
+        )));
+    }
+
+    validate_decimal_array_precision(decimal128_digit_count(value), precision, index)
+}
+
+fn validate_decimal256_array_value(
+    value: &num::BigInt,
+    value_scale: i8,
+    precision: u8,
+    scale: i8,
+    index: usize,
+) -> Result<()> {
+    if value_scale != scale {
+        return Err(ParquetError::Conversion(format!(
+            "Decimal scale mismatch at value[{}]: array scale {}, value scale {}",
+            index, scale, value_scale
+        )));
+    }
+
+    validate_decimal_array_precision(decimal256_digit_count(value), precision, index)
+}
+
+fn validate_decimal_array_precision(
+    value_digits: usize,
+    precision: u8,
+    index: usize,
+) -> Result<()> {
+    if value_digits > precision as usize {
+        return Err(ParquetError::Conversion(format!(
+            "Decimal precision overflow at value[{}]: array precision {}, value has {} digits",
+            index, precision, value_digits
+        )));
+    }
+
+    Ok(())
+}
+
+fn decimal128_digit_count(value: i128) -> usize {
+    value.unsigned_abs().to_string().len()
+}
+
+fn decimal256_digit_count(value: &num::BigInt) -> usize {
+    value.to_str_radix(10).trim_start_matches('-').len()
 }
 
 /// Convert BigInt to i256 (32-byte array)
@@ -981,16 +1025,16 @@ fn decimal256_from_bigint(bigint: &num::BigInt) -> Result<arrow_buffer::i256> {
 }
 
 /// Build list array
-fn build_list_array(values: Vec<ParquetValue>, item_field: &Arc<Field>) -> Result<ArrayRef> {
+fn build_list_array(values: &[&ParquetValue], item_field: &StdArc<Field>) -> Result<ArrayRef> {
     let mut all_items = Vec::new();
     let mut offsets = Vec::with_capacity(values.len() + 1);
     let mut null_buffer_builder = arrow_buffer::BooleanBufferBuilder::new(values.len());
     offsets.push(0i32);
 
     for value in values {
-        match value {
+        match *value {
             ParquetValue::List(items) => {
-                all_items.extend(items);
+                all_items.extend(items.iter());
                 offsets.push(all_items.len() as i32);
                 null_buffer_builder.append(true);
             }
@@ -1007,11 +1051,11 @@ fn build_list_array(values: Vec<ParquetValue>, item_field: &Arc<Field>) -> Resul
         }
     }
 
-    let item_array = parquet_values_to_arrow_array(all_items, item_field)?;
+    let item_array = parquet_value_refs_to_arrow_array(&all_items, item_field)?;
     let offset_buffer = arrow_buffer::OffsetBuffer::new(offsets.into());
     let null_buffer = null_buffer_builder.finish();
 
-    Ok(Arc::new(ListArray::new(
+    Ok(StdArc::new(ListArray::new(
         item_field.clone(),
         offset_buffer,
         item_array,
@@ -1021,8 +1065,8 @@ fn build_list_array(values: Vec<ParquetValue>, item_field: &Arc<Field>) -> Resul
 
 /// Build map array
 fn build_map_array(
-    values: Vec<ParquetValue>,
-    entries_field: &Arc<Field>,
+    values: &[&ParquetValue],
+    entries_field: &StdArc<Field>,
     _sorted: bool,
 ) -> Result<ArrayRef> {
     // Extract the key and value fields from the entries struct
@@ -1042,7 +1086,7 @@ fn build_map_array(
     offsets.push(0i32);
 
     for value in values {
-        match value {
+        match *value {
             ParquetValue::Map(entries) => {
                 for (k, v) in entries {
                     all_keys.push(k);
@@ -1064,8 +1108,8 @@ fn build_map_array(
         }
     }
 
-    let key_array = parquet_values_to_arrow_array(all_keys, key_field)?;
-    let value_array = parquet_values_to_arrow_array(all_values, value_field)?;
+    let key_array = parquet_value_refs_to_arrow_array(&all_keys, key_field)?;
+    let value_array = parquet_value_refs_to_arrow_array(&all_values, value_field)?;
 
     // Create struct array for entries
     let struct_fields = match entries_field.data_type() {
@@ -1078,7 +1122,7 @@ fn build_map_array(
     let offset_buffer = arrow_buffer::OffsetBuffer::new(offsets.into());
     let null_buffer = null_buffer_builder.finish();
 
-    Ok(Arc::new(MapArray::new(
+    Ok(StdArc::new(MapArray::new(
         entries_field.clone(),
         offset_buffer,
         struct_array,
@@ -1088,34 +1132,29 @@ fn build_map_array(
 }
 
 /// Build struct array
-fn build_struct_array(
-    values: Vec<ParquetValue>,
-    fields: &arrow_schema::Fields,
-) -> Result<ArrayRef> {
+fn build_struct_array(values: &[&ParquetValue], fields: &arrow_schema::Fields) -> Result<ArrayRef> {
     let num_rows = values.len();
     let mut field_arrays = Vec::with_capacity(fields.len());
     let mut null_buffer_builder = arrow_buffer::BooleanBufferBuilder::new(num_rows);
+    let null_value = ParquetValue::Null;
 
     // Prepare columns for each field
-    let mut field_columns: Vec<Vec<ParquetValue>> =
+    let mut field_columns: Vec<Vec<&ParquetValue>> =
         vec![Vec::with_capacity(num_rows); fields.len()];
 
     for value in values {
-        match value {
+        match *value {
             ParquetValue::Record(map) => {
                 null_buffer_builder.append(true);
                 for (idx, field) in fields.iter().enumerate() {
-                    let field_value = map
-                        .get(field.name().as_str())
-                        .cloned()
-                        .unwrap_or(ParquetValue::Null);
+                    let field_value = map.get(field.name().as_str()).unwrap_or(&null_value);
                     field_columns[idx].push(field_value);
                 }
             }
             ParquetValue::Null => {
                 null_buffer_builder.append(false);
                 for field_column in field_columns.iter_mut().take(fields.len()) {
-                    field_column.push(ParquetValue::Null);
+                    field_column.push(&null_value);
                 }
             }
             _ => {
@@ -1128,112 +1167,17 @@ fn build_struct_array(
     }
 
     // Build arrays for each field
-    for (column, field) in field_columns.into_iter().zip(fields.iter()) {
-        let array = parquet_values_to_arrow_array(column, field)?;
+    for (column, field) in field_columns.iter().zip(fields.iter()) {
+        let array = parquet_value_refs_to_arrow_array(column, field)?;
         field_arrays.push(array);
     }
 
     let null_buffer = null_buffer_builder.finish();
-    Ok(Arc::new(StructArray::new(
+    Ok(StdArc::new(StructArray::new(
         fields.clone(),
         field_arrays,
         Some(null_buffer.into()),
     )))
-}
-
-/// Append a single ParquetValue to an ArrayBuilder
-/// This is used for incremental building in complex scenarios
-pub fn append_parquet_value_to_builder(
-    builder: &mut dyn ArrayBuilder,
-    value: ParquetValue,
-    data_type: &DataType,
-) -> Result<()> {
-    match data_type {
-        DataType::Boolean => match value {
-            ParquetValue::Boolean(b) => {
-                let boolean_builder = builder
-                    .as_any_mut()
-                    .downcast_mut::<BooleanBuilder>()
-                    .ok_or_else(|| {
-                        ParquetError::Conversion("Failed to downcast to BooleanBuilder".to_string())
-                    })?;
-                boolean_builder.append_value(b);
-            }
-            ParquetValue::Null => {
-                let boolean_builder = builder
-                    .as_any_mut()
-                    .downcast_mut::<BooleanBuilder>()
-                    .ok_or_else(|| {
-                        ParquetError::Conversion("Failed to downcast to BooleanBuilder".to_string())
-                    })?;
-                boolean_builder.append_null();
-            }
-            _ => {
-                return Err(ParquetError::Conversion(format!(
-                    "Expected Boolean, got {:?}",
-                    value.type_name()
-                )))
-            }
-        },
-
-        // For complex types like Map and Struct, we need special handling
-        DataType::Map(entries_field, _) => match value {
-            ParquetValue::Map(entries) => {
-                let map_builder = builder
-                    .as_any_mut()
-                    .downcast_mut::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>()
-                    .ok_or_else(|| {
-                        ParquetError::Conversion("Failed to downcast to MapBuilder".to_string())
-                    })?;
-
-                if let DataType::Struct(fields) = entries_field.data_type() {
-                    if fields.len() != 2 {
-                        return Err(ParquetError::Conversion(
-                            "Map entries struct must have exactly 2 fields".to_string(),
-                        ));
-                    }
-
-                    let key_type = fields[0].data_type();
-                    let value_type = fields[1].data_type();
-
-                    for (key, val) in entries {
-                        append_parquet_value_to_builder(map_builder.keys(), key, key_type)?;
-                        append_parquet_value_to_builder(map_builder.values(), val, value_type)?;
-                    }
-                    map_builder.append(true)?;
-                } else {
-                    return Err(ParquetError::Conversion(
-                        "Map entries field must be a struct".to_string(),
-                    ));
-                }
-            }
-            ParquetValue::Null => {
-                let map_builder = builder
-                    .as_any_mut()
-                    .downcast_mut::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>()
-                    .ok_or_else(|| {
-                        ParquetError::Conversion("Failed to downcast to MapBuilder".to_string())
-                    })?;
-                map_builder.append(false)?;
-            }
-            _ => {
-                return Err(ParquetError::Conversion(format!(
-                    "Expected Map, got {:?}",
-                    value.type_name()
-                )))
-            }
-        },
-
-        // For other types, use the existing pattern
-        _ => {
-            return Err(ParquetError::Conversion(format!(
-                "append_parquet_value_to_builder not implemented for type: {:?}",
-                data_type
-            )))
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1251,7 +1195,7 @@ mod tests {
             ParquetValue::Null,
         ];
         let field = Field::new("test", DataType::Boolean, true);
-        let array = parquet_values_to_arrow_array(values.clone(), &field).unwrap();
+        let array = parquet_values_to_arrow_array(&values, &field).unwrap();
         let type_ = Type::primitive_type_builder("test", PhysicalType::BOOLEAN)
             .build()
             .unwrap();
@@ -1271,7 +1215,7 @@ mod tests {
             ParquetValue::Int32(100000),
         ];
         let field = Field::new("test", DataType::Int64, false);
-        let array = parquet_values_to_arrow_array(values, &field).unwrap();
+        let array = parquet_values_to_arrow_array(&values, &field).unwrap();
 
         assert_eq!(array.len(), 3);
         let int64_array = array.as_any().downcast_ref::<Int64Array>().unwrap();

@@ -4,19 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arrow = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-array = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-buffer = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader" }
-arrow-schema = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["canonical_extension_types"]}
+arrow = "58.3.0"
+arrow-array = "58.3.0"
+arrow-buffer = "58.3.0"
+arrow-schema = { version = "58.3.0", features = ["canonical_extension_types"] }
 bytes = "1.5"
 indexmap = "2.2"
 jiff = "0.2"
 num = "0.4.3"
 ordered-float = "5.0.0"
-parquet = { git = "https://github.com/njaremko/arrow-rs", branch = "nathan_06-24-remove_primitive_map_key_assertion_on_record_reader", features = ["arrow", "zstd", "lz4", "snap"] }
+parquet = { version = "58.3.0", features = ["arrow", "zstd", "lz4", "snap"] }
 rand = "0.9.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
+triomphe = "0.1.15"
 uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]

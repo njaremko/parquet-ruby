@@ -5,7 +5,7 @@ pub mod test {
     use crate::{ParquetValue, PrimitiveType, Schema, SchemaBuilder, SchemaNode};
     use indexmap::IndexMap;
     use ordered_float::OrderedFloat;
-    use std::sync::Arc;
+    use triomphe::Arc;
 
     /// Create a simple schema for testing
     pub fn sample_schema() -> Schema {

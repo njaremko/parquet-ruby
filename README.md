@@ -166,7 +166,7 @@ end
 Parquet.write_rows(rows,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 5000  # Rows per batch (default: 1000)
+  batch_size: 5000  # Positive rows per batch (default: 1000)
 )
 ```
 
@@ -199,6 +199,9 @@ Parquet.write_columns(batches.each,
   compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd
 )
 ```
+
+`write_columns` also accepts `logger:` with the same Ruby logger interface as
+row writes.
 
 ## Data Types
 
@@ -382,10 +385,14 @@ Control memory usage with flush thresholds:
 Parquet.write_rows(huge_dataset.each,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 1000,              # Rows before considering flush
+  batch_size: 1000,              # Positive rows before considering flush
   flush_threshold: 32 * 1024**2  # Flush if batch exceeds 32MB
 )
 ```
+
+Write batch and sample sizes are bounded before buffer allocation. Very large
+batch sizes are rejected, and wide schemas have a lower effective batch cap so
+the writer cannot reserve unbounded per-column value slots.
 
 ## Architecture
 

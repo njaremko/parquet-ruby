@@ -318,7 +318,7 @@ class SchemaTest < Minitest::Test
     begin
       # Convert BigDecimal to formatted strings with exact decimal places
       # to avoid scientific notation that could cause parsing issues
-      data = [%w[123.45 9876.54321 -999.99 1234567890], %w[0.01 1234567.89 -0.001 9876543210]].each
+      data = [%w[123.45 9876.54321 -999.99 1234567890], %w[0.01 12345.67890 -0.001 9876543210]].each
 
       # Schema with different precisions and scales
       schema = [
@@ -342,7 +342,7 @@ class SchemaTest < Minitest::Test
 
       # Second row
       assert_equal BigDecimal("0.01"), rows[1]["decimal_5_2"]
-      assert_equal BigDecimal("1234567.89"), rows[1]["decimal_10_5"]
+      assert_equal BigDecimal("12345.67890"), rows[1]["decimal_10_5"]
       assert_equal BigDecimal("0.00"), rows[1]["negative_decimal"] # Scale is 2, so -0.001 becomes 0.00
       assert_equal BigDecimal("9876543210"), rows[1]["decimal_10"] # Integer value with scale 0
     ensure
@@ -731,7 +731,7 @@ class SchemaTest < Minitest::Test
     temp_path = "test_empty_top_level_struct.parquet"
     begin
       error = assert_raises(RuntimeError) { Parquet.write_rows(data, schema: schema, write_to: temp_path) }
-      assert_match(/Cannot create a struct with zero fields|Top-level schema must be a Struct|must have at least one field|must either specify a row count or at least one column/i, error.message)
+      assert_match(/Cannot create a struct with zero fields|Top-level schema must be a Struct|must (have|contain) at least one field|must either specify a row count or at least one column/i, error.message)
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end
@@ -753,7 +753,7 @@ class SchemaTest < Minitest::Test
 
       # Create test data
       data = [
-        [1, "Alice", true, 95.5, BigDecimal("123.45")],
+        [1, "Alice", true, 95.5, BigDecimal("12.34")],
         [2, "Bob", false, 82.3, BigDecimal("67.89")],
         [3, "Charlie", true, 76.8, BigDecimal("42.00")]
       ]
@@ -828,7 +828,7 @@ class SchemaTest < Minitest::Test
 
       # Create test data
       data = [
-        [1, "Alice", true, 95.5, BigDecimal("123.45")],
+        [1, "Alice", true, 95.5, BigDecimal("12.34")],
         [2, "Bob", false, 82.3, BigDecimal("67.89")],
         [3, "Charlie", true, 76.8, BigDecimal("42.00")]
       ]
@@ -909,7 +909,7 @@ class SchemaTest < Minitest::Test
         metadata = Parquet.metadata(io)
 
         # Verify basic metadata
-        assert_equal "parquet-rs version 55.2.0", metadata["created_by"]
+        assert_equal "parquet-rs version 58.3.0", metadata["created_by"]
         assert_instance_of Hash, metadata["schema"]
         assert_instance_of Array, metadata["schema"]["fields"]
         assert_equal 5, metadata["schema"]["fields"].length

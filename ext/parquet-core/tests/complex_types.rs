@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use num::BigInt;
 use ordered_float::OrderedFloat;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_write_and_read_lists() {

@@ -1,3 +1,4 @@
+use crate::string_storage::StringStorageConfig;
 use magnus::Value;
 use std::fs::File;
 use std::str::FromStr;
@@ -14,7 +15,8 @@ pub struct ParquetWriteArgs {
     pub compression: Option<String>,
     pub sample_size: Option<usize>,
     pub logger: Option<Value>,
-    pub string_cache: Option<bool>,
+    /// Requested string-cache capacity; `None` means the cache is disabled.
+    pub string_cache: Option<usize>,
 }
 
 /// Arguments for creating row enumerators
@@ -24,6 +26,7 @@ pub struct RowEnumeratorArgs {
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
     pub strict: bool,
+    pub string_storage: StringStorageConfig,
     pub logger: Option<Value>,
 }
 
@@ -35,6 +38,7 @@ pub struct ColumnEnumeratorArgs {
     pub columns: Option<Vec<String>>,
     pub batch_size: Option<usize>,
     pub strict: bool,
+    pub string_storage: StringStorageConfig,
     pub logger: Option<Value>,
 }
 

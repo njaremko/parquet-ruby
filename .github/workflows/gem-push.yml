@@ -49,7 +49,7 @@ jobs:
         id: cross-gem
         with:
           platform: ${{ matrix.platform }}
-          ruby-versions: "3.4,3.3,3.2"
+          ruby-versions: "4.0,3.4,3.3,3.2"
 
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.target != 'normal' }}

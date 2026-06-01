@@ -63,8 +63,9 @@ dependencies = [
 
 [[package]]
 name = "arrow"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "378530e55cd479eda3c14eb345310799717e6f76d0c332041e8487022166b471"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -83,21 +84,23 @@ dependencies = [
 
 [[package]]
 name = "arrow-arith"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0ab212d2c1886e802f51c5212d78ebbcbb0bec980fff9dadc1eb8d45cd0b738"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
  "chrono",
- "num",
+ "num-traits",
 ]
 
 [[package]]
 name = "arrow-array"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfd33d3e92f207444098c75b42de99d329562be0cf686b307b097cc52b4e999e"
 dependencies = [
  "ahash",
  "arrow-buffer",
@@ -105,28 +108,34 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "half",
- "hashbrown",
- "num",
+ "hashbrown 0.17.1",
+ "num-complex",
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
 name = "arrow-buffer"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c6cd424c2693bcdbc150d843dc9d4d137dd2de4782ce6df491ad11a3a0416c0"
 dependencies = [
  "bytes",
  "half",
- "num",
+ "num-bigint",
+ "num-traits",
 ]
 
 [[package]]
 name = "arrow-cast"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c5aefb56a2c02e9e2b30746241058b85f8983f0fcff2ba0c6d09006e1cded7f"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
+ "arrow-ord",
  "arrow-schema",
  "arrow-select",
  "atoi",
@@ -134,14 +143,15 @@ dependencies = [
  "chrono",
  "half",
  "lexical-core",
- "num",
+ "num-traits",
  "ryu",
 ]
 
 [[package]]
 name = "arrow-csv"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e94e8cf7e517657a52b91ea1263acf38c4ca62a84655d72458a3359b12ab97de"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -154,53 +164,62 @@ dependencies = [
 
 [[package]]
 name = "arrow-data"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c88210023a2bfee1896af366309a3028fc3bcbd6515fa29a7990ee1baa08ee0"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "half",
- "num",
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
 name = "arrow-ipc"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "238438f0834483703d88896db6fe5a7138b2230debc31b34c0336c2996e3c64f"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
+ "arrow-select",
  "flatbuffers",
  "lz4_flex",
 ]
 
 [[package]]
 name = "arrow-json"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "205ca2119e6d679d5c133c6f30e68f027738d95ed948cf77677ea69c7800036b"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-cast",
- "arrow-data",
+ "arrow-ord",
  "arrow-schema",
+ "arrow-select",
  "chrono",
  "half",
  "indexmap",
+ "itoa",
  "lexical-core",
  "memchr",
- "num",
- "serde",
+ "num-traits",
+ "ryu",
+ "serde_core",
  "serde_json",
  "simdutf8",
 ]
 
 [[package]]
 name = "arrow-ord"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bffd8fd2579286a5d63bac898159873e5094a79009940bcb42bbfce4f19f1d0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -211,8 +230,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-row"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bab5994731204603c73ba69267616c50f80780774c6bb0476f1f830625115e0c"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -223,30 +243,33 @@ dependencies = [
 
 [[package]]
 name = "arrow-schema"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f633dbfdf39c039ada1bf9e34c694816eb71fbb7dc78f613993b7245e078a1ed"
 dependencies = [
- "serde",
+ "serde_core",
  "serde_json",
 ]
 
 [[package]]
 name = "arrow-select"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cd065c54172ac787cf3f2f8d4107e0d3fdc26edba76fdf4f4cc170258942222"
 dependencies = [
  "ahash",
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
- "num",
+ "num-traits",
 ]
 
 [[package]]
 name = "arrow-string"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29dd7cda3ab9692f43a2e4acc444d760cc17b12bb6d8232ddf64e9bab7c06b42"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -254,7 +277,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "memchr",
- "num",
+ "num-traits",
  "regex",
  "regex-syntax",
 ]
@@ -552,6 +575,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
 
 [[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -582,7 +611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4cd85333e22411419a0bcae1297d25e58c9443848b11dc6a86fefe8c78a661"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.15.4",
 ]
 
 [[package]]
@@ -827,9 +856,9 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.5"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash",
 ]
@@ -1013,7 +1042,7 @@ dependencies = [
  "mimalloc",
  "num",
  "ordered-float 5.0.0",
- "parquet 55.2.0",
+ "parquet 58.3.0",
  "parquet-ruby-adapter",
  "rand",
  "rb-sys",
@@ -1026,13 +1055,13 @@ dependencies = [
 
 [[package]]
 name = "parquet"
-version = "55.2.0"
-source = "git+https://github.com/njaremko/arrow-rs?branch=nathan_06-24-remove_primitive_map_key_assertion_on_record_reader#54858bf019ff3faeb8f5b562da8c01012162aef0"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dafa7d01085b62a47dd0c1829550a0a36710ea9c4fe358a05a85477cec8a908"
 dependencies = [
  "ahash",
  "arrow-array",
  "arrow-buffer",
- "arrow-cast",
  "arrow-data",
  "arrow-ipc",
  "arrow-schema",
@@ -1043,10 +1072,11 @@ dependencies = [
  "chrono",
  "flate2",
  "half",
- "hashbrown",
+ "hashbrown 0.17.1",
  "lz4_flex",
- "num",
  "num-bigint",
+ "num-integer",
+ "num-traits",
  "paste",
  "seq-macro",
  "serde_json",
@@ -1070,11 +1100,12 @@ dependencies = [
  "jiff",
  "num",
  "ordered-float 5.0.0",
- "parquet 55.2.0",
+ "parquet 58.3.0",
  "rand",
  "serde",
  "tempfile",
  "thiserror",
+ "triomphe",
  "uuid",
 ]
 
@@ -1090,12 +1121,13 @@ dependencies = [
  "magnus",
  "num",
  "ordered-float 5.0.0",
- "parquet 55.2.0",
+ "parquet 58.3.0",
  "parquet-core",
  "rb-sys",
  "rb-sys-env",
  "tempfile",
  "thiserror",
+ "triomphe",
  "uuid",
 ]
 
@@ -1301,18 +1333,28 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "serde"
-version = "1.0.219"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
+checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.219"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
+checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1354,6 +1396,12 @@ name = "snap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "static_assertions"
@@ -1423,6 +1471,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
 dependencies = [
  "crunchy",
+]
+
+[[package]]
+name = "triomphe"
+version = "0.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_single_row_file() {

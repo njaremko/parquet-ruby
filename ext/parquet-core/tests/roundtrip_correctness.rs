@@ -2,7 +2,7 @@ use bytes::Bytes;
 use num::BigInt;
 use ordered_float::OrderedFloat;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_all_primitive_types_roundtrip() {

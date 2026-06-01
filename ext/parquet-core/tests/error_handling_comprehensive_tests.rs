@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use indexmap::IndexMap;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 mod test_helpers;
 
@@ -18,7 +18,7 @@ fn test_schema_builder_error_cases() {
 #[test]
 fn test_empty_struct_unsupported() {
     // Test that empty structs are not supported by Parquet
-    let schema = SchemaBuilder::new()
+    let error = SchemaBuilder::new()
         .with_root(SchemaNode::Struct {
             name: "root".to_string(),
             nullable: false,
@@ -57,20 +57,12 @@ fn test_empty_struct_unsupported() {
             ],
         })
         .build()
-        .unwrap();
+        .unwrap_err();
 
-    // Try to create a writer - this should fail due to empty struct
-    let mut buffer = Vec::new();
-    let result = Writer::new(&mut buffer, schema.clone());
-
-    // Expect an error about empty structs
-    assert!(result.is_err());
-    match result {
-        Err(ParquetError::Parquet(e)) => {
-            assert!(e.to_string().contains("empty struct"));
-        }
-        _ => panic!("Expected Parquet error about empty structs"),
-    }
+    assert_eq!(
+        error,
+        "Struct field 'root.empty_struct' must contain at least one field"
+    );
 }
 
 // ====== Field Count Validation Errors ======
@@ -525,23 +517,24 @@ fn test_invalid_collection_schemas() {
     ];
 
     for (name, invalid_node) in test_cases {
-        let result = SchemaBuilder::new()
+        let error = SchemaBuilder::new()
             .with_root(SchemaNode::Struct {
                 name: "root".to_string(),
                 nullable: false,
                 fields: vec![invalid_node],
             })
-            .build();
+            .build()
+            .unwrap_err();
 
-        // Document the behavior for invalid collection schemas
-        match result {
-            Ok(_) => {
-                // Some invalid schemas might be allowed at build time
-                // but fail at write time
+        let expected = match name {
+            "list_without_item" => {
+                "Struct field 'root.invalid_list.empty' must contain at least one field"
             }
-            Err(e) => {
-                println!("Schema validation for {}: {}", name, e);
+            "map_without_value" => {
+                "Struct field 'root.invalid_map.empty' must contain at least one field"
             }
-        }
+            _ => unreachable!("unexpected invalid collection schema"),
+        };
+        assert_eq!(error, expected);
     }
 }

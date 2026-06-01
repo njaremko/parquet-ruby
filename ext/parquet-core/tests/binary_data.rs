@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use indexmap::IndexMap;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_binary_data_basic() {

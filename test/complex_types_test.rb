@@ -185,6 +185,38 @@ class ComplexTypesTest < Minitest::Test
     end
   end
 
+  # Regression: a map defined via the raw-hash schema form, where the key hash
+  # omits `nullable`, must still write. Parquet requires map keys to be
+  # required; the adapter previously defaulted the key to nullable, which the
+  # core validator rejected with "Map key field '...' must be required".
+  def test_map_hash_schema_defaults_key_to_required
+    schema = {
+      fields: [
+        { name: "id", type: :int64 },
+        { name: "metadata", type: :map, key: { type: :string }, value: { type: :string } }
+      ]
+    }
+
+    data = [
+      [1, { "a" => "1", "b" => "2" }],
+      [2, {}]
+    ]
+
+    path = "test_map_hash_schema_required_key.parquet"
+    begin
+      Parquet.write_rows(data.each, schema: schema, write_to: path)
+
+      rows = Parquet.each_row(path).to_a
+      assert_equal 2, rows.length
+      assert_equal 1, rows[0]["id"]
+      assert_equal({ "a" => "1", "b" => "2" }, rows[0]["metadata"])
+      assert_equal 2, rows[1]["id"]
+      assert_equal({}, rows[1]["metadata"])
+    ensure
+      File.delete(path) if File.exist?(path)
+    end
+  end
+
   def test_complex_schema_with_nested_types
     schema =
       Parquet::Schema.define do

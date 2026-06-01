@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use num::BigInt;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 #[test]
 fn test_decimal128_precision_scale_combinations() {
@@ -89,21 +89,21 @@ fn test_decimal128_precision_scale_combinations() {
             ParquetValue::Decimal128(1, 10), // 0.0000000001
             ParquetValue::Decimal128(1, 38), // 0.00000...01 (37 zeros then 1)
         ],
-        // Maximum value for i128
+        // Large positive values within declared precision
         vec![
             ParquetValue::Decimal128(99999, 2),
             ParquetValue::Decimal128(999_999_999, 2),
-            ParquetValue::Decimal128(i64::MAX as i128, 0),
-            ParquetValue::Decimal128(i128::MAX, 0),
+            ParquetValue::Decimal128(999999999999999999, 0),
+            ParquetValue::Decimal128(99999999999999999999999999999999999999_i128, 0),
             ParquetValue::Decimal128(12345678901234567890123456789_i128, 10),
             ParquetValue::Decimal128(1, 38),
         ],
-        // Minimum value for i128
+        // Large negative values within declared precision
         vec![
             ParquetValue::Decimal128(-99999, 2),
             ParquetValue::Decimal128(-999_999_999, 2),
-            ParquetValue::Decimal128(i64::MIN as i128, 0),
-            ParquetValue::Decimal128(i128::MIN, 0),
+            ParquetValue::Decimal128(-999999999999999999, 0),
+            ParquetValue::Decimal128(-99999999999999999999999999999999999999_i128, 0),
             ParquetValue::Decimal128(-12345678901234567890123456789_i128, 10),
             ParquetValue::Decimal128(-1, 38),
         ],

@@ -85,6 +85,32 @@ impl ParquetError {
     pub fn internal<S: Into<String>>(msg: S) -> Self {
         ParquetError::Internal(msg.into())
     }
+
+    fn with_context_message(self, ctx: String) -> Self {
+        match self {
+            ParquetError::Io(error) => ParquetError::Io(std::io::Error::new(
+                error.kind(),
+                format!("{}: {}", ctx, error),
+            )),
+            ParquetError::Schema(message) => ParquetError::Schema(format!("{}: {}", ctx, message)),
+            ParquetError::Conversion(message) => {
+                ParquetError::Conversion(format!("{}: {}", ctx, message))
+            }
+            ParquetError::InvalidArgument(message) => {
+                ParquetError::InvalidArgument(format!("{}: {}", ctx, message))
+            }
+            ParquetError::DataValidation(message) => {
+                ParquetError::DataValidation(format!("{}: {}", ctx, message))
+            }
+            ParquetError::Unsupported(message) => {
+                ParquetError::Unsupported(format!("{}: {}", ctx, message))
+            }
+            ParquetError::Internal(message) => {
+                ParquetError::Internal(format!("{}: {}", ctx, message))
+            }
+            error => ParquetError::Internal(format!("{}: {}", ctx, error)),
+        }
+    }
 }
 
 /// Extension trait to add context to errors
@@ -103,14 +129,14 @@ where
     fn context<S: Into<String>>(self, ctx: S) -> Result<T> {
         self.map_err(|e| {
             let base_error = e.into();
-            ParquetError::Internal(format!("{}: {}", ctx.into(), base_error))
+            base_error.with_context_message(ctx.into())
         })
     }
 
     fn with_context<S: Into<String>, F: FnOnce() -> S>(self, f: F) -> Result<T> {
         self.map_err(|e| {
             let base_error = e.into();
-            ParquetError::Internal(format!("{}: {}", f().into(), base_error))
+            base_error.with_context_message(f().into())
         })
     }
 }

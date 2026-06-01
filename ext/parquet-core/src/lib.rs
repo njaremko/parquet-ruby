@@ -57,4 +57,4 @@ pub use error::{ErrorContext, ParquetError, Result};
 pub use reader::Reader;
 pub use schema::{PrimitiveType, Repetition, Schema, SchemaBuilder, SchemaNode};
 pub use value::ParquetValue;
-pub use writer::{Writer, WriterBuilder};
+pub use writer::{Writer, WriterBuilder, MAX_BATCH_SIZE, MAX_SAMPLE_SIZE};

@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  # Pin to the same nixpkgs branch as flake.nix so the two dev environments
+  # resolve the same packages (notably ruby_4_0) and share the binary cache.
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-26.05
+
+# Mirror the allowances from flake.nix's nixpkgs config.
+allow_unfree: true
+allow_unsupported_system: true
+permitted_insecure_packages:
+  - "openssl-1.1.1w"

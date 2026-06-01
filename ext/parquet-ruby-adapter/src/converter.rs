@@ -1,16 +1,17 @@
 use crate::string_cache::StringCache;
+use crate::string_storage::StringStorage;
 use bytes::Bytes;
 use indexmap::IndexMap;
 use magnus::r_hash::ForEach;
 use magnus::value::ReprValue;
 use magnus::{
-    kwargs, Error as MagnusError, IntoValue, Module, RArray, RHash, RString, Ruby, Symbol,
-    TryConvert, Value,
+    kwargs, Error as MagnusError, IntoValue, Module, RArray, RHash, RString, Ruby, TryConvert,
+    Value,
 };
 use ordered_float::OrderedFloat;
 use parquet_core::{ParquetError, ParquetValue, Result};
 use std::cell::RefCell;
-use std::sync::Arc;
+use triomphe::Arc;
 use uuid::Uuid;
 
 /// Ruby value converter
@@ -277,7 +278,7 @@ impl RubyValueConverter {
     }
 
     /// Extract timezone information from a Ruby Time object
-    fn extract_timezone(&self, time_value: Value) -> Result<Option<std::sync::Arc<str>>> {
+    fn extract_timezone(&self, time_value: Value) -> Result<Option<Arc<str>>> {
         let _ruby = Ruby::get()
             .map_err(|_| ParquetError::Conversion("Failed to get Ruby runtime".to_string()))?;
 
@@ -428,8 +429,7 @@ impl RubyValueConverter {
             .funcall("to_s", ())
             .map_err(|e| ParquetError::Conversion(e.to_string()))?;
 
-        // Use string cache if available for statistics tracking
-        // Note: Currently doesn't provide memory savings due to ParquetValue storing String
+        // Use shared storage for repeated string values when the writer enabled caching.
         if let Some(ref mut cache) = self.string_cache.borrow_mut().as_mut() {
             let interned = cache.intern(s);
             Ok(ParquetValue::String(interned))
@@ -1346,9 +1346,11 @@ impl RubyValueConverter {
 
         let mut record = IndexMap::new();
 
+        let ruby = Ruby::get()
+            .map_err(|_| ParquetError::Conversion("Failed to get Ruby runtime".to_string()))?;
         for field in fields {
             let field_name = field.name();
-            let ruby_key = Symbol::new(field_name);
+            let ruby_key = ruby.to_symbol(field_name);
 
             // Try symbol key first, then string key
             let field_value = if let Some(val) = hash.get(ruby_key) {
@@ -1357,12 +1359,7 @@ impl RubyValueConverter {
                 val
             } else {
                 // Field not found, use null
-                Ruby::get()
-                    .map_err(|_| {
-                        ParquetError::Conversion("Failed to get Ruby runtime".to_string())
-                    })?
-                    .qnil()
-                    .as_value()
+                ruby.qnil().as_value()
             };
 
             let converted = self.convert_with_schema_hint(field_value, field)?;
@@ -1380,7 +1377,7 @@ pub fn ruby_to_parquet(value: Value) -> Result<ParquetValue> {
     converter.infer_and_convert(value)
 }
 
-pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
+pub fn parquet_to_ruby(value: ParquetValue, string_storage: &mut StringStorage) -> Result<Value> {
     let ruby = Ruby::get()
         .map_err(|_| ParquetError::Conversion("Failed to get Ruby runtime".to_string()))?;
 
@@ -1436,7 +1433,7 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
             Ok(cleaned.into_value_with(&ruby))
         }
         ParquetValue::Float64(OrderedFloat(f)) => Ok(f.into_value_with(&ruby)),
-        ParquetValue::String(s) => Ok(s.into_value_with(&ruby)),
+        ParquetValue::String(s) => Ok(string_storage.ruby_string(&ruby, &s)),
         ParquetValue::Uuid(u) => Ok(u
             .hyphenated()
             .encode_lower(&mut Uuid::encode_buffer())
@@ -1541,7 +1538,7 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                     (
                         secs,
                         nsec,
-                        Symbol::new("nanosecond"),
+                        ruby.to_symbol("nanosecond"),
                         kwargs!("in" => "UTC"),
                     ),
                 )
@@ -1583,7 +1580,7 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
                     (
                         secs,
                         nsec,
-                        Symbol::new("nanosecond"),
+                        ruby.to_symbol("nanosecond"),
                         kwargs!("in" => "UTC"),
                     ),
                 )
@@ -1615,7 +1612,7 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
         ParquetValue::List(list) => {
             let array = ruby.ary_new_capa(list.len());
             for item in list {
-                let ruby_val = parquet_to_ruby(item)?;
+                let ruby_val = parquet_to_ruby(item, string_storage)?;
                 array
                     .push(ruby_val)
                     .map_err(|e| ParquetError::Conversion(e.to_string()))?;
@@ -1625,8 +1622,8 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
         ParquetValue::Map(map) => {
             let hash = ruby.hash_new();
             for (k, v) in map {
-                let ruby_key = parquet_to_ruby(k)?;
-                let ruby_val = parquet_to_ruby(v)?;
+                let ruby_key = parquet_to_ruby(k, string_storage)?;
+                let ruby_val = parquet_to_ruby(v, string_storage)?;
                 hash.aset(ruby_key, ruby_val)
                     .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             }
@@ -1636,8 +1633,8 @@ pub fn parquet_to_ruby(value: ParquetValue) -> Result<Value> {
             // Convert Record to Ruby Hash
             let hash = ruby.hash_new();
             for (field_name, field_value) in record {
-                let ruby_key = ruby.str_new(&field_name);
-                let ruby_val = parquet_to_ruby(field_value)?;
+                let ruby_key = string_storage.ruby_key(&ruby, &field_name);
+                let ruby_val = parquet_to_ruby(field_value, string_storage)?;
                 hash.aset(ruby_key, ruby_val)
                     .map_err(|e| ParquetError::Conversion(e.to_string()))?;
             }
@@ -1713,7 +1710,7 @@ fn format_decimal256(value: &num::BigInt, scale: i8) -> String {
 /// NOTE: The actual timezone string in the schema is irrelevant for reading.
 /// Whether it's "UTC", "+09:00", or "America/New_York", the stored values
 /// are ALWAYS UTC-normalized. We return them as UTC Time objects.
-fn apply_timezone(time: Value, tz: &Option<std::sync::Arc<str>>) -> Result<Value> {
+fn apply_timezone(time: Value, tz: &Option<Arc<str>>) -> Result<Value> {
     let _ruby = Ruby::get()
         .map_err(|_| ParquetError::Conversion("Failed to get Ruby runtime".to_string()))?;
 

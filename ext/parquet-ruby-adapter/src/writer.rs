@@ -1,6 +1,6 @@
 use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, Ruby, TryConvert, Value};
-use parquet::file::properties::WriterProperties;
+use parquet_core::writer::WriterBuilder;
 use parquet_core::Schema;
 use std::io::{BufReader, BufWriter, Write};
 use tempfile::NamedTempFile;
@@ -9,24 +9,42 @@ use crate::io::RubyIOWriter;
 use crate::types::WriterOutput;
 use crate::utils::parse_compression;
 
-/// Create a writer based on the output type (file path or IO object)
+/// How the writer batches rows before flushing. All batch sizing is owned by the
+/// core `Writer`; the adapter only forwards the user's options.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BatchSizingOptions {
+    pub batch_size: Option<usize>,
+    pub flush_threshold: Option<usize>,
+    pub sample_size: Option<usize>,
+}
+
+/// Create a writer based on the output type (file path or IO object), forwarding
+/// the batch-sizing options to the core writer (the single source of truth).
 pub fn create_writer(
     ruby: &Ruby,
     write_to: Value,
     schema: Schema,
     compression: Option<String>,
+    options: BatchSizingOptions,
 ) -> Result<WriterOutput, MagnusError> {
-    let compression_setting = parse_compression(compression)?;
-    let props = WriterProperties::builder()
-        .set_compression(compression_setting)
-        .build();
+    let mut builder = WriterBuilder::new().with_compression(parse_compression(ruby, compression)?);
+    if let Some(size) = options.batch_size {
+        builder = builder.with_batch_size(size);
+    }
+    if let Some(threshold) = options.flush_threshold {
+        builder = builder.with_memory_threshold(threshold);
+    }
+    if let Some(size) = options.sample_size {
+        builder = builder.with_sample_size(size);
+    }
 
     if write_to.is_kind_of(ruby.class_string()) {
         // Direct file path
         let path_str: String = TryConvert::try_convert(write_to)?;
         let file = std::fs::File::create(&path_str)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        let writer = parquet_core::writer::Writer::new_with_properties(file, schema, props)
+        let writer = builder
+            .build(file, schema)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
         Ok(WriterOutput::File(writer))
     } else {
@@ -46,7 +64,8 @@ pub fn create_writer(
             )
         })?;
 
-        let writer = parquet_core::writer::Writer::new_with_properties(file, schema, props)
+        let writer = builder
+            .build(file, schema)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
         Ok(WriterOutput::TempFile(writer, temp_file, write_to))
@@ -54,28 +73,32 @@ pub fn create_writer(
 }
 
 /// Finalize the writer and copy temp file to IO if needed
-pub fn finalize_writer(writer_output: WriterOutput) -> Result<(), MagnusError> {
+pub fn finalize_writer(ruby: &Ruby, writer_output: WriterOutput) -> Result<(), MagnusError> {
     match writer_output {
         WriterOutput::File(writer) => writer
             .close()
-            .map_err(|e| MagnusError::new(magnus::exception::runtime_error(), e.to_string())),
+            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string())),
         WriterOutput::TempFile(writer, temp_file, io_object) => {
             // Close the writer first
             writer
                 .close()
-                .map_err(|e| MagnusError::new(magnus::exception::runtime_error(), e.to_string()))?;
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
             // Copy temp file to IO object
-            copy_temp_file_to_io(temp_file, io_object)
+            copy_temp_file_to_io(ruby, temp_file, io_object)
         }
     }
 }
 
 /// Copy temporary file contents to Ruby IO object
-fn copy_temp_file_to_io(temp_file: NamedTempFile, io_object: Value) -> Result<(), MagnusError> {
+fn copy_temp_file_to_io(
+    ruby: &Ruby,
+    temp_file: NamedTempFile,
+    io_object: Value,
+) -> Result<(), MagnusError> {
     let file = temp_file.reopen().map_err(|e| {
         MagnusError::new(
-            magnus::exception::runtime_error(),
+            ruby.exception_runtime_error(),
             format!("Failed to reopen temporary file: {}", e),
         )
     })?;
@@ -86,14 +109,14 @@ fn copy_temp_file_to_io(temp_file: NamedTempFile, io_object: Value) -> Result<()
 
     std::io::copy(&mut buf_reader, &mut buf_writer).map_err(|e| {
         MagnusError::new(
-            magnus::exception::runtime_error(),
+            ruby.exception_runtime_error(),
             format!("Failed to copy temp file to IO object: {}", e),
         )
     })?;
 
     buf_writer.flush().map_err(|e| {
         MagnusError::new(
-            magnus::exception::runtime_error(),
+            ruby.exception_runtime_error(),
             format!("Failed to flush IO object: {}", e),
         )
     })?;
@@ -107,12 +130,10 @@ pub fn write_rows(
     ruby: &Ruby,
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
-    use crate::batch_manager::BatchSizeManager;
     use crate::converter::RubyValueConverter;
     use crate::logger::RubyLogger;
     use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
     use crate::string_cache::StringCache;
-    use crate::utils::estimate_row_size;
     use magnus::{RArray, TryConvert};
 
     // Convert data to array if it isn't already
@@ -141,45 +162,35 @@ pub fn write_rows(
     // Extract field schemas for conversion hints
     let field_schemas = extract_field_schemas(&schema);
 
-    // Create writer
+    // Create writer. All batch sizing and flushing is owned by the core writer;
+    // the user's batch_size/flush_threshold/sample_size are forwarded to it.
     let mut writer_output = create_writer(
         ruby,
         write_args.write_to,
         schema.clone(),
         write_args.compression,
+        BatchSizingOptions {
+            batch_size: write_args.batch_size,
+            flush_threshold: write_args.flush_threshold,
+            sample_size: write_args.sample_size,
+        },
     )?;
 
     // Create logger
     let logger = RubyLogger::new(write_args.logger)?;
     let _ = logger.info(|| "Starting to write parquet file".to_string());
 
-    // Create batch size manager
-    let mut batch_manager = BatchSizeManager::new(
-        write_args.batch_size,
-        write_args.flush_threshold,
-        write_args.sample_size,
-    );
-
-    let _ = logger.debug(|| {
-        format!(
-            "Batch sizing: fixed_size={:?}, memory_threshold={}, sample_size={}",
-            batch_manager.fixed_batch_size,
-            batch_manager.memory_threshold,
-            batch_manager.sample_size
-        )
-    });
-
-    // Create converter with string cache if enabled
-    let mut converter = if write_args.string_cache.unwrap_or(false) {
-        let _ = logger.debug(|| "String cache enabled".to_string());
-        RubyValueConverter::with_string_cache(StringCache::new(true))
+    // Create converter with string cache if enabled. `string_cache` is the
+    // requested capacity (None = disabled).
+    let mut converter = if let Some(capacity) = write_args.string_cache {
+        let _ = logger.debug(|| format!("String cache enabled (capacity {})", capacity));
+        RubyValueConverter::with_string_cache(StringCache::new(capacity))
     } else {
         RubyValueConverter::new()
     };
 
-    // Collect rows in batches
-    let mut batch = Vec::new();
-    let mut batch_memory_size = 0usize;
+    // Stream each row to the core writer, which buffers and flushes internally
+    // according to its (now sole) batch-sizing policy.
     let mut total_rows = 0u64;
 
     for row_value in data_array.into_iter() {
@@ -219,69 +230,28 @@ pub fn write_rows(
             ));
         };
 
-        // Record row size for dynamic batch sizing
-        let row_size = estimate_row_size(&row);
-        batch_manager.record_row_size(row_size);
-        batch_memory_size += row_size;
-
-        batch.push(row);
-        total_rows += 1;
-
-        // Log sampling progress
-        if batch_manager.row_size_samples.len() <= batch_manager.sample_size
-            && batch_manager.row_size_samples.len() % 10 == 0
-        {
-            let _ = logger.debug(|| {
-                format!(
-                    "Sampled {} rows, avg size: {} bytes, current batch size: {}",
-                    batch_manager.row_size_samples.len(),
-                    batch_manager.average_row_size(),
-                    batch_manager.current_batch_size
-                )
-            });
-        }
-
-        // Write batch if it reaches threshold
-        if batch_manager.should_flush(batch.len(), batch_memory_size) {
-            let _ = logger.info(|| format!("Writing batch of {} rows", batch.len()));
-            let _ = logger.debug(|| format!(
-                "Batch details: recent avg row size: {} bytes, current batch size: {}, actual memory: {} bytes",
-                batch_manager.recent_average_size(),
-                batch_manager.current_batch_size,
-                batch_memory_size
-            ));
-            match &mut writer_output {
-                WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
-                    writer.write_rows(std::mem::take(&mut batch)).map_err(|e| {
-                        MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                    })?;
-                }
-            }
-            batch_memory_size = 0;
-        }
-    }
-
-    // Write remaining rows
-    if !batch.is_empty() {
-        let _ = logger.info(|| format!("Writing batch of {} rows", batch.len()));
-        let _ = logger.debug(|| format!("Final batch: {} rows", batch.len()));
         match &mut writer_output {
             WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
                 writer
-                    .write_rows(batch)
+                    .write_row(row)
                     .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
             }
         }
+        total_rows += 1;
     }
 
+    // The core writer flushes any remaining buffered rows when closed by
+    // finalize_writer below.
     let _ = logger.info(|| format!("Finished writing {} rows to parquet file", total_rows));
 
-    // Log string cache statistics if enabled
+    // Log string cache statistics if enabled. `misses` is exact even after the
+    // bounded cache fills; exact distinct cardinality would require an unbounded
+    // side table, so the log labels it as misses rather than unique strings.
     if let Some(stats) = converter.string_cache_stats() {
         let _ = logger.info(|| {
             format!(
-                "String cache stats: {} unique strings, {} hits ({:.1}% hit rate)",
-                stats.size,
+                "String cache stats: {} cache misses, {} hits ({:.1}% hit rate)",
+                stats.misses,
                 stats.hits,
                 stats.hit_rate * 100.0
             )
@@ -289,7 +259,7 @@ pub fn write_rows(
     }
 
     // Finalize the writer
-    finalize_writer(writer_output)?;
+    finalize_writer(ruby, writer_output)?;
 
     Ok(ruby.qnil().as_value())
 }
@@ -300,8 +270,11 @@ pub fn write_columns(
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
     use crate::converter::RubyValueConverter;
+    use crate::logger::RubyLogger;
     use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
     use magnus::{RArray, TryConvert};
+
+    let logger = RubyLogger::new(write_args.logger)?;
 
     // Convert data to array for processing
     let data_array = if write_args.read_from.is_kind_of(ruby.class_array()) {
@@ -329,13 +302,20 @@ pub fn write_columns(
     // Extract field schemas for conversion hints
     let field_schemas = extract_field_schemas(&schema);
 
-    // Create writer
+    // Create writer. The columnar path writes one record batch per write_columns
+    // call, so row batch-sizing options are rejected before this point.
     let mut writer_output = create_writer(
         ruby,
         write_args.write_to,
         schema.clone(),
         write_args.compression,
+        BatchSizingOptions {
+            batch_size: None,
+            flush_threshold: write_args.flush_threshold,
+            sample_size: None,
+        },
     )?;
+    let _ = logger.info(|| "Starting to write parquet file columns".to_string());
 
     // Get column names from schema
     let column_names: Vec<String> =
@@ -419,6 +399,11 @@ pub fn write_columns(
         }
     }
 
+    let total_rows = all_columns
+        .first()
+        .map(|(_name, values)| values.len())
+        .unwrap_or(0);
+
     // Write the columns
     match &mut writer_output {
         WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
@@ -428,8 +413,10 @@ pub fn write_columns(
         }
     }
 
+    let _ = logger.info(|| format!("Finished writing {total_rows} rows to parquet file columns"));
+
     // Finalize the writer
-    finalize_writer(writer_output)?;
+    finalize_writer(ruby, writer_output)?;
 
     Ok(ruby.qnil().as_value())
 }

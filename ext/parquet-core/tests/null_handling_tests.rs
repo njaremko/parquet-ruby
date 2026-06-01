@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use indexmap::IndexMap;
 use parquet_core::*;
-use std::sync::Arc;
+use triomphe::Arc;
 
 mod test_helpers;
 use test_helpers::*;

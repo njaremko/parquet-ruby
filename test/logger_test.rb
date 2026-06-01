@@ -73,8 +73,34 @@ class LoggerTest < Minitest::Test
     # Check that logger was called
     log_content = log_output.string
     assert_match(/Starting to write parquet file/, log_content)
-    assert_match(/Writing batch of \d+ rows/, log_content)
     assert_match(/Finished writing 2100 rows to parquet file/, log_content)
+  end
+
+  def test_logger_in_write_column_operations
+    log_output = StringIO.new
+    logger = Logger.new(log_output)
+    logger.level = Logger::DEBUG
+
+    schema = [
+      { "id" => "int64" },
+      { "value" => "string" }
+    ]
+    batches = [
+      [
+        [1, 2, 3],
+        ["one", "two", "three"]
+      ]
+    ]
+
+    Parquet.write_columns(batches.each, schema: schema, write_to: @test_file, logger: logger)
+
+    rows = []
+    Parquet.each_row(@test_file) { |row| rows << row }
+    assert_equal [1, 2, 3], rows.map { |row| row["id"] }
+
+    log_content = log_output.string
+    assert_match(/Starting to write parquet file columns/, log_content)
+    assert_match(/Finished writing 3 rows to parquet file columns/, log_content)
   end
   
   def test_logger_validation
@@ -83,6 +109,17 @@ class LoggerTest < Minitest::Test
     
     assert_raises(ArgumentError) do
       Parquet.each_row(@test_file, logger: invalid_logger) { |row| row }
+    end
+
+    schema = [{ "id" => "int64" }]
+    batches = [[[1]]]
+    assert_raises(ArgumentError) do
+      Parquet.write_columns(
+        batches.each,
+        schema: schema,
+        write_to: @test_file,
+        logger: invalid_logger
+      )
     end
   end
   

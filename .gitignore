@@ -1,8 +1,12 @@
 /target*
+.tmp
 **/*.svg
 /tmp
 /**/*.bundle
 .direnv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
 pkg/
 **/.DS_Store
 .env
