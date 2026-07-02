@@ -107,6 +107,7 @@ impl WriterBuilder {
             size_samples: Vec::with_capacity(sample_size),
             total_rows_written: 0,
             fixed_batch_size: self.batch_size,
+            raw_bytes_since_flush: 0,
         })
     }
 }
@@ -123,6 +124,11 @@ pub struct Writer<W: std::io::Write> {
     size_samples: Vec<usize>,
     total_rows_written: usize,
     fixed_batch_size: Option<usize>,
+    /// Estimated raw bytes accepted since the last row-group flush. Tracked
+    /// separately from the arrow writer's encoded buffer sizes so
+    /// `memory_threshold` still bounds in-flight data (and streams row groups
+    /// to the destination) when encoding/compression shrinks it dramatically.
+    raw_bytes_since_flush: usize,
 }
 
 impl<W> Writer<W>
@@ -155,6 +161,7 @@ where
             size_samples: Vec::with_capacity(DEFAULT_SAMPLE_SIZE),
             total_rows_written: 0,
             fixed_batch_size: None,
+            raw_bytes_since_flush: 0,
         })
     }
 
@@ -187,18 +194,27 @@ where
             validate_value_against_field(value, field, &format!("row[{}]", idx))?;
         }
 
+        let row_size = self.estimate_row_size(&row)?;
+
         // Sample row size for dynamic batch sizing
         if self.fixed_batch_size.is_none() {
-            self.sample_row_size(&row)?;
+            self.sample_row_size(row_size);
         }
+
+        // Count raw staged bytes toward the flush threshold.
+        self.raw_bytes_since_flush = self.raw_bytes_since_flush.saturating_add(row_size);
 
         for (col_idx, value) in row.into_iter().enumerate() {
             self.buffered_columns[col_idx].push(value);
         }
         self.buffered_row_count += 1;
 
-        // Check if we need to flush
-        if self.buffered_row_count >= self.current_batch_size {
+        // Check if we need to flush: batch full, or raw staged bytes already
+        // past the threshold (bounds in-flight memory when rows are large
+        // relative to the configured batch size).
+        if self.buffered_row_count >= self.current_batch_size
+            || self.raw_bytes_since_flush >= self.memory_threshold
+        {
             self.flush_buffered_rows()?;
         }
 
@@ -206,9 +222,7 @@ where
     }
 
     /// Sample row size for dynamic batch sizing using reservoir sampling
-    fn sample_row_size(&mut self, row: &[ParquetValue]) -> Result<()> {
-        let row_size = self.estimate_row_size(row)?;
-
+    fn sample_row_size(&mut self, row_size: usize) {
         if self.size_samples.len() < self.sample_size {
             self.size_samples.push(row_size);
         } else {
@@ -227,8 +241,6 @@ where
         if self.size_samples.len() >= samples_required {
             self.update_batch_size();
         }
-
-        Ok(())
     }
 
     /// Estimate the memory size of a single row
@@ -393,11 +405,16 @@ where
                 column.reserve(additional_capacity);
             }
 
-            // Check if we need to flush based on memory usage
-            if writer.in_progress_size() >= self.memory_threshold
+            // Check if we need to flush a completed row group to the
+            // destination. Raw staged bytes trip the threshold too: highly
+            // compressible data can sit far below the threshold once encoded,
+            // which would otherwise keep the whole file buffered until close.
+            if self.raw_bytes_since_flush >= self.memory_threshold
+                || writer.in_progress_size() >= self.memory_threshold
                 || writer.memory_size() >= self.memory_threshold
             {
                 writer.flush()?;
+                self.raw_bytes_since_flush = 0;
             }
         } else {
             return Err(ParquetError::Io(std::io::Error::new(
@@ -466,6 +483,7 @@ where
 
         // Sort columns to match schema order and convert to arrays
         let mut arrow_columns = Vec::with_capacity(schema_fields.len());
+        let mut batch_raw_bytes: usize = 0;
 
         for field in schema_fields {
             let values = columns_by_name
@@ -478,6 +496,8 @@ where
                     field,
                     &format!("column '{}'[{}]", field.name(), idx),
                 )?;
+                batch_raw_bytes = batch_raw_bytes
+                    .saturating_add(self.estimate_value_size(value, field.data_type())?);
             }
 
             let array = parquet_values_to_arrow_array(&values, field)?;
@@ -490,6 +510,18 @@ where
         // Write the batch
         if let Some(writer) = &mut self.arrow_writer {
             writer.write(&batch)?;
+            self.raw_bytes_since_flush = self.raw_bytes_since_flush.saturating_add(batch_raw_bytes);
+
+            // Check if we need to flush a completed row group, like the row
+            // path does; otherwise repeated write_columns calls accumulate
+            // every row group in memory until close.
+            if self.raw_bytes_since_flush >= self.memory_threshold
+                || writer.in_progress_size() >= self.memory_threshold
+                || writer.memory_size() >= self.memory_threshold
+            {
+                writer.flush()?;
+                self.raw_bytes_since_flush = 0;
+            }
         } else {
             return Err(ParquetError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -509,6 +541,7 @@ where
         if let Some(writer) = &mut self.arrow_writer {
             writer.flush()?;
         }
+        self.raw_bytes_since_flush = 0;
         Ok(())
     }
 

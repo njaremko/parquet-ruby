@@ -379,16 +379,31 @@ end
 
 ## Memory Management
 
-Control memory usage with flush thresholds:
+Writes are streamed: an Enumerator (or any Enumerable) passed to `write_rows`
+is consumed in bounded slices rather than materialized up front, and completed
+row groups are flushed to the destination while the input is still being
+enumerated. Peak memory is bounded by `batch_size` and `flush_threshold`, not
+by the total dataset size:
 
 ```ruby
 Parquet.write_rows(huge_dataset.each,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 1000,              # Positive rows before considering flush
-  flush_threshold: 32 * 1024**2  # Flush if batch exceeds 32MB
+  batch_size: 1000,              # Rows buffered per write batch (also the
+                                 # slice size pulled from an Enumerator)
+  flush_threshold: 32 * 1024**2  # Flush a row group to the destination once
+                                 # ~32MB of raw row data is staged (default 100MB)
 )
 ```
+
+`flush_threshold` bounds both the raw bytes staged since the last flush and
+the writer's encoded in-progress buffer, so row groups reach the destination
+incrementally even when compression shrinks the encoded data dramatically.
+`write_columns` flushes the same way after each batch of columns.
+
+When `write_to:` is an IO object instead of a file path, output is staged in a
+temporary file on disk (memory stays bounded) and copied to the IO after the
+write completes, so the IO receives its bytes only at the end.
 
 Write batch and sample sizes are bounded before buffer allocation. Very large
 batch sizes are rejected, and wide schemas have a lower effective batch cap so

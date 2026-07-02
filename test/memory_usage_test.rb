@@ -165,6 +165,48 @@ class MemoryUsageTest < Minitest::Test
            "Memory grew by #{memory_stats[:memory_growth_mb].round(2)}MB, expected < 100MB"
   end
 
+  def test_writing_enumerator_streams_with_bounded_peak_memory
+    # Regression test: write_rows used to drain the entire Enumerator into a
+    # Ruby array before writing, so peak RSS tracked the total dataset size.
+    # With streaming, peak RSS must stay bounded by batch/flush sizes.
+    row_count = 1_000_000
+    payload = 100
+
+    schema = {
+      fields: [
+        {name: 'id', type: :int64},
+        {name: 'payload', type: :string}
+      ]
+    }
+
+    GC.start(full_mark: true, immediate_sweep: true)
+    baseline_mb = current_memory_mb
+    peak_mb = baseline_mb
+
+    rows = Enumerator.new do |y|
+      row_count.times do |i|
+        peak_mb = [peak_mb, current_memory_mb].max if (i % 100_000).zero?
+        y << [i, "#{i}-#{'x' * payload}"]
+      end
+    end
+
+    Parquet.write_rows(rows, schema: schema, write_to: @test_file,
+                       batch_size: 5000, compression: "zstd")
+
+    peak_growth_mb = peak_mb - baseline_mb
+    puts "Enumerator write peak growth: #{peak_growth_mb.round(2)}MB" if ENV["VERBOSE"]
+
+    # ~100MB of raw row data is produced; before the streaming fix, peak
+    # growth was ~2-3x the total data size (all rows resident at once).
+    assert peak_growth_mb < 100,
+           "Peak memory grew by #{peak_growth_mb.round(2)}MB during enumerator write, expected < 100MB"
+
+    # The whole dataset must still round-trip.
+    count = 0
+    Parquet.each_row(@test_file) { |_row| count += 1 }
+    assert_equal row_count, count
+  end
+
   def test_concurrent_reading_memory_efficiency
     # Create a moderately large file
     row_count = 100_000

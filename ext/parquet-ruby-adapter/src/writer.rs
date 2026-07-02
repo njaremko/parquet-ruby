@@ -1,5 +1,5 @@
 use magnus::value::ReprValue;
-use magnus::{Error as MagnusError, Ruby, TryConvert, Value};
+use magnus::{Enumerator, Error as MagnusError, RArray, Ruby, TryConvert, Value};
 use parquet_core::writer::WriterBuilder;
 use parquet_core::Schema;
 use std::io::{BufReader, BufWriter, Write};
@@ -8,6 +8,11 @@ use tempfile::NamedTempFile;
 use crate::io::RubyIOWriter;
 use crate::types::WriterOutput;
 use crate::utils::parse_compression;
+
+/// Rows pulled per slice when streaming rows from an Enumerable without a
+/// user-provided batch_size. Mirrors the core writer's default batch size so
+/// the Ruby-side slice and the core row buffer stay in the same range.
+const DEFAULT_ROW_SLICE_SIZE: usize = 1000;
 
 /// How the writer batches rows before flushing. All batch sizing is owned by the
 /// core `Writer`; the adapter only forwards the user's options.
@@ -125,6 +130,128 @@ fn copy_temp_file_to_io(
     Ok(())
 }
 
+/// The rows to write, either already materialized or pulled lazily from an
+/// Enumerable in bounded slices so the whole input is never resident at once.
+enum RowSource {
+    Materialized(RArray),
+    Streamed {
+        first_slice: Option<RArray>,
+        remaining: Enumerator,
+    },
+}
+
+/// Classify `read_from` without draining it. Arrays are used as-is; anything
+/// else that supports `each_slice` (Enumerator, any Enumerable) is streamed in
+/// bounded slices; objects that only support `to_a` keep the legacy
+/// materialize-first behavior.
+fn row_source(
+    ruby: &Ruby,
+    read_from: Value,
+    batch_size: Option<usize>,
+) -> Result<RowSource, MagnusError> {
+    if read_from.is_kind_of(ruby.class_array()) {
+        return Ok(RowSource::Materialized(TryConvert::try_convert(read_from)?));
+    }
+
+    if read_from.respond_to("each_slice", false)? {
+        // One fiber switch per slice keeps Enumerator overhead negligible
+        // while bounding how many Ruby rows are in flight at once.
+        let slice_size = batch_size.unwrap_or(DEFAULT_ROW_SLICE_SIZE);
+        let mut remaining = read_from.enumeratorize("each_slice", (slice_size,));
+        let first_slice = match remaining.next() {
+            Some(slice) => Some(TryConvert::try_convert(slice?)?),
+            None => None,
+        };
+        return Ok(RowSource::Streamed {
+            first_slice,
+            remaining,
+        });
+    }
+
+    if read_from.respond_to("to_a", false)? {
+        let array_value: Value = read_from.funcall("to_a", ())?;
+        return Ok(RowSource::Materialized(TryConvert::try_convert(
+            array_value,
+        )?));
+    }
+
+    Err(MagnusError::new(
+        ruby.exception_type_error(),
+        "data must be an array or respond to 'to_a'",
+    ))
+}
+
+/// Map a value-conversion failure to the Ruby exception the write API raises:
+/// encoding problems surface as EncodingError, everything else RuntimeError.
+fn conversion_error(ruby: &Ruby, error_msg: String) -> MagnusError {
+    if error_msg.contains("EncodingError") || error_msg.contains("invalid utf-8") {
+        // Extract the actual encoding error message
+        if let Some(pos) = error_msg.find("EncodingError: ") {
+            let encoding_msg = error_msg[pos + 15..].to_string();
+            MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
+        } else {
+            MagnusError::new(ruby.exception_encoding_error(), error_msg)
+        }
+    } else {
+        MagnusError::new(ruby.exception_runtime_error(), error_msg)
+    }
+}
+
+/// Convert one slice of Ruby rows and write them through the core writer.
+/// Returns the number of rows written.
+///
+/// `release_consumed` should be true only when `rows` is an array this module
+/// created itself (an `each_slice` slice): each element is dropped from the
+/// slice once converted, so large rows become collectable while the rest of
+/// the slice is still being written. User-provided arrays must not be mutated.
+fn write_row_slice(
+    ruby: &Ruby,
+    writer_output: &mut WriterOutput,
+    converter: &mut crate::converter::RubyValueConverter,
+    field_schemas: &[parquet_core::SchemaNode],
+    rows: RArray,
+    release_consumed: bool,
+) -> Result<u64, MagnusError> {
+    let mut rows_written = 0u64;
+
+    for (row_idx, row_value) in rows.into_iter().enumerate() {
+        // Convert Ruby row to ParquetValue vector
+        let row = if row_value.is_kind_of(ruby.class_array()) {
+            let array: RArray = TryConvert::try_convert(row_value)?;
+            let mut values = Vec::with_capacity(array.len());
+
+            for (idx, item) in array.into_iter().enumerate() {
+                let schema_hint = field_schemas.get(idx);
+                let pq_value = converter
+                    .to_parquet_with_schema_hint(item, schema_hint)
+                    .map_err(|e| conversion_error(ruby, e.to_string()))?;
+                values.push(pq_value);
+            }
+            values
+        } else {
+            return Err(MagnusError::new(
+                ruby.exception_type_error(),
+                "each row must be an array",
+            ));
+        };
+
+        if release_consumed {
+            rows.store(row_idx as isize, ruby.qnil())?;
+        }
+
+        match writer_output {
+            WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
+                writer
+                    .write_row(row)
+                    .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            }
+        }
+        rows_written += 1;
+    }
+
+    Ok(rows_written)
+}
+
 /// Write data in row format to a parquet file
 pub fn write_rows(
     ruby: &Ruby,
@@ -134,25 +261,30 @@ pub fn write_rows(
     use crate::logger::RubyLogger;
     use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
     use crate::string_cache::StringCache;
-    use magnus::{RArray, TryConvert};
 
-    // Convert data to array if it isn't already
-    let data_array = if write_args.read_from.is_kind_of(ruby.class_array()) {
-        TryConvert::try_convert(write_args.read_from)?
-    } else if write_args.read_from.respond_to("to_a", false)? {
-        let array_value: Value = write_args.read_from.funcall("to_a", ())?;
-        TryConvert::try_convert(array_value)?
-    } else {
-        return Err(MagnusError::new(
-            ruby.exception_type_error(),
-            "data must be an array or respond to 'to_a'",
-        ));
+    // Read rows lazily where possible: draining an Enumerator up front would
+    // hold the entire dataset in memory for the duration of the write.
+    let source = row_source(ruby, write_args.read_from, write_args.batch_size)?;
+
+    // Schema inference (used when `schema` is nil/empty) only inspects the
+    // first row, so the first slice is enough.
+    let empty_rows;
+    let inference_rows = match &source {
+        RowSource::Materialized(rows) => rows,
+        RowSource::Streamed {
+            first_slice: Some(rows),
+            ..
+        } => rows,
+        RowSource::Streamed {
+            first_slice: None, ..
+        } => {
+            empty_rows = ruby.ary_new();
+            &empty_rows
+        }
     };
 
-    let data_array: RArray = data_array;
-
     // Process schema value
-    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(&data_array))
+    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(inference_rows))
         .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
     // Create schema
@@ -190,54 +322,47 @@ pub fn write_rows(
     };
 
     // Stream each row to the core writer, which buffers and flushes internally
-    // according to its (now sole) batch-sizing policy.
+    // according to its (now sole) batch-sizing policy. Completed row groups
+    // reach the destination while later rows are still being produced.
     let mut total_rows = 0u64;
 
-    for row_value in data_array.into_iter() {
-        // Convert Ruby row to ParquetValue vector
-        let row = if row_value.is_kind_of(ruby.class_array()) {
-            let array: RArray = TryConvert::try_convert(row_value)?;
-            let mut values = Vec::with_capacity(array.len());
-
-            for (idx, item) in array.into_iter().enumerate() {
-                let schema_hint = field_schemas.get(idx);
-                let pq_value = converter
-                    .to_parquet_with_schema_hint(item, schema_hint)
-                    .map_err(|e| {
-                        let error_msg = e.to_string();
-                        // Check if this is an encoding error
-                        if error_msg.contains("EncodingError")
-                            || error_msg.contains("invalid utf-8")
-                        {
-                            // Extract the actual encoding error message
-                            if let Some(pos) = error_msg.find("EncodingError: ") {
-                                let encoding_msg = error_msg[pos + 15..].to_string();
-                                MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
-                            } else {
-                                MagnusError::new(ruby.exception_encoding_error(), error_msg)
-                            }
-                        } else {
-                            MagnusError::new(ruby.exception_runtime_error(), error_msg)
-                        }
-                    })?;
-                values.push(pq_value);
+    match source {
+        RowSource::Materialized(rows) => {
+            total_rows += write_row_slice(
+                ruby,
+                &mut writer_output,
+                &mut converter,
+                &field_schemas,
+                rows,
+                false,
+            )?;
+        }
+        RowSource::Streamed {
+            first_slice,
+            remaining,
+        } => {
+            if let Some(rows) = first_slice {
+                total_rows += write_row_slice(
+                    ruby,
+                    &mut writer_output,
+                    &mut converter,
+                    &field_schemas,
+                    rows,
+                    true,
+                )?;
             }
-            values
-        } else {
-            return Err(MagnusError::new(
-                ruby.exception_type_error(),
-                "each row must be an array",
-            ));
-        };
-
-        match &mut writer_output {
-            WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
-                writer
-                    .write_row(row)
-                    .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            for slice in remaining {
+                let rows: RArray = TryConvert::try_convert(slice?)?;
+                total_rows += write_row_slice(
+                    ruby,
+                    &mut writer_output,
+                    &mut converter,
+                    &field_schemas,
+                    rows,
+                    true,
+                )?;
             }
         }
-        total_rows += 1;
     }
 
     // The core writer flushes any remaining buffered rows when closed by
@@ -264,35 +389,157 @@ pub fn write_rows(
     Ok(ruby.qnil().as_value())
 }
 
+/// The column batches to write, either already materialized or pulled lazily
+/// from an Enumerable one batch at a time.
+enum BatchSource {
+    Materialized(RArray),
+    Streamed {
+        first_batch: Option<Value>,
+        remaining: Enumerator,
+    },
+}
+
+/// Classify `read_from` without draining it, mirroring `row_source`. Batches
+/// are chunky (whole columns), so streamed sources are pulled one batch per
+/// fiber switch via `each`.
+fn batch_source(ruby: &Ruby, read_from: Value) -> Result<BatchSource, MagnusError> {
+    if read_from.is_kind_of(ruby.class_array()) {
+        return Ok(BatchSource::Materialized(TryConvert::try_convert(
+            read_from,
+        )?));
+    }
+
+    if read_from.respond_to("each", false)? {
+        let mut remaining = read_from.enumeratorize("each", ());
+        let first_batch = remaining.next().transpose()?;
+        return Ok(BatchSource::Streamed {
+            first_batch,
+            remaining,
+        });
+    }
+
+    if read_from.respond_to("to_a", false)? {
+        let array_value: Value = read_from.funcall("to_a", ())?;
+        return Ok(BatchSource::Materialized(TryConvert::try_convert(
+            array_value,
+        )?));
+    }
+
+    Err(MagnusError::new(
+        ruby.exception_type_error(),
+        "data must be an array or respond to 'to_a'",
+    ))
+}
+
+/// Convert one Ruby batch (an array of per-column value arrays) and write it
+/// through the core writer as a record batch. Returns the batch's row count.
+fn write_column_batch(
+    ruby: &Ruby,
+    writer_output: &mut WriterOutput,
+    field_schemas: &[parquet_core::SchemaNode],
+    column_names: &[String],
+    batch: Value,
+) -> Result<usize, MagnusError> {
+    use crate::converter::RubyValueConverter;
+
+    if !batch.is_kind_of(ruby.class_array()) {
+        return Err(MagnusError::new(
+            ruby.exception_type_error(),
+            "each batch must be an array of column values",
+        ));
+    }
+
+    let batch_array: RArray = TryConvert::try_convert(batch)?;
+
+    // Verify batch has the right number of columns
+    if batch_array.len() != column_names.len() {
+        return Err(MagnusError::new(
+            ruby.exception_runtime_error(),
+            format!(
+                "Batch has {} columns but schema has {}",
+                batch_array.len(),
+                column_names.len()
+            ),
+        ));
+    }
+
+    let mut batch_columns: Vec<(String, Vec<parquet_core::ParquetValue>)> =
+        Vec::with_capacity(column_names.len());
+
+    // Process each column in the batch
+    for (col_idx, column_values) in batch_array.into_iter().enumerate() {
+        if !column_values.is_kind_of(ruby.class_array()) {
+            return Err(MagnusError::new(
+                ruby.exception_type_error(),
+                format!("Column {} values must be an array", col_idx),
+            ));
+        }
+
+        let values_array: RArray = TryConvert::try_convert(column_values)?;
+
+        // Convert and append values
+        let mut converter = RubyValueConverter::new();
+        let schema_hint = field_schemas.get(col_idx);
+
+        let mut values = Vec::with_capacity(values_array.len());
+        for value in values_array.into_iter() {
+            let pq_value = converter
+                .to_parquet_with_schema_hint(value, schema_hint)
+                .map_err(|e| conversion_error(ruby, e.to_string()))?;
+            values.push(pq_value);
+        }
+        batch_columns.push((column_names[col_idx].clone(), values));
+    }
+
+    let batch_rows = batch_columns
+        .first()
+        .map(|(_name, values)| values.len())
+        .unwrap_or(0);
+
+    // Write this batch immediately; the core writer flushes completed row
+    // groups to the destination once its in-progress buffer exceeds the
+    // flush threshold.
+    match writer_output {
+        WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
+            writer
+                .write_columns(batch_columns)
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        }
+    }
+
+    Ok(batch_rows)
+}
+
 /// Write data in column format to a parquet file
 pub fn write_columns(
     ruby: &Ruby,
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
-    use crate::converter::RubyValueConverter;
     use crate::logger::RubyLogger;
     use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
-    use magnus::{RArray, TryConvert};
 
     let logger = RubyLogger::new(write_args.logger)?;
 
-    // Convert data to array for processing
-    let data_array = if write_args.read_from.is_kind_of(ruby.class_array()) {
-        TryConvert::try_convert(write_args.read_from)?
-    } else if write_args.read_from.respond_to("to_a", false)? {
-        let array_value: Value = write_args.read_from.funcall("to_a", ())?;
-        TryConvert::try_convert(array_value)?
-    } else {
-        return Err(MagnusError::new(
-            ruby.exception_type_error(),
-            "data must be an array or respond to 'to_a'",
-        ));
+    // Read batches lazily where possible: draining an Enumerator up front
+    // would hold every batch in memory for the duration of the write.
+    let source = batch_source(ruby, write_args.read_from)?;
+
+    // Schema inference (used when `schema` is nil/empty) only inspects the
+    // first batch, so one batch is enough.
+    let first_batch_holder;
+    let inference_batches = match &source {
+        BatchSource::Materialized(batches) => batches,
+        BatchSource::Streamed { first_batch, .. } => {
+            first_batch_holder = ruby.ary_new();
+            if let Some(batch) = first_batch {
+                first_batch_holder.push(*batch)?;
+            }
+            &first_batch_holder
+        }
     };
 
-    let data_array: RArray = data_array;
-
     // Process schema value
-    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(&data_array))
+    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(inference_batches))
         .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
     // Create schema
@@ -328,88 +575,44 @@ pub fn write_columns(
             ));
         };
 
-    // Convert data to columns format
-    let mut all_columns: Vec<(String, Vec<parquet_core::ParquetValue>)> = Vec::new();
+    // Convert and write each batch as it arrives; completed row groups are
+    // flushed to the destination instead of accumulating every batch first.
+    let mut total_rows: usize = 0;
 
-    // Process batches
-    for (batch_idx, batch) in data_array.into_iter().enumerate() {
-        if !batch.is_kind_of(ruby.class_array()) {
-            return Err(MagnusError::new(
-                ruby.exception_type_error(),
-                "each batch must be an array of column values",
-            ));
-        }
-
-        let batch_array: RArray = TryConvert::try_convert(batch)?;
-
-        // Verify batch has the right number of columns
-        if batch_array.len() != column_names.len() {
-            return Err(MagnusError::new(
-                ruby.exception_runtime_error(),
-                format!(
-                    "Batch has {} columns but schema has {}",
-                    batch_array.len(),
-                    column_names.len()
-                ),
-            ));
-        }
-
-        // Process each column in the batch
-        for (col_idx, column_values) in batch_array.into_iter().enumerate() {
-            if !column_values.is_kind_of(ruby.class_array()) {
-                return Err(MagnusError::new(
-                    ruby.exception_type_error(),
-                    format!("Column {} values must be an array", col_idx),
-                ));
-            }
-
-            let values_array: RArray = TryConvert::try_convert(column_values)?;
-
-            // Initialize column vector on first batch
-            if batch_idx == 0 {
-                all_columns.push((column_names[col_idx].clone(), Vec::new()));
-            }
-
-            // Convert and append values
-            let mut converter = RubyValueConverter::new();
-            let schema_hint = field_schemas.get(col_idx);
-
-            for value in values_array.into_iter() {
-                let pq_value = converter
-                    .to_parquet_with_schema_hint(value, schema_hint)
-                    .map_err(|e| {
-                        let error_msg = e.to_string();
-                        // Check if this is an encoding error
-                        if error_msg.contains("EncodingError")
-                            || error_msg.contains("invalid utf-8")
-                        {
-                            // Extract the actual encoding error message
-                            if let Some(pos) = error_msg.find("EncodingError: ") {
-                                let encoding_msg = error_msg[pos + 15..].to_string();
-                                MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
-                            } else {
-                                MagnusError::new(ruby.exception_encoding_error(), error_msg)
-                            }
-                        } else {
-                            MagnusError::new(ruby.exception_runtime_error(), error_msg)
-                        }
-                    })?;
-                all_columns[col_idx].1.push(pq_value);
+    match source {
+        BatchSource::Materialized(batches) => {
+            for batch in batches.into_iter() {
+                total_rows += write_column_batch(
+                    ruby,
+                    &mut writer_output,
+                    &field_schemas,
+                    &column_names,
+                    batch,
+                )?;
             }
         }
-    }
-
-    let total_rows = all_columns
-        .first()
-        .map(|(_name, values)| values.len())
-        .unwrap_or(0);
-
-    // Write the columns
-    match &mut writer_output {
-        WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
-            writer
-                .write_columns(all_columns)
-                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        BatchSource::Streamed {
+            first_batch,
+            remaining,
+        } => {
+            if let Some(batch) = first_batch {
+                total_rows += write_column_batch(
+                    ruby,
+                    &mut writer_output,
+                    &field_schemas,
+                    &column_names,
+                    batch,
+                )?;
+            }
+            for batch in remaining {
+                total_rows += write_column_batch(
+                    ruby,
+                    &mut writer_output,
+                    &field_schemas,
+                    &column_names,
+                    batch?,
+                )?;
+            }
         }
     }
 

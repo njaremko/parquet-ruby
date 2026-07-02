@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- `Parquet.write_rows` and `Parquet.write_columns` now stream to the destination
+  instead of buffering the entire file in memory. An Enumerator (or any
+  Enumerable) input is consumed in bounded slices (`batch_size` rows at a time
+  for `write_rows`, one batch at a time for `write_columns`) rather than being
+  drained with `to_a` before writing, and completed row groups are flushed to
+  the destination file once `flush_threshold` is exceeded. Peak write memory is
+  now bounded by `batch_size`/`flush_threshold` instead of growing with the
+  total dataset size, and the destination file grows during the write. Inputs
+  that only respond to `to_a` (and plain Arrays) are still materialized as
+  before. When `write_to:` is an IO object, output is staged in a temporary
+  file on disk and copied to the IO at the end (unchanged). Row-group
+  boundaries may differ from previous releases; file contents are unchanged.
+  `flush_threshold: 0` is now rejected (like `batch_size: 0`) instead of being
+  treated as "flush constantly".
 - `string_cache:` on `Parquet.write_rows` now also accepts an Integer to set the cache
   capacity (`true` uses the default, `false` disables); a non-positive, excessive,
   or non-boolean/non-integer value is rejected. Retention is bounded by entry count,
@@ -14,9 +28,9 @@
   bounded by both entry count and retained bytes.
 - Unify write batch sizing: the core writer now owns all batching/flushing (the adapter no
   longer keeps a second, separately-tuned batch manager), and `batch_size:`/`flush_threshold:`/
-  `sample_size:` are forwarded to it. `flush_threshold` now bounds the writer's in-progress
-  (encoded) buffer rather than an estimate of pre-encode row bytes, and its default is 100MB
-  (was 64MB). Per-batch debug log lines are no longer emitted.
+  `sample_size:` are forwarded to it. `flush_threshold` bounds both the raw bytes staged
+  since the last row-group flush and the writer's in-progress (encoded) buffer, and its
+  default is 100MB (was 64MB). Per-batch debug log lines are no longer emitted.
 - Add a `string_storage:` option to `Parquet.each_row`/`each_column` controlling how
   string values become Ruby strings: `:copy` (default, unchanged), `:intern`
   (dedup low-cardinality equal values through a bounded intern cache, then fall

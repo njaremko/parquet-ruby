@@ -106,7 +106,14 @@ pub fn parse_parquet_write_args(
             kwargs.optional.0.flatten(),
             MAX_BATCH_SIZE,
         )?,
-        flush_threshold: kwargs.optional.1.flatten(),
+        // A zero threshold would flush a row group per row; reject it like the
+        // other sizing options rather than producing a pathological file.
+        flush_threshold: parse_positive_bounded_usize(
+            ruby,
+            "flush_threshold",
+            kwargs.optional.1.flatten(),
+            usize::MAX,
+        )?,
         compression: kwargs.optional.2.flatten(),
         sample_size: parse_positive_bounded_usize(
             ruby,

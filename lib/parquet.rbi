@@ -102,9 +102,11 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #   - `write_to`: String path or IO object to write the parquet file to
   #   - `batch_size`: Optional positive batch size for writing (defaults to 1000, at most 1_000_000
-  #                   for one-column schemas; wide schemas may have a lower safety cap)
-  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
-  #                        buffer before a row group is flushed (defaults to 100MB)
+  #                   for one-column schemas; wide schemas may have a lower safety cap). Enumerator
+  #                   inputs are consumed in slices of this many rows, never materialized in full.
+  #   - `flush_threshold`: Optional threshold in bytes before a row group is flushed to the
+  #                        destination; bounds both the raw bytes staged since the last flush
+  #                        and the writer's encoded in-progress buffer (defaults to 100MB)
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   #   - `sample_size`: Optional positive number of rows to sample for size estimation
@@ -151,8 +153,9 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #     - Looks like [{"column_name" => {"type" => "date32", "format" => "%Y-%m-%d"}}, {"column_name" => "int8"}]
   #   - `write_to`: String path or IO object to write the parquet file to
-  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
-  #                        buffer before a row group is flushed (defaults to 100MB)
+  #   - `flush_threshold`: Optional threshold in bytes before a row group is flushed to the
+  #                        destination; bounds both the raw bytes staged since the last flush
+  #                        and the writer's encoded in-progress buffer (defaults to 100MB)
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   #   - `logger`: Optional Ruby logger for column-write progress messages

@@ -637,7 +637,16 @@ fn build_float64_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
 
 /// Build string array
 fn build_string_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
-    let mut builder = StringBuilder::with_capacity(values.len(), 0);
+    // Pre-size the data buffer exactly: growing it by doubling would
+    // transiently hold up to 3x the payload during the final realloc.
+    let data_capacity: usize = values
+        .iter()
+        .map(|value| match value {
+            ParquetValue::String(s) => s.len(),
+            _ => 0,
+        })
+        .sum();
+    let mut builder = StringBuilder::with_capacity(values.len(), data_capacity);
     for value in values {
         match *value {
             ParquetValue::String(s) => builder.append_value(s.as_ref()),
@@ -655,7 +664,15 @@ fn build_string_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
 
 /// Build binary array
 fn build_binary_array(values: &[&ParquetValue]) -> Result<ArrayRef> {
-    let mut builder = BinaryBuilder::with_capacity(values.len(), 0);
+    // Pre-size the data buffer exactly, as in build_string_array.
+    let data_capacity: usize = values
+        .iter()
+        .map(|value| match value {
+            ParquetValue::Bytes(b) => b.len(),
+            _ => 0,
+        })
+        .sum();
+    let mut builder = BinaryBuilder::with_capacity(values.len(), data_capacity);
     for value in values {
         match *value {
             ParquetValue::Bytes(b) => builder.append_value(b.as_ref()),
