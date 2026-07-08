@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add `Parquet.repack` for streaming Parquet files with matching schemas
 - `string_cache:` on `Parquet.write_rows` now also accepts an Integer to set the cache
   capacity (`true` uses the default, `false` disables); a non-positive, excessive,
   or non-boolean/non-integer value is rejected. Retention is bounded by entry count,

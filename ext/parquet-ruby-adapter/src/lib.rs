@@ -72,13 +72,14 @@ pub use metadata::{parse_metadata, RubyParquetMetaData};
 
 pub mod types;
 pub use types::{
-    ColumnEnumeratorArgs, ParquetWriteArgs, ParserResultType, RowEnumeratorArgs, WriterOutput,
+    ColumnEnumeratorArgs, ParquetRepackArgs, ParquetWriteArgs, ParserResultType,
+    RowEnumeratorArgs, WriterOutput,
 };
 
 pub mod utils;
 pub use utils::{
     create_column_enumerator, create_row_enumerator, handle_block_or_enum, parse_compression,
-    parse_parquet_write_args,
+    parse_parquet_repack_args, parse_parquet_write_args,
 };
 
 pub mod reader;
@@ -86,6 +87,9 @@ pub use reader::{each_column, each_row};
 
 pub mod writer;
 pub use writer::{create_writer, finalize_writer, write_columns, write_rows};
+
+pub mod repack;
+pub use repack::repack;
 
 pub mod try_into_value;
 pub use try_into_value::TryIntoValue;

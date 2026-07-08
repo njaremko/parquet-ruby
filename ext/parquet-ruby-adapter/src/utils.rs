@@ -1,7 +1,7 @@
 use magnus::value::ReprValue;
 use magnus::{
     scan_args::{get_kwargs, scan_args},
-    Error as MagnusError, KwArgs, Ruby, TryConvert, Value,
+    Error as MagnusError, KwArgs, RArray, Ruby, TryConvert, Value,
 };
 use parquet::basic::Compression;
 use parquet_core::{MAX_BATCH_SIZE, MAX_SAMPLE_SIZE};
@@ -11,7 +11,7 @@ use crate::string_storage::{
     StringStorageConfig, StringStorageMode, DEFAULT_SHARED_MAX_ENTRIES,
     DEFAULT_SHARED_MAX_VALUE_BYTES,
 };
-use crate::types::{ColumnEnumeratorArgs, ParquetWriteArgs, RowEnumeratorArgs};
+use crate::types::{ColumnEnumeratorArgs, ParquetRepackArgs, ParquetWriteArgs, RowEnumeratorArgs};
 
 /// Reconstruct the `string_storage:` kwarg value for an enumerator so a
 /// block-less call round-trips losslessly: a plain symbol for the mode, or a
@@ -117,6 +117,110 @@ pub fn parse_parquet_write_args(
         logger: kwargs.optional.4.flatten(),
         string_cache: parse_string_cache(ruby, kwargs.optional.5.flatten())?,
     })
+}
+
+pub fn parse_parquet_repack_args(
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<ParquetRepackArgs, MagnusError> {
+    let parsed_args = scan_args::<(Value,), (), (), (), _, ()>(args)?;
+    let (read_from,) = parsed_args.required;
+
+    let kwargs = get_kwargs::<
+        _,
+        (String,),
+        (
+            Option<Option<String>>,
+            Option<Option<usize>>,
+            Option<Option<usize>>,
+            Option<Option<String>>,
+        ),
+        (),
+    >(
+        parsed_args.keywords,
+        &["output_dir"],
+        &[
+            "output_file_prefix",
+            "rows_per_file",
+            "max_read_rows_per_chunk",
+            "compression",
+        ],
+    )?;
+
+    let read_from = parse_path_list(ruby, read_from, "read_from")?;
+    if read_from.is_empty() {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "read_from must include at least one path",
+        ));
+    }
+
+    let rows_per_file = kwargs.optional.1.flatten();
+    if rows_per_file == Some(0) {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "rows_per_file must be greater than 0",
+        ));
+    }
+
+    let max_read_rows_per_chunk = kwargs
+        .optional
+        .2
+        .flatten()
+        .unwrap_or(8192);
+    if max_read_rows_per_chunk == 0 {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "max_read_rows_per_chunk must be greater than 0",
+        ));
+    }
+
+    Ok(ParquetRepackArgs {
+        read_from,
+        output_file_prefix: kwargs
+            .optional
+            .0
+            .flatten()
+            .unwrap_or_else(|| "batch".to_string()),
+        output_dir: kwargs.required.0,
+        rows_per_file,
+        max_read_rows_per_chunk,
+        compression: Some(
+            kwargs
+                .optional
+                .3
+                .flatten()
+                .unwrap_or_else(|| "zstd".to_string()),
+        ),
+    })
+}
+
+fn parse_path_list(ruby: &Ruby, value: Value, name: &str) -> Result<Vec<String>, MagnusError> {
+    if value.is_kind_of(ruby.class_string()) {
+        return Ok(vec![value.to_r_string()?.to_string()?]);
+    }
+
+    if value.is_kind_of(ruby.class_array()) {
+        let array: RArray = TryConvert::try_convert(value)?;
+        let mut paths = Vec::with_capacity(array.len());
+
+        for path_value in array {
+            if !path_value.is_kind_of(ruby.class_string()) {
+                return Err(MagnusError::new(
+                    ruby.exception_type_error(),
+                    format!("{name} must be a String or an Array of Strings"),
+                ));
+            }
+            paths.push(path_value.to_r_string()?.to_string()?);
+        }
+
+        return Ok(paths);
+    }
+
+    Err(MagnusError::new(
+        ruby.exception_type_error(),
+        format!("{name} must be a String or an Array of Strings"),
+    ))
 }
 
 fn parse_positive_bounded_usize(

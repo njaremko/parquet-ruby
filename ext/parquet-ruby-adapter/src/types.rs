@@ -19,6 +19,16 @@ pub struct ParquetWriteArgs {
     pub string_cache: Option<usize>,
 }
 
+#[derive(Debug)]
+pub struct ParquetRepackArgs {
+    pub read_from: Vec<String>,
+    pub output_file_prefix: String,
+    pub output_dir: String,
+    pub rows_per_file: Option<usize>,
+    pub max_read_rows_per_chunk: usize,
+    pub compression: Option<String>,
+}
+
 /// Arguments for creating row enumerators
 pub struct RowEnumeratorArgs {
     pub rb_self: Value,

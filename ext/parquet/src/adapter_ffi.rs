@@ -275,6 +275,12 @@ pub fn write_columns(args: &[Value]) -> Result<Value, MagnusError> {
     parquet_ruby_adapter::writer::write_columns(&ruby, write_args)
 }
 
+pub fn repack(args: &[Value]) -> Result<Value, MagnusError> {
+    let ruby = Ruby::get().expect("Ruby FFI entry point runs while the Ruby GVL is held");
+
+    parquet_ruby_adapter::repack::repack(&ruby, args)
+}
+
 fn reject_row_only_column_write_options(
     write_args: &parquet_ruby_adapter::types::ParquetWriteArgs,
 ) -> Result<(), MagnusError> {
