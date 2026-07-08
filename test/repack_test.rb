@@ -117,6 +117,18 @@ class RepackTest < Minitest::Test
     end
   end
 
+  def test_repack_rejects_invalid_compression
+    input = path("input.parquet")
+    Parquet.write_rows([[1]], schema: [{ "id" => "int64" }], write_to: input)
+
+    error =
+      assert_raises(ArgumentError) do
+        Parquet.repack(input, output_dir: path("output"), compression: "invalid")
+      end
+
+    assert_match(/Invalid compression option/, error.message)
+  end
+
   private
 
   def path(name)
