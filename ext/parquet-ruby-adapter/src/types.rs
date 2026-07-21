@@ -25,7 +25,7 @@ pub struct ParquetRepackArgs {
     pub output_file_prefix: String,
     pub output_dir: String,
     pub rows_per_file: Option<usize>,
-    pub max_read_rows_per_chunk: usize,
+    pub max_read_rows_per_chunk: Option<usize>,
     pub compression: Option<String>,
 }
 

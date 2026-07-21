@@ -163,25 +163,34 @@ pub fn parse_parquet_repack_args(
         ));
     }
 
-    let max_read_rows_per_chunk = kwargs
+    let max_read_rows_per_chunk = parse_positive_bounded_usize(
+        ruby,
+        "max_read_rows_per_chunk",
+        kwargs.optional.2.flatten(),
+        MAX_BATCH_SIZE,
+    )?;
+
+    let output_file_prefix = kwargs
         .optional
-        .2
+        .0
         .flatten()
-        .unwrap_or(8192);
-    if max_read_rows_per_chunk == 0 {
+        .unwrap_or_else(|| "batch".to_string());
+    if output_file_prefix.contains('/') || output_file_prefix.contains('\\') {
         return Err(MagnusError::new(
             ruby.exception_arg_error(),
-            "max_read_rows_per_chunk must be greater than 0",
+            "output_file_prefix must not contain path separators",
+        ));
+    }
+    if std::path::Path::new(&output_file_prefix).is_absolute() {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "output_file_prefix must not be an absolute path",
         ));
     }
 
     Ok(ParquetRepackArgs {
         read_from,
-        output_file_prefix: kwargs
-            .optional
-            .0
-            .flatten()
-            .unwrap_or_else(|| "batch".to_string()),
+        output_file_prefix,
         output_dir: kwargs.required.0,
         rows_per_file,
         max_read_rows_per_chunk,

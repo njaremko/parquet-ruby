@@ -117,6 +117,32 @@ class RepackTest < Minitest::Test
     end
   end
 
+  def test_repack_rejects_path_traversal_in_output_file_prefix
+    input = path("input.parquet")
+    Parquet.write_rows([[1]], schema: [{ "id" => "int64" }], write_to: input)
+
+    ["../escaped", "foo/../bar", ".."].each do |prefix|
+      error =
+        assert_raises(RuntimeError) do
+          Parquet.repack(input, output_dir: path("output"), output_file_prefix: prefix)
+        end
+      assert_match(/output_file_prefix/, error.message)
+    end
+  end
+
+  def test_repack_rejects_absolute_output_file_prefix
+    input = path("input.parquet")
+    Parquet.write_rows([[1]], schema: [{ "id" => "int64" }], write_to: input)
+
+    ["/tmp/escaped", "/etc/passwd"].each do |prefix|
+      error =
+        assert_raises(RuntimeError) do
+          Parquet.repack(input, output_dir: path("output"), output_file_prefix: prefix)
+        end
+      assert_match(/output_file_prefix/, error.message)
+    end
+  end
+
   def test_repack_rejects_invalid_compression
     input = path("input.parquet")
     Parquet.write_rows([[1]], schema: [{ "id" => "int64" }], write_to: input)

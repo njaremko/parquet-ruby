@@ -181,7 +181,8 @@ module Parquet
   #   - `output_file_prefix`: File name prefix for outputs, default "batch"
   #   - `output_dir`: Directory where {output_file_prefix}-{n}.parquet files will be written
   #   - `rows_per_file`: Optional maximum number of rows per output file. When nil, all input rows are concatenated into one file.
-  #   - `max_read_rows_per_chunk`: Optional maximum number of rows to read per chunk, default 8192
+  #   - `max_read_rows_per_chunk`: Optional upper bound for rows to read per chunk, default 8192
+  #     and reduced for wide schemas to keep buffered value slots bounded
   #   - `compression`: Optional compression type to use, default "zstd"
   sig do
     params(

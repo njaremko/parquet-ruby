@@ -186,6 +186,8 @@ Parquet.repack(
 ```
 
 Omit `rows_per_file:` to concatenate all input rows into a single output file.
+`max_read_rows_per_chunk:` is an upper bound; wide schemas may use a smaller
+effective read chunk to keep buffered value slots bounded.
 
 ### Column-wise Writing
 
