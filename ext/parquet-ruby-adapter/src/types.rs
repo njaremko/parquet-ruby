@@ -1,5 +1,6 @@
 use crate::string_storage::StringStorageConfig;
 use magnus::Value;
+use parquet::basic::Compression;
 use std::fs::File;
 use std::str::FromStr;
 use tempfile::NamedTempFile;
@@ -19,6 +20,12 @@ pub struct ParquetWriteArgs {
     pub string_cache: Option<usize>,
 }
 
+/// A fully validated `Parquet.repack` request.
+///
+/// Every field is checked while the GVL is held, so the repack itself never has
+/// to re-derive caller intent or raise Ruby-shaped errors from the GVL-free
+/// phase. In particular `read_from` is guaranteed non-empty and
+/// `output_file_prefix` is guaranteed to be a single plain filename component.
 #[derive(Debug)]
 pub struct ParquetRepackArgs {
     pub read_from: Vec<String>,
@@ -26,7 +33,12 @@ pub struct ParquetRepackArgs {
     pub output_dir: String,
     pub rows_per_file: Option<usize>,
     pub max_read_rows_per_chunk: Option<usize>,
-    pub compression: Option<String>,
+    /// `None` means "keep whatever codec the inputs already use"; the concrete
+    /// codec is resolved from the first input once its metadata is read.
+    pub compression: Option<Compression>,
+    /// Whether repack may replace an existing `{prefix}-{n}.parquet` set in
+    /// `output_dir`. When false, a populated output namespace is an error.
+    pub overwrite: bool,
 }
 
 /// Arguments for creating row enumerators

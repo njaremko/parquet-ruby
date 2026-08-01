@@ -72,8 +72,8 @@ pub use metadata::{parse_metadata, RubyParquetMetaData};
 
 pub mod types;
 pub use types::{
-    ColumnEnumeratorArgs, ParquetRepackArgs, ParquetWriteArgs, ParserResultType,
-    RowEnumeratorArgs, WriterOutput,
+    ColumnEnumeratorArgs, ParquetRepackArgs, ParquetWriteArgs, ParserResultType, RowEnumeratorArgs,
+    WriterOutput,
 };
 
 pub mod utils;

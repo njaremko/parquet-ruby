@@ -119,6 +119,11 @@ pub fn parse_parquet_write_args(
     })
 }
 
+/// Parse and fully validate a `Parquet.repack` call.
+///
+/// This is the single owner of request validation: nothing downstream re-checks
+/// caller intent, so every rejection reaches Ruby as an `ArgumentError` or
+/// `TypeError` from here rather than as a `RuntimeError` from mid-repack.
 pub fn parse_parquet_repack_args(
     ruby: &Ruby,
     args: &[Value],
@@ -134,6 +139,7 @@ pub fn parse_parquet_repack_args(
             Option<Option<usize>>,
             Option<Option<usize>>,
             Option<Option<String>>,
+            Option<Option<bool>>,
         ),
         (),
     >(
@@ -144,6 +150,7 @@ pub fn parse_parquet_repack_args(
             "rows_per_file",
             "max_read_rows_per_chunk",
             "compression",
+            "overwrite",
         ],
     )?;
 
@@ -170,38 +177,67 @@ pub fn parse_parquet_repack_args(
         MAX_BATCH_SIZE,
     )?;
 
+    let output_dir = kwargs.required.0;
+    if output_dir.is_empty() {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "output_dir must not be empty",
+        ));
+    }
+
     let output_file_prefix = kwargs
         .optional
         .0
         .flatten()
         .unwrap_or_else(|| "batch".to_string());
-    if output_file_prefix.contains('/') || output_file_prefix.contains('\\') {
-        return Err(MagnusError::new(
-            ruby.exception_arg_error(),
-            "output_file_prefix must not contain path separators",
-        ));
-    }
-    if std::path::Path::new(&output_file_prefix).is_absolute() {
-        return Err(MagnusError::new(
-            ruby.exception_arg_error(),
-            "output_file_prefix must not be an absolute path",
-        ));
-    }
+    validate_output_file_prefix(ruby, &output_file_prefix)?;
+
+    // An absent `compression:` means "keep the inputs' codec", which lets whole
+    // row groups be spliced byte-for-byte instead of decoded and re-encoded.
+    let compression = match kwargs.optional.3.flatten() {
+        Some(name) => Some(parse_compression(ruby, Some(name))?),
+        None => None,
+    };
 
     Ok(ParquetRepackArgs {
         read_from,
         output_file_prefix,
-        output_dir: kwargs.required.0,
+        output_dir,
         rows_per_file,
         max_read_rows_per_chunk,
-        compression: Some(
-            kwargs
-                .optional
-                .3
-                .flatten()
-                .unwrap_or_else(|| "zstd".to_string()),
-        ),
+        compression,
+        overwrite: kwargs.optional.4.flatten().unwrap_or(false),
     })
+}
+
+/// Reject any `output_file_prefix` that could name a file outside `output_dir`.
+///
+/// The prefix must be exactly one ordinary filename component: no separators, no
+/// `.`/`..`, no root or drive prefix. Checking components rather than scanning
+/// for `/` catches platform-specific separators and traversal in one rule.
+fn validate_output_file_prefix(ruby: &Ruby, prefix: &str) -> Result<(), MagnusError> {
+    let invalid = |detail: &str| {
+        Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            format!("output_file_prefix {detail}: {prefix:?}"),
+        ))
+    };
+
+    if prefix.is_empty() {
+        return invalid("must not be empty");
+    }
+
+    let path = std::path::Path::new(prefix);
+    let mut components = path.components();
+    match components.next() {
+        Some(std::path::Component::Normal(_)) => {}
+        _ => return invalid("must be a plain filename, not a path"),
+    }
+    if components.next().is_some() {
+        return invalid("must be a plain filename, not a path");
+    }
+
+    Ok(())
 }
 
 fn parse_path_list(ruby: &Ruby, value: Value, name: &str) -> Result<Vec<String>, MagnusError> {
