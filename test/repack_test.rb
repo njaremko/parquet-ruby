@@ -211,7 +211,15 @@ class RepackTest < Minitest::Test
 
   # Concatenability is a property of the columns, not of who wrote the file.
   # These two fixtures hold the same `id` column but differ in file-level
-  # key/value metadata, which must not make them unmergeable.
+  # key/value metadata, which must not make them unmergeable. They are written
+  # by pyarrow because this gem cannot produce that difference; regenerate with:
+  #
+  #   uv run --with pyarrow --with pandas python -c "
+  #   import pyarrow as pa, pyarrow.parquet as pq, pandas as pd
+  #   pq.write_table(pa.table({'id': pa.array([1, 2], pa.int64())}),
+  #                  'repack_no_kv_metadata.parquet', compression='snappy')
+  #   pd.DataFrame({'id': [3, 4]}).astype('int64').to_parquet(
+  #       'repack_pandas_kv_metadata.parquet', engine='pyarrow', compression='snappy')"
   def test_inputs_differing_only_in_key_value_metadata_concatenate
     inputs = %w[repack_no_kv_metadata.parquet repack_pandas_kv_metadata.parquet]
              .map { |name| File.join(FIXTURE_DIR, name) }

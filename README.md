@@ -172,22 +172,67 @@ Parquet.write_rows(rows,
 
 ### Repacking Existing Parquet Files
 
-Concatenate and/or split Parquet files with matching schemas while preserving the input schema.
+Concatenate Parquet files and re-split them into differently sized files without
+translating rows through Ruby.
 
 ```ruby
 Parquet.repack(
   ["input-0.parquet", "input-1.parquet"],
-  output_file_prefix: "batch",
   output_dir: "repacked",
-  rows_per_file: 100_000,
-  max_read_rows_per_chunk: 8192,
-  compression: "zstd"
+  rows_per_file: 100_000
 )
+# => [{ "path" => "repacked/batch-0.parquet", "num_rows" => 100_000 },
+#     { "path" => "repacked/batch-1.parquet", "num_rows" => 42_137 }]
 ```
 
-Omit `rows_per_file:` to concatenate all input rows into a single output file.
-`max_read_rows_per_chunk:` is an upper bound; wide schemas may use a smaller
-effective read chunk to keep buffered value slots bounded.
+The outputs hold exactly the input rows, in input order. Every output but the
+last holds `rows_per_file` rows, and there is always at least one output even
+when the inputs are empty. Omit `rows_per_file:` to concatenate everything into
+a single file.
+
+Each output's Parquet schema is identical to the first input's, and that input's
+file-level key/value metadata (`ARROW:schema`, `pandas`, and so on) is carried
+over. Inputs must agree on leaf column shape — path, physical and logical type,
+nesting — but may differ in key/value metadata and Parquet field ids.
+
+#### Compression and copying
+
+With no `compression:`, the inputs' codec is preserved. That also lets repack
+copy whole row groups into the output byte-for-byte, skipping decompression and
+re-encoding entirely — the common case of "same data, different file sizes" is
+close to an I/O-bound copy. Naming a different codec forces a re-encode:
+
+```ruby
+Parquet.repack("input.parquet", output_dir: "out", compression: "zstd")
+```
+
+Row groups that straddle an output boundary are re-encoded even when the codec
+matches, since a copied row group cannot be split.
+
+#### Output directory ownership
+
+`repack` owns the `{output_file_prefix}-{n}.parquet` names in `output_dir`. If
+any already exist it raises `ArgumentError` rather than mixing two runs' files
+in one directory:
+
+```ruby
+Parquet.repack("input.parquet", output_dir: "out", rows_per_file: 1000, overwrite: true)
+```
+
+`overwrite: true` replaces that set and deletes members left over from a longer
+earlier run, so the returned list always equals what a reader finds in the
+directory. Files outside the set are never touched.
+
+#### Bounds
+
+`max_read_rows_per_chunk:` (default 8192, reduced for wide schemas) bounds rows
+buffered while reading; output row groups are bounded by the same slot budget.
+Both are resource controls only — varying them cannot change the result. Peak
+memory therefore does not depend on total input size.
+
+Reading and writing run with the GVL released, so other Ruby threads keep
+running and `Interrupt` / `Timeout` are honoured. An interrupted call leaves no
+output behind.
 
 ### Column-wise Writing
 
