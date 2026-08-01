@@ -35,14 +35,24 @@ SCHEMA = {
   ]
 }.freeze
 
+REPEATS = Integer(ENV.fetch("REPEATS", 5))
+
+# Best of N. The splice path can finish in single-digit milliseconds, which is
+# well inside the noise of one un-warmed call, so a single measurement says more
+# about machine load than about the code. The minimum is the least-contaminated
+# estimate of the work actually required.
 def elapsed
-  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  result = yield
-  [Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, result]
+  result = nil
+  best = REPEATS.times.map do |iteration|
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    result = yield iteration
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  end.min
+  [best, result]
 end
 
 def report(label, bytes)
-  seconds, outputs = elapsed { yield }
+  seconds, outputs = elapsed { |iteration| yield iteration }
   rows = outputs.sum { |output| output["num_rows"] }
   printf("  %-36s %7.3fs  %8.1f MB/s  %11d rows/s  -> %d file(s), %d rows\n",
          label, seconds, bytes / seconds / 1024.0 / 1024.0, rows / seconds, outputs.size, rows)
@@ -69,31 +79,34 @@ Dir.mktmpdir("parquet_repack_bench") do |dir|
   puts "inputs: #{INPUT_FILES} files, #{ROWS} rows, #{CODEC}, #{(bytes / 1024.0 / 1024.0).round(1)} MB total"
   puts
 
-  puts "concatenate into one file"
-  spliced = report("splice (keeps input codec)", bytes) do
-    Parquet.repack(inputs, output_dir: File.join(dir, "splice"))
+  # `repack` owns its output namespace and refuses a populated one, so every
+  # repeat needs a directory of its own.
+  puts "concatenate into one file (best of #{REPEATS})"
+  spliced = report("splice (keeps input codec)", bytes) do |iteration|
+    Parquet.repack(inputs, output_dir: File.join(dir, "splice-#{iteration}"))
   end
-  re_encoded = report("re-encode (different codec)", bytes) do
-    Parquet.repack(inputs, output_dir: File.join(dir, "recode"),
+  re_encoded = report("re-encode (different codec)", bytes) do |iteration|
+    Parquet.repack(inputs, output_dir: File.join(dir, "recode-#{iteration}"),
                    compression: CODEC == "zstd" ? "snappy" : "zstd")
   end
   puts
 
   puts "split"
-  report("rows_per_file aligned to inputs", bytes) do
-    Parquet.repack(inputs, output_dir: File.join(dir, "aligned"), rows_per_file: ROWS_PER_INPUT)
+  report("rows_per_file aligned to inputs", bytes) do |iteration|
+    Parquet.repack(inputs, output_dir: File.join(dir, "aligned-#{iteration}"),
+                   rows_per_file: ROWS_PER_INPUT)
   end
-  report("rows_per_file mid-row-group", bytes) do
-    Parquet.repack(inputs, output_dir: File.join(dir, "straddle"),
+  report("rows_per_file mid-row-group", bytes) do |iteration|
+    Parquet.repack(inputs, output_dir: File.join(dir, "straddle-#{iteration}"),
                    rows_per_file: (ROWS_PER_INPUT * 0.7).to_i)
   end
   puts
 
   puts "for contrast: the same rows through Ruby"
-  via_ruby, = elapsed do
+  via_ruby, = elapsed do |iteration|
     Parquet.write_rows(
       Enumerator.new { |y| inputs.each { |p| Parquet.each_row(p, result_type: :array).each { |r| y << r } } },
-      schema: SCHEMA, write_to: File.join(dir, "via_ruby.parquet"), compression: CODEC
+      schema: SCHEMA, write_to: File.join(dir, "via_ruby-#{iteration}.parquet"), compression: CODEC
     )
   end
   printf("  %-36s %7.3fs  %8.1f MB/s  %11d rows/s\n",

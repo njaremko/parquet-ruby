@@ -20,10 +20,9 @@ use std::path::{Path, PathBuf};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_writer::{compute_leaves, ArrowColumnWriter, ArrowRowGroupWriterFactory};
-use parquet::basic::Compression;
 use parquet::column::writer::ColumnCloseResult;
 use parquet::file::metadata::{KeyValue, ParquetMetaData, RowGroupMetaData};
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::TypePtr;
 use tempfile::{NamedTempFile, TempPath};
@@ -31,7 +30,7 @@ use tempfile::{NamedTempFile, TempPath};
 use crate::error::{Result, RubyAdapterError};
 
 use super::io_error;
-use super::plan::MAX_ROW_GROUPS_PER_FILE;
+use super::plan::{OutputCodec, MAX_ROW_GROUPS_PER_FILE};
 
 /// An output file whose bytes are complete but which has not yet been given its
 /// final name. Keeping the rename until every output is closed means a failed
@@ -53,6 +52,9 @@ pub struct OutputFile {
     column_writers: ArrowRowGroupWriterFactory,
     arrow_schema: SchemaRef,
     encoding: Option<EncodingRowGroup>,
+    /// Whether this file builds a page index. Fixed at creation because every
+    /// row group in a Parquet file must agree.
+    write_page_index: bool,
     /// Upper bound on rows held in `encoding` before it is flushed. This is the
     /// writer-side counterpart to the reader's chunk bound, and it is what keeps
     /// peak memory independent of total input size.
@@ -63,21 +65,32 @@ pub struct OutputFile {
     final_path: PathBuf,
 }
 
+/// The parts of an output file that the plan fixes once and every output of a
+/// run shares. Borrowed so rotating to the next output costs no copies beyond
+/// what the writer itself must own.
+pub struct OutputSpec<'a> {
+    /// The first input's Parquet root group, reused verbatim so the output's
+    /// column descriptors are byte-identical to the inputs' and copied chunks
+    /// are accepted without translation.
+    pub root_type: &'a TypePtr,
+    pub arrow_schema: &'a SchemaRef,
+    pub key_value_metadata: &'a Option<Vec<KeyValue>>,
+    pub codec: &'a OutputCodec,
+    pub write_page_index: bool,
+    pub max_row_group_rows: usize,
+}
+
 impl OutputFile {
-    /// Create the `index`th output as a temporary file inside `output_dir`.
-    ///
-    /// `root_type` is the first input's Parquet root group, reused verbatim so
-    /// the output's column descriptors are byte-identical to the inputs' and
-    /// spliced chunks are accepted without translation.
-    pub fn create(
-        output_dir: &Path,
-        final_path: PathBuf,
-        root_type: TypePtr,
-        arrow_schema: SchemaRef,
-        key_value_metadata: Option<Vec<KeyValue>>,
-        compression: Compression,
-        max_row_group_rows: usize,
-    ) -> Result<Self> {
+    /// Create one output as a temporary file inside `output_dir`.
+    pub fn create(output_dir: &Path, final_path: PathBuf, spec: &OutputSpec<'_>) -> Result<Self> {
+        let OutputSpec {
+            root_type,
+            arrow_schema,
+            key_value_metadata,
+            codec,
+            write_page_index,
+            max_row_group_rows,
+        } = *spec;
         std::fs::create_dir_all(output_dir).map_err(|source| {
             io_error(
                 format!("failed to create output directory {output_dir:?}"),
@@ -98,21 +111,46 @@ impl OutputFile {
             )
         })?;
 
-        let properties = WriterProperties::builder()
-            .set_compression(compression)
+        let mut builder = WriterProperties::builder()
             .set_max_row_group_row_count(Some(max_row_group_rows))
-            .set_key_value_metadata(key_value_metadata)
-            .build();
+            .set_key_value_metadata(key_value_metadata.clone());
+        builder = match codec {
+            OutputCodec::Force(compression) => builder.set_compression(*compression),
+            // Per-column so a re-encoded chunk lands on the same codec the
+            // corresponding spliced chunks keep, making "preserve" true whichever
+            // path a given row group takes.
+            OutputCodec::Preserve {
+                per_column,
+                default,
+            } => per_column.iter().fold(
+                builder.set_compression(*default),
+                |builder, (path, compression)| {
+                    builder.set_column_compression(path.clone(), *compression)
+                },
+            ),
+        };
+        if !write_page_index {
+            // A spliced row group can only contribute the index its source had,
+            // so when any input lacks one the output must not build one either:
+            // the footer writer cannot represent a file where some row groups
+            // have an offset index and others do not, and panics trying.
+            // Chunk-level statistics are unaffected; only page-level ones go.
+            builder = builder
+                .set_offset_index_disabled(true)
+                .set_statistics_enabled(EnabledStatistics::Chunk);
+        }
 
-        let writer = SerializedFileWriter::new(handle, root_type, properties.into())
+        let writer = SerializedFileWriter::new(handle, root_type.clone(), builder.build().into())
             .map_err(|source| parquet_error(&final_path, source))?;
         let column_writers = ArrowRowGroupWriterFactory::new(&writer, arrow_schema.clone());
+        let arrow_schema = arrow_schema.clone();
 
         Ok(Self {
             writer,
             column_writers,
             arrow_schema,
             encoding: None,
+            write_page_index,
             max_row_group_rows,
             row_groups_written: 0,
             rows_written: 0,
@@ -125,32 +163,8 @@ impl OutputFile {
         self.rows_written
     }
 
-    /// Whether an input row group of `rows` rows may be spliced in whole.
-    ///
-    /// Splicing preserves the input's exact encodings, so it is only correct
-    /// when the caller has not asked for a different codec, and only possible
-    /// when the whole row group fits the remaining budget — a spliced chunk
-    /// cannot be cut in half.
-    pub fn can_splice(
-        &self,
-        input_splice_compatible: bool,
-        row_group: &RowGroupMetaData,
-        compression: Compression,
-        rows_remaining: Option<usize>,
-    ) -> bool {
-        if !input_splice_compatible || self.row_groups_written >= MAX_ROW_GROUPS_PER_FILE {
-            return false;
-        }
-
-        let rows = row_group.num_rows() as usize;
-        if rows == 0 || rows_remaining.is_some_and(|remaining| rows > remaining) {
-            return false;
-        }
-
-        row_group
-            .columns()
-            .iter()
-            .all(|column| same_codec(column.compression(), compression))
+    pub fn row_groups_written(&self) -> usize {
+        self.row_groups_written
     }
 
     /// Copy every column chunk of `row_group_index` from `source` into a fresh
@@ -185,16 +199,29 @@ impl OutputFile {
                 // re-encode path, which does not build them either, so both
                 // strategies produce the same optional structures.
                 bloom_filter: None,
-                column_index: metadata
-                    .column_index()
-                    .and_then(|index| index.get(row_group_index))
-                    .and_then(|columns| columns.get(column_index))
-                    .cloned(),
-                offset_index: metadata
-                    .offset_index()
-                    .and_then(|index| index.get(row_group_index))
-                    .and_then(|columns| columns.get(column_index))
-                    .cloned(),
+                // Only pass indexes through when the output builds them at all.
+                // Every row group in a file must agree, and `write_page_index`
+                // is false exactly when some contributing input has none.
+                column_index: self
+                    .write_page_index
+                    .then(|| {
+                        metadata
+                            .column_index()
+                            .and_then(|index| index.get(row_group_index))
+                            .and_then(|columns| columns.get(column_index))
+                            .cloned()
+                    })
+                    .flatten(),
+                offset_index: self
+                    .write_page_index
+                    .then(|| {
+                        metadata
+                            .offset_index()
+                            .and_then(|index| index.get(row_group_index))
+                            .and_then(|columns| columns.get(column_index))
+                            .cloned()
+                    })
+                    .flatten(),
             };
 
             row_group_writer
@@ -253,7 +280,10 @@ impl OutputFile {
                 leaf_index += 1;
             }
         }
-        debug_assert_eq!(
+        // Not a debug assertion: a batch with fewer columns than the schema
+        // would silently write a row group whose column chunks disagree on
+        // value counts, i.e. a corrupt file rather than a crash.
+        assert_eq!(
             leaf_index,
             open.writers.len(),
             "every leaf column must receive the batch"
@@ -322,13 +352,50 @@ impl OutputFile {
     }
 }
 
-/// Whether two compression settings name the same codec.
+/// Everything the splice decision depends on, gathered by the caller from the
+/// plan and the open output.
 ///
-/// Parquet records only the codec in a column chunk, never the level a writer
-/// used, so comparing whole `Compression` values would spuriously disable
-/// splicing whenever levels differ.
-fn same_codec(left: Compression, right: Compression) -> bool {
-    std::mem::discriminant(&left) == std::mem::discriminant(&right)
+/// This is a value so [`can_splice`] can be a pure predicate. It used to be a
+/// method that materialised an output file in order to answer, which meant a
+/// query could publish an empty file.
+pub struct SpliceBudget<'a> {
+    pub input_splice_compatible: bool,
+    /// Borrowed: the decision runs once per input row group, and `Preserve`
+    /// carries a per-column table that must not be cloned that often.
+    pub codec: &'a OutputCodec,
+    /// Rows the open output may still accept; `None` when unbounded.
+    pub rows_remaining: Option<usize>,
+    /// Row groups the open output may still start.
+    pub row_groups_remaining: usize,
+    /// Row groups smaller than this are merged by the re-encode path instead.
+    pub min_spliceable_rows: usize,
+}
+
+/// Whether an input row group may be copied into the output verbatim.
+///
+/// Copying is only possible when the whole group fits the remaining budget — a
+/// spliced chunk cannot be cut in half — and only worthwhile when the group is
+/// large enough that the output does not inherit a pathological layout.
+pub fn can_splice(row_group: &RowGroupMetaData, budget: &SpliceBudget<'_>) -> bool {
+    if !budget.input_splice_compatible || budget.row_groups_remaining == 0 {
+        return false;
+    }
+
+    let rows = row_group.num_rows() as usize;
+    if rows < budget.min_spliceable_rows {
+        return false;
+    }
+    if budget
+        .rows_remaining
+        .is_some_and(|remaining| rows > remaining)
+    {
+        return false;
+    }
+
+    row_group
+        .columns()
+        .iter()
+        .all(|column| budget.codec.accepts_spliced(column.compression()))
 }
 
 fn parquet_error(path: &Path, source: parquet::errors::ParquetError) -> RubyAdapterError {
@@ -346,32 +413,138 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parquet::basic::{BrotliLevel, GzipLevel, ZstdLevel};
+    use parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
+    use parquet::file::metadata::ColumnChunkMetaData;
+    use parquet::schema::types::{SchemaDescriptor, Type};
+    use std::sync::Arc;
 
-    #[test]
-    fn same_codec_ignores_compression_level() {
-        assert!(same_codec(
-            Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
-            Compression::ZSTD(ZstdLevel::try_new(9).unwrap())
-        ));
-        assert!(same_codec(
-            Compression::GZIP(GzipLevel::default()),
-            Compression::GZIP(GzipLevel::try_new(9).unwrap())
-        ));
-        assert!(same_codec(Compression::SNAPPY, Compression::SNAPPY));
+    fn budget(codec: &OutputCodec) -> SpliceBudget<'_> {
+        SpliceBudget {
+            input_splice_compatible: true,
+            codec,
+            rows_remaining: None,
+            row_groups_remaining: MAX_ROW_GROUPS_PER_FILE,
+            min_spliceable_rows: 100,
+        }
+    }
+
+    /// A row group of `rows` rows whose single column uses `codec`.
+    fn row_group(rows: i64, codec: Compression) -> RowGroupMetaData {
+        let leaf = Arc::new(
+            Type::primitive_type_builder("id", parquet::basic::Type::INT64)
+                .build()
+                .unwrap(),
+        );
+        let root = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![leaf])
+                .build()
+                .unwrap(),
+        );
+        let descriptor = Arc::new(SchemaDescriptor::new(root));
+        let column = ColumnChunkMetaData::builder(descriptor.column(0))
+            .set_compression(codec)
+            .build()
+            .unwrap();
+        RowGroupMetaData::builder(descriptor)
+            .set_num_rows(rows)
+            .set_column_metadata(vec![column])
+            .build()
+            .unwrap()
+    }
+
+    fn snappy() -> OutputCodec {
+        OutputCodec::Force(Compression::SNAPPY)
+    }
+
+    fn preserve() -> OutputCodec {
+        OutputCodec::Preserve {
+            per_column: Vec::new(),
+            default: Compression::SNAPPY,
+        }
     }
 
     #[test]
-    fn same_codec_separates_distinct_codecs() {
-        assert!(!same_codec(
-            Compression::SNAPPY,
-            Compression::ZSTD(ZstdLevel::default())
+    fn splices_a_large_enough_group_with_a_matching_codec() {
+        let codec = snappy();
+        assert!(can_splice(
+            &row_group(1_000, Compression::SNAPPY),
+            &budget(&codec)
         ));
-        assert!(!same_codec(Compression::UNCOMPRESSED, Compression::SNAPPY));
-        assert!(!same_codec(Compression::LZ4, Compression::LZ4_RAW));
-        assert!(!same_codec(
+    }
+
+    #[test]
+    fn refuses_groups_below_the_size_floor() {
+        // Copying tiny groups would reproduce a fragmented layout in the output.
+        let codec = snappy();
+        assert!(!can_splice(
+            &row_group(99, Compression::SNAPPY),
+            &budget(&codec)
+        ));
+        assert!(!can_splice(
+            &row_group(0, Compression::SNAPPY),
+            &budget(&codec)
+        ));
+        assert!(can_splice(
+            &row_group(100, Compression::SNAPPY),
+            &budget(&codec)
+        ));
+    }
+
+    #[test]
+    fn refuses_a_group_that_does_not_fit_the_remaining_rows() {
+        let codec = snappy();
+        let mut budget = budget(&codec);
+        budget.rows_remaining = Some(999);
+        assert!(!can_splice(&row_group(1_000, Compression::SNAPPY), &budget));
+        budget.rows_remaining = Some(1_000);
+        assert!(can_splice(&row_group(1_000, Compression::SNAPPY), &budget));
+    }
+
+    #[test]
+    fn refuses_when_the_input_is_not_splice_compatible_or_the_file_is_full() {
+        let codec = snappy();
+        let mut budget = budget(&codec);
+        budget.input_splice_compatible = false;
+        assert!(!can_splice(&row_group(1_000, Compression::SNAPPY), &budget));
+
+        let mut budget = self::budget(&codec);
+        budget.row_groups_remaining = 0;
+        assert!(!can_splice(&row_group(1_000, Compression::SNAPPY), &budget));
+    }
+
+    #[test]
+    fn forced_codec_matches_on_codec_identity_not_level() {
+        let codec = OutputCodec::Force(Compression::ZSTD(ZstdLevel::try_new(9).unwrap()));
+        let budget = budget(&codec);
+        // Parquet records only the codec in a chunk, never the level a writer
+        // used, so levels must not participate.
+        assert!(can_splice(
+            &row_group(1_000, Compression::ZSTD(ZstdLevel::try_new(1).unwrap())),
+            &budget
+        ));
+        assert!(!can_splice(&row_group(1_000, Compression::SNAPPY), &budget));
+
+        let snappy = snappy();
+        assert!(!can_splice(
+            &row_group(1_000, Compression::LZ4_RAW),
+            &self::budget(&snappy)
+        ));
+    }
+
+    #[test]
+    fn preserving_codec_splices_whatever_the_chunk_already_has() {
+        // `append_column` writes the source chunk's codec into the output
+        // footer, so preserving needs no codec agreement at all.
+        let codec = preserve();
+        let budget = budget(&codec);
+        for chunk in [
+            Compression::GZIP(GzipLevel::default()),
             Compression::BROTLI(BrotliLevel::default()),
-            Compression::GZIP(GzipLevel::default())
-        ));
+            Compression::UNCOMPRESSED,
+            Compression::ZSTD(ZstdLevel::default()),
+        ] {
+            assert!(can_splice(&row_group(1_000, chunk), &budget), "{chunk:?}");
+        }
     }
 }

@@ -16,16 +16,25 @@
 //! partition(Some(n), rs) = splitEvery n rs
 //! ```
 //!
+//! An output is observed through the returned `{path, num_rows}`, its rows, its
+//! Parquet schema, its file key/value metadata, and its per-column codecs. Page
+//! boundaries, compressed byte counts, and row-group layout are representation:
+//! two runs may differ there while denoting the same value.
+//!
 //! The laws that follow, each covered by a test:
 //!
 //! * rows are preserved in order, none added or dropped;
 //! * every output but the last holds exactly `rows_per_file` rows;
 //! * there is always at least one output, even for zero rows;
 //! * `max_read_rows_per_chunk` does not appear in the denotation, so varying it
-//!   cannot change the result;
+//!   cannot change any observation listed above;
 //! * after a successful call the `{prefix}-{n}.parquet` files in `output_dir`
 //!   are exactly the returned paths;
 //! * every output's Parquet schema is byte-identical to the first input's.
+//!
+//! Two physical routes produce a row group — copying an input's encoded column
+//! chunks, or re-encoding rows through Arrow — and the laws hold for both, so
+//! which one runs is not observable through the list above.
 //!
 //! # Execution
 //!
@@ -37,6 +46,7 @@
 mod output;
 mod plan;
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::File;
 use std::os::raw::c_void;
@@ -57,8 +67,8 @@ use crate::error::{Result, RubyAdapterError};
 use crate::types::ParquetRepackArgs;
 use crate::utils::parse_parquet_repack_args;
 
-use output::{CompletedOutput, OutputFile};
-use plan::{build_plan, InputPlan, RepackPlan};
+use output::{CompletedOutput, OutputFile, SpliceBudget};
+use plan::{build_plan, load_metadata, InputPlan, RepackPlan, MAX_ROW_GROUPS_PER_FILE};
 
 /// How many pre-existing output filenames to name before truncating the list.
 const MAX_REPORTED_CONFLICTS: usize = 5;
@@ -197,19 +207,37 @@ fn repack_files(args: &ParquetRepackArgs, cancelled: &AtomicBool) -> Result<Vec<
                 source,
             )
         })?;
-        let metadata = input.reader_metadata.metadata().clone();
-        let decode_metadata = decode_metadata(input, &plan)?;
+        // Read this input's footer here rather than holding every input's for
+        // the whole run, so peak memory is one footer regardless of input count.
+        let reader_metadata = load_metadata(&input.path)?;
+        let metadata = reader_metadata.metadata().clone();
+        let mut decode_metadata = None;
 
         for row_group_index in 0..metadata.num_row_groups() {
             check_cancelled(cancelled)?;
 
             let row_group = metadata.row_group(row_group_index);
-            if sink.can_splice(input.splice_compatible, row_group)? {
+            // An empty row group contributes no rows, so it must not be able to
+            // influence how the rows are partitioned into outputs.
+            if row_group.num_rows() == 0 {
+                continue;
+            }
+
+            if sink.can_splice(input.splice_compatible, row_group) {
                 sink.splice_row_group(&file, &metadata, row_group_index)?;
                 continue;
             }
 
-            let reader = row_group_reader(&file, &decode_metadata, &plan, row_group_index)?;
+            // Built on first use: an input whose every row group splices never
+            // needs the Arrow field levels this derives.
+            let decode_metadata = match decode_metadata {
+                Some(ref existing) => existing,
+                None => {
+                    decode_metadata.insert(decode_metadata_for(input, &reader_metadata, &plan)?)
+                }
+            };
+
+            let reader = row_group_reader(&file, decode_metadata, &plan, row_group_index)?;
             for batch in reader {
                 let batch = batch.map_err(|source| {
                     RubyAdapterError::runtime(format!(
@@ -228,19 +256,12 @@ fn repack_files(args: &ParquetRepackArgs, cancelled: &AtomicBool) -> Result<Vec<
     // Row preservation is the whole point of repack, and the two physical paths
     // account for rows differently — spliced groups from row-group metadata,
     // encoded ones from batch lengths. Check them against the row groups the
-    // loop above consumed, so a miscount can never reach a caller. Summing the
-    // row groups rather than the files' declared totals keeps this an assertion
-    // about our own bookkeeping instead of about input validity.
-    let rows_in: i64 = plan
-        .inputs
-        .iter()
-        .flat_map(|input| input.reader_metadata.metadata().row_groups())
-        .map(|row_group| row_group.num_rows())
-        .sum();
+    // plan counted, so a miscount can never reach a caller.
     let rows_out: usize = outputs.iter().map(|output| output.num_rows).sum();
     assert_eq!(
-        rows_out as i64, rows_in,
-        "repack wrote {rows_out} rows from inputs holding {rows_in}"
+        rows_out as i64, plan.total_input_rows,
+        "repack wrote {rows_out} rows from inputs holding {}",
+        plan.total_input_rows
     );
 
     persist_outputs(&plan, outputs)
@@ -282,19 +303,21 @@ fn reject_occupied_namespace(plan: &RepackPlan, overwrite: bool) -> Result<()> {
 /// Two files can hold concatenable rows while their `ARROW:schema` hints differ,
 /// which would otherwise yield arrays the output's column writers reject.
 /// Pinning the schema makes every input decode to one Arrow shape.
-fn decode_metadata(input: &InputPlan, plan: &RepackPlan) -> Result<ArrowReaderMetadata> {
+fn decode_metadata_for(
+    input: &InputPlan,
+    reader_metadata: &ArrowReaderMetadata,
+    plan: &RepackPlan,
+) -> Result<ArrowReaderMetadata> {
     let options = ArrowReaderOptions::new()
         .with_page_index_policy(plan::PAGE_INDEX_POLICY)
         .with_schema(plan.arrow_schema.clone());
 
-    ArrowReaderMetadata::try_new(input.reader_metadata.metadata().clone(), options).map_err(
-        |source| {
-            RubyAdapterError::invalid_input(format!(
-                "input {:?} cannot be read with the schema of {:?}: {source}",
-                input.path, plan.inputs[0].path
-            ))
-        },
-    )
+    ArrowReaderMetadata::try_new(reader_metadata.metadata().clone(), options).map_err(|source| {
+        RubyAdapterError::invalid_input(format!(
+            "input {:?} cannot be read with the schema of {:?}: {source}",
+            input.path, plan.inputs[0].path
+        ))
+    })
 }
 
 fn row_group_reader(
@@ -343,11 +366,7 @@ impl<'a> OutputSink<'a> {
             self.current = Some(OutputFile::create(
                 &self.plan.namespace.dir,
                 self.plan.namespace.path_for(index),
-                self.plan.output_root_type.clone(),
-                self.plan.arrow_schema.clone(),
-                self.plan.output_key_value_metadata.clone(),
-                self.plan.compression,
-                self.plan.max_row_group_rows,
+                &self.plan.output_spec(),
             )?);
         }
         Ok(self
@@ -366,21 +385,31 @@ impl<'a> OutputSink<'a> {
         })
     }
 
+    /// A pure query: it must not create an output, or a row group that turns
+    /// out not to be spliceable would leave an empty file behind.
+    ///
+    /// With no output open the answer is the same as for a fresh one, since a
+    /// fresh output has the full row budget and no row groups yet.
     fn can_splice(
-        &mut self,
+        &self,
         splice_compatible: bool,
         row_group: &parquet::file::metadata::RowGroupMetaData,
-    ) -> Result<bool> {
-        // Creating the output first keeps the decision and the write on the same
-        // file, so `rows_remaining` cannot describe a different output.
-        self.current()?;
-        let rows_remaining = self.rows_remaining();
-        let compression = self.plan.compression;
-        Ok(self
+    ) -> bool {
+        let row_groups_written = self
             .current
             .as_ref()
-            .expect("an output file was just ensured")
-            .can_splice(splice_compatible, row_group, compression, rows_remaining))
+            .map_or(0, OutputFile::row_groups_written);
+
+        output::can_splice(
+            row_group,
+            &SpliceBudget {
+                input_splice_compatible: splice_compatible,
+                codec: &self.plan.codec,
+                rows_remaining: self.rows_remaining(),
+                row_groups_remaining: MAX_ROW_GROUPS_PER_FILE - row_groups_written,
+                min_spliceable_rows: self.plan.min_spliceable_rows,
+            },
+        )
     }
 
     fn splice_row_group(
@@ -466,7 +495,7 @@ impl<'a> OutputSink<'a> {
 /// created are removed to restore the state the caller last observed; files it
 /// replaced under `overwrite:` cannot be restored and the error says so.
 fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<Vec<RepackedFile>> {
-    let preexisting: Vec<&Path> = plan
+    let preexisting: HashSet<&Path> = plan
         .namespace
         .existing
         .iter()
@@ -486,7 +515,8 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
 
         if let Err(error) = temp_path.persist(&final_path) {
             let source = error.error;
-            let rollback = remove_files(&created);
+            let replaced = persisted.len() - created.len();
+            let rollback = remove_files(&created, replaced);
             return Err(io_error(
                 format!(
                     "failed to move temporary file to {final_path:?} after publishing {} of \
@@ -497,7 +527,7 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
             ));
         }
 
-        if !preexisting.contains(&final_path.as_path()) {
+        if !preexisting.contains(final_path.as_path()) {
             created.push(final_path.clone());
         }
         persisted.push(RepackedFile {
@@ -506,13 +536,24 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
         });
     }
 
-    // Under `overwrite:`, an earlier longer run may have left members past the
-    // end of this result. Removing them is what makes the returned list equal
-    // to what a reader finds in the directory.
-    for stale in plan.namespace.stale_beyond(persisted.len()) {
-        std::fs::remove_file(stale).map_err(|source| {
+    // Under `overwrite:`, the namespace may still hold members this run did not
+    // write — from a longer earlier run, or under a spelling `path_for` never
+    // produces such as `batch-007.parquet`. Removing exactly the members that
+    // are not part of this result is what makes the returned list equal to what
+    // a reader finds in the directory. Comparing paths rather than indices
+    // matters: an alias like `batch-00.parquet` occupies index 0 and would
+    // otherwise survive alongside the `batch-0.parquet` just written.
+    let published: HashSet<&Path> = persisted
+        .iter()
+        .map(|file| Path::new(file.path.as_str()))
+        .collect();
+    for (_, member) in &plan.namespace.existing {
+        if published.contains(member.as_path()) {
+            continue;
+        }
+        std::fs::remove_file(member).map_err(|source| {
             io_error(
-                format!("failed to remove superseded output {stale:?}"),
+                format!("failed to remove superseded output {member:?}"),
                 source,
             )
         })?;
@@ -523,7 +564,11 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
 
 /// Best-effort removal used only on the rename failure path. Returns a phrase
 /// describing what happened, for inclusion in the error the caller sees.
-fn remove_files(paths: &[PathBuf]) -> String {
+///
+/// `replaced` counts outputs that overwrote a pre-existing file. Those cannot be
+/// rolled back — the original is already gone — so the phrase must say so rather
+/// than stay silent, which is the only case where it is not merely informative.
+fn remove_files(paths: &[PathBuf], replaced: usize) -> String {
     let mut failures = Vec::new();
     for path in paths {
         if let Err(error) = std::fs::remove_file(path) {
@@ -531,16 +576,22 @@ fn remove_files(paths: &[PathBuf]) -> String {
         }
     }
 
-    if paths.is_empty() {
+    let irrecoverable = if replaced == 0 {
         String::new()
+    } else {
+        format!("; {replaced} file(s) already replaced under overwrite: cannot be restored")
+    };
+
+    if paths.is_empty() {
+        irrecoverable
     } else if failures.is_empty() {
         format!(
-            "; the {} file(s) already published were removed",
+            "; the {} newly created file(s) were removed{irrecoverable}",
             paths.len()
         )
     } else {
         format!(
-            "; could not remove {} of the {} file(s) already published: {}",
+            "; could not remove {} of the {} newly created file(s): {}{irrecoverable}",
             failures.len(),
             paths.len(),
             failures.join(", ")

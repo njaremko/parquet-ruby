@@ -197,17 +197,26 @@ nesting — but may differ in key/value metadata and Parquet field ids.
 
 #### Compression and copying
 
-With no `compression:`, the inputs' codec is preserved. That also lets repack
-copy whole row groups into the output byte-for-byte, skipping decompression and
-re-encoding entirely — the common case of "same data, different file sizes" is
-close to an I/O-bound copy. Naming a different codec forces a re-encode:
+With no `compression:`, each column keeps its own codec — Parquet records one
+per column, and a file may legitimately use several. Naming a codec applies it
+to every column instead:
 
 ```ruby
 Parquet.repack("input.parquet", output_dir: "out", compression: "zstd")
 ```
 
-Row groups that straddle an output boundary are re-encoded even when the codec
-matches, since a copied row group cannot be split.
+Keeping the inputs' codecs also lets repack copy whole row groups into the
+output byte-for-byte, skipping decompression and re-encoding entirely. A row
+group is copied when it fits the output's remaining row budget, is large enough
+to be worth copying, and the request did not ask for a different codec;
+otherwise its rows are decoded and re-encoded. Both routes produce the same
+rows, so which one runs is not something callers need to reason about — but the
+copy route is dramatically faster, so a plain concatenation is close to an
+I/O-bound copy.
+
+Small row groups are deliberately merged rather than copied: copying them
+one-for-one would make a compaction of many small files reproduce exactly the
+fragmentation it was meant to remove.
 
 #### Output directory ownership
 
@@ -226,13 +235,32 @@ directory. Files outside the set are never touched.
 #### Bounds
 
 `max_read_rows_per_chunk:` (default 8192, reduced for wide schemas) bounds rows
-buffered while reading; output row groups are bounded by the same slot budget.
-Both are resource controls only — varying them cannot change the result. Peak
-memory therefore does not depend on total input size.
+buffered while reading; output row groups are bounded in rows by the same slot
+budget. Both are resource controls: varying them cannot change the returned
+list, the rows, the schema, or the codecs. They do shift compressed byte counts
+and page boundaries, which are representation rather than contract.
+
+Input metadata is read one file at a time, so peak memory is set by the widest
+single file and its row-group size, not by how many files you pass or how many
+rows they hold in total. Note that the row-group bound is in rows, not bytes: a
+schema with very large values still buffers one row group's worth of encoded
+data.
 
 Reading and writing run with the GVL released, so other Ruby threads keep
 running and `Interrupt` / `Timeout` are honoured. An interrupted call leaves no
 output behind.
+
+A Parquet file cannot hold more than 32767 row groups. Merging small groups
+keeps that limit out of reach in practice; if a single output ever did reach it,
+repack raises rather than writing an unreadable file, and `rows_per_file:` is
+the way out.
+
+#### Page indexes and other optional structures
+
+Every row group in a Parquet file must agree on whether it carries a page index,
+and a copied row group can only contribute the index its source had. So an
+output carries one exactly when every contributing input does. Bloom filters are
+not carried over on either route.
 
 ### Column-wise Writing
 

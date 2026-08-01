@@ -197,9 +197,10 @@ module Parquet
   #   - `rows_per_file`: Optional maximum number of rows per output file. When nil, all input
   #     rows are concatenated into one file.
   #   - `max_read_rows_per_chunk`: Optional upper bound for rows read per chunk, default 8192
-  #     and reduced for wide schemas. It bounds memory only; it never changes the result.
-  #   - `compression`: Optional codec for the outputs. When nil the inputs' codec is kept,
-  #     which also lets whole row groups be copied without re-encoding.
+  #     and reduced for wide schemas. It bounds memory only; it never changes the returned
+  #     list, the rows, the schema, or the codecs.
+  #   - `compression`: Optional codec for the outputs. When nil each column keeps its own
+  #     codec, which also lets whole row groups be copied without re-encoding.
   #   - `overwrite`: When false (default), a non-empty `{output_file_prefix}-*.parquet` set in
   #     `output_dir` raises ArgumentError. When true, that set is replaced and any files left
   #     over from a longer earlier run are removed. Files outside the set are never touched.

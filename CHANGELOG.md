@@ -9,16 +9,24 @@
   - Each output's Parquet schema is identical to the first input's, and that
     input's file-level key/value metadata is carried over. Inputs must agree on
     leaf column shape but may differ in key/value metadata and field ids.
-  - Whole row groups whose codec matches the request are copied byte-for-byte
-    instead of being decoded and re-encoded. With no `compression:` the inputs'
-    codec is preserved, so the common repack takes that path.
+  - Whole row groups are copied byte-for-byte instead of being decoded and
+    re-encoded when they fit the output's remaining rows, are large enough to be
+    worth copying, and the request did not ask for a different codec. Small row
+    groups are merged instead, so compacting many small files does not reproduce
+    their fragmentation. Both routes yield the same rows.
+  - With no `compression:` each column keeps its own codec, whichever route its
+    row group takes; naming a codec applies it to every column.
+  - An output carries a page index exactly when every contributing input does,
+    since a Parquet file's row groups must agree and a copied row group can only
+    contribute the index its source had.
   - `repack` owns the `{output_file_prefix}-{n}.parquet` names in `output_dir`:
     a non-empty set raises `ArgumentError` unless `overwrite: true`, which
     replaces it and removes members left over from a longer earlier run. Files
     outside that set are never touched.
   - `max_read_rows_per_chunk:` and the output row-group size are resource
-    controls only; varying them cannot change the result, and peak memory does
-    not depend on total input size.
+    controls only; varying them cannot change the returned list, the rows, the
+    schema, or the codecs. Input metadata is read one file at a time, so peak
+    memory is set by the widest single file rather than by the number of inputs.
   - An invalid request or mismatched input schemas raise `ArgumentError`, naming
     the offending column and both types; unreadable inputs raise `IOError`.
 - `string_cache:` on `Parquet.write_rows` now also accepts an Integer to set the cache

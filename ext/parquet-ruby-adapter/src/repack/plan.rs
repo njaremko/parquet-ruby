@@ -6,12 +6,12 @@
 //! has been created yet, so a rejected request never leaves partial state.
 
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::basic::{Compression, ConvertedType, LogicalType, Type as PhysicalType};
-use parquet::file::metadata::{KeyValue, PageIndexPolicy};
+use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
 use parquet::schema::types::{ColumnDescPtr, ColumnDescriptor, ColumnPath, TypePtr};
 use parquet_core::max_batch_size_for_column_count;
 
@@ -19,6 +19,7 @@ use crate::error::{Result, RubyAdapterError};
 use crate::types::ParquetRepackArgs;
 
 use super::io_error;
+use super::output::OutputSpec;
 
 /// Rows per read chunk when the caller does not choose. Small enough that a
 /// wide schema does not materialise a huge Arrow batch, large enough to amortise
@@ -35,15 +36,93 @@ pub const MAX_ROW_GROUPS_PER_FILE: usize = i16::MAX as usize;
 /// omit the page index, and its absence must not make a valid input unreadable.
 pub const PAGE_INDEX_POLICY: PageIndexPolicy = PageIndexPolicy::Optional;
 
-/// One input file, with its footer already parsed.
+/// Fraction of the output row-group target below which an input row group is
+/// not worth splicing.
+///
+/// Splicing makes one output row group per input row group, so copying tiny
+/// groups faithfully reproduces a bad layout: a compaction of many small files
+/// would emit a file with as many row groups as it read, which is both slower to
+/// produce and far slower for every later reader. Below this floor the rows go
+/// through the re-encode path instead and merge into full-sized groups.
+///
+/// It also bounds the output's row-group count. A spliced group holds at least
+/// `max_row_group_rows / SPLICE_ROW_GROUP_DIVISOR` rows, so reaching
+/// `MAX_ROW_GROUPS_PER_FILE` needs more rows in one output than the format can
+/// hold anyway.
+const SPLICE_ROW_GROUP_DIVISOR: usize = 8;
+
+/// One input file. Deliberately holds no parsed metadata: footers, and the page
+/// indexes read with them, are re-read one input at a time during the transform
+/// so peak memory does not grow with the number of inputs.
 pub struct InputPlan {
     pub path: String,
-    pub reader_metadata: ArrowReaderMetadata,
     /// Whether this input's encoded column chunks may be spliced into the
     /// output verbatim. Splicing requires every leaf `ColumnDescriptor` to be
     /// *identical* to the output's, which is stricter than the shape equality
     /// that makes rows concatenable: it also pins Parquet field ids.
     pub splice_compatible: bool,
+}
+
+/// What codec the outputs should use.
+///
+/// Parquet records a codec per column chunk, so "keep what the inputs use" is
+/// not expressible as a single `Compression`: a spliced chunk keeps whatever it
+/// already had. Naming the two cases separately keeps "the caller demanded this
+/// codec" distinct from "we had to pick one in order to encode".
+#[derive(Debug, Clone)]
+pub enum OutputCodec {
+    /// Keep each column's codec. A spliced chunk keeps its own automatically,
+    /// since `append_column` writes the source chunk's codec into the footer;
+    /// a re-encoded chunk uses the codec observed for that column in the inputs,
+    /// so both paths agree.
+    Preserve {
+        /// Per leaf column, in schema order, the codec observed in the inputs.
+        per_column: Vec<(ColumnPath, Compression)>,
+        /// The writer's default, for any column with nothing to observe.
+        default: Compression,
+    },
+    /// The caller named a codec; every chunk must end up with it, so a chunk
+    /// that does not already have it cannot be spliced.
+    Force(Compression),
+}
+
+impl OutputCodec {
+    /// Whether a chunk already compressed with `chunk` may be copied verbatim.
+    pub fn accepts_spliced(&self, chunk: Compression) -> bool {
+        match self {
+            OutputCodec::Preserve { .. } => true,
+            // Parquet stores only the codec in a chunk, never the level a writer
+            // used, so comparing whole `Compression` values would spuriously
+            // reject chunks whose level merely differs.
+            OutputCodec::Force(requested) => {
+                std::mem::discriminant(&chunk) == std::mem::discriminant(requested)
+            }
+        }
+    }
+}
+
+/// The codec each leaf column is compressed with in the inputs.
+///
+/// Parquet records a codec per column chunk, so a file can legitimately use a
+/// different one per column. Taking the first chunk observed for each column
+/// makes "preserve" a per-column answer rather than one witness standing in for
+/// the whole schema.
+fn observe_column_codecs(
+    metadata: &ParquetMetaData,
+    columns: &[ColumnDescPtr],
+    observed: &mut [Option<Compression>],
+) {
+    for row_group in metadata.row_groups() {
+        for (index, column) in row_group.columns().iter().enumerate() {
+            if let Some(slot) = observed.get_mut(index) {
+                slot.get_or_insert_with(|| column.compression());
+            }
+        }
+        if observed.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    debug_assert_eq!(observed.len(), columns.len());
 }
 
 /// The resolved shape of one `Parquet.repack` call.
@@ -57,12 +136,37 @@ pub struct RepackPlan {
     pub output_key_value_metadata: Option<Vec<KeyValue>>,
     /// Arrow view of `output_root_type`, used only by the re-encode path.
     pub arrow_schema: SchemaRef,
-    pub compression: Compression,
+    pub codec: OutputCodec,
+    /// Whether outputs carry a page index. An output's row groups must agree:
+    /// the Parquet footer writer cannot represent a file where some row groups
+    /// have an offset index and others do not. Since a spliced group can only
+    /// contribute the index its source had, the output has one exactly when
+    /// every contributing input does.
+    pub write_page_index: bool,
     pub max_read_rows_per_chunk: usize,
     /// Upper bound on rows buffered in one output row group. Bounds peak writer
     /// memory the same way `max_read_rows_per_chunk` bounds the reader.
     pub max_row_group_rows: usize,
+    /// Smallest input row group worth splicing; see `SPLICE_ROW_GROUP_DIVISOR`.
+    pub min_spliceable_rows: usize,
+    /// Rows across every input, used to check row preservation before anything
+    /// is published. Summed here so the transform need not retain footers.
+    pub total_input_rows: i64,
     pub namespace: OutputNamespace,
+}
+
+impl RepackPlan {
+    /// The output configuration every file of this run shares.
+    pub fn output_spec(&self) -> OutputSpec<'_> {
+        OutputSpec {
+            root_type: &self.output_root_type,
+            arrow_schema: &self.arrow_schema,
+            key_value_metadata: &self.output_key_value_metadata,
+            codec: &self.codec,
+            write_page_index: self.write_page_index,
+            max_row_group_rows: self.max_row_group_rows,
+        }
+    }
 }
 
 /// The `{prefix}-{n}.parquet` filenames in `output_dir` that repack owns.
@@ -82,16 +186,6 @@ impl OutputNamespace {
     pub fn path_for(&self, index: usize) -> PathBuf {
         self.dir.join(format!("{}-{}.parquet", self.prefix, index))
     }
-
-    /// Members left over from an earlier, longer run once `written` files have
-    /// been persisted. These are the files that would otherwise masquerade as
-    /// part of the current result.
-    pub fn stale_beyond(&self, written: usize) -> impl Iterator<Item = &Path> {
-        self.existing
-            .iter()
-            .filter(move |(index, _)| *index >= written)
-            .map(|(_, path)| path.as_path())
-    }
 }
 
 /// Read every input footer, prove the inputs are concatenable, and resolve the
@@ -104,61 +198,94 @@ pub fn build_plan(args: &ParquetRepackArgs) -> Result<RepackPlan> {
         "repack requires at least one input path"
     );
 
-    let options = ArrowReaderOptions::new().with_page_index_policy(PAGE_INDEX_POLICY);
-    let mut inputs = Vec::with_capacity(args.read_from.len());
-    for path in &args.read_from {
-        inputs.push(read_input(path, &options)?);
-    }
-
-    // Take everything the output needs from the first input as owned values, so
-    // the per-input loops below can borrow `inputs` mutably.
+    // The first input defines the output. Read it once, keep what the output
+    // needs as owned values, and let its metadata drop with the rest.
+    let first = load_metadata(&args.read_from[0])?;
     let (output_root_type, arrow_schema, output_columns, output_key_value_metadata) = {
-        let file_metadata = inputs[0].reader_metadata.metadata().file_metadata();
+        let file_metadata = first.metadata().file_metadata();
         let descriptor = file_metadata.schema_descr();
         (
             descriptor.root_schema_ptr(),
-            inputs[0].reader_metadata.schema().clone(),
+            first.schema().clone(),
             descriptor.columns().to_vec(),
             file_metadata.key_value_metadata().cloned(),
         )
     };
     let leaf_column_count = output_columns.len();
 
-    for input in inputs.iter().skip(1) {
-        let columns = input
-            .reader_metadata
-            .metadata()
-            .file_metadata()
-            .schema_descr()
-            .columns();
-        if let Some(detail) = describe_shape_mismatch(&output_columns, columns) {
-            return Err(RubyAdapterError::invalid_input(format!(
-                "input {:?} schema does not match {:?}: {detail}",
-                input.path, args.read_from[0]
-            )));
-        }
-    }
+    // One pass per input: validate shape, decide splice compatibility, and
+    // accumulate the totals the plan needs. Each input's metadata is dropped
+    // before the next is read, so peak memory is one footer, not all of them.
+    let mut inputs = Vec::with_capacity(args.read_from.len());
+    let mut total_input_rows = 0i64;
+    let mut observed_codecs: Vec<Option<Compression>> = vec![None; output_columns.len()];
+    let mut write_page_index = true;
 
-    // Splice compatibility is per input and stricter than the shape equality
-    // checked above: two inputs can hold concatenable rows while differing in
-    // Parquet field ids, which `append_column` refuses to splice.
-    for input in inputs.iter_mut() {
-        let columns = input
-            .reader_metadata
-            .metadata()
-            .file_metadata()
-            .schema_descr()
-            .columns();
-        input.splice_compatible = columns.len() == output_columns.len()
+    for (index, path) in args.read_from.iter().enumerate() {
+        let metadata = if index == 0 {
+            first.clone()
+        } else {
+            load_metadata(path)?
+        };
+        let parquet_metadata = metadata.metadata();
+        let columns = parquet_metadata.file_metadata().schema_descr().columns();
+
+        if index > 0 {
+            if let Some(detail) = describe_shape_mismatch(&output_columns, columns) {
+                return Err(RubyAdapterError::invalid_input(format!(
+                    "input {path:?} schema does not match {:?}: {detail}",
+                    args.read_from[0]
+                )));
+            }
+        }
+
+        // Stricter than the shape equality above: two inputs can hold
+        // concatenable rows while differing in Parquet field ids, which
+        // `append_column` refuses to splice.
+        let splice_compatible = columns.len() == output_columns.len()
             && columns
                 .iter()
                 .zip(&output_columns)
                 .all(|(actual, expected)| actual == expected);
+
+        total_input_rows += parquet_metadata
+            .row_groups()
+            .iter()
+            .map(|row_group| row_group.num_rows())
+            .sum::<i64>();
+
+        if splice_compatible {
+            observe_column_codecs(parquet_metadata, &output_columns, &mut observed_codecs);
+        }
+
+        // An input with no row groups contributes no chunks, so it cannot force
+        // a mixture and must not veto the page index for everything else.
+        if !parquet_metadata.row_groups().is_empty() && parquet_metadata.offset_index().is_none() {
+            write_page_index = false;
+        }
+
+        inputs.push(InputPlan {
+            path: path.clone(),
+            splice_compatible,
+        });
     }
 
-    let compression = args
-        .compression
-        .unwrap_or_else(|| observed_compression(&inputs));
+    let codec = match args.compression {
+        Some(requested) => OutputCodec::Force(requested),
+        None => OutputCodec::Preserve {
+            per_column: output_columns
+                .iter()
+                .zip(&observed_codecs)
+                .filter_map(|(column, codec)| codec.map(|codec| (column.path().clone(), codec)))
+                .collect(),
+            // With nothing to observe there is also nothing to compress, so fall
+            // back to the gem-wide default.
+            default: observed_codecs
+                .iter()
+                .find_map(|codec| *codec)
+                .unwrap_or(Compression::SNAPPY),
+        },
+    };
 
     let slot_bound = max_batch_size_for_column_count(leaf_column_count);
     let max_read_rows_per_chunk = args
@@ -167,49 +294,34 @@ pub fn build_plan(args: &ParquetRepackArgs) -> Result<RepackPlan> {
         .min(slot_bound);
     assert!(max_read_rows_per_chunk > 0, "read chunk must make progress");
 
+    let min_spliceable_rows = (slot_bound / SPLICE_ROW_GROUP_DIVISOR).max(1);
+
     Ok(RepackPlan {
         inputs,
         output_root_type,
         output_key_value_metadata,
         arrow_schema,
-        compression,
+        codec,
+        write_page_index,
         max_read_rows_per_chunk,
         max_row_group_rows: slot_bound,
+        min_spliceable_rows,
+        total_input_rows,
         namespace: scan_namespace(&args.output_dir, &args.output_file_prefix)?,
     })
 }
 
-fn read_input(path: &str, options: &ArrowReaderOptions) -> Result<InputPlan> {
+/// Parse one input's footer, including its page index when it has one.
+pub fn load_metadata(path: &str) -> Result<ArrowReaderMetadata> {
+    let options = ArrowReaderOptions::new().with_page_index_policy(PAGE_INDEX_POLICY);
     let file = File::open(path)
         .map_err(|source| io_error(format!("failed to open input file {path:?}"), source))?;
-    let reader_metadata = ArrowReaderMetadata::load(&file, options.clone()).map_err(|source| {
+
+    ArrowReaderMetadata::load(&file, options).map_err(|source| {
         RubyAdapterError::runtime(format!(
             "failed to read Parquet metadata from {path:?}: {source}"
         ))
-    })?;
-
-    Ok(InputPlan {
-        path: path.to_string(),
-        reader_metadata,
-        // Filled in once the output descriptor is known.
-        splice_compatible: false,
     })
-}
-
-/// The codec to preserve when the caller did not name one.
-///
-/// A Parquet file records its codec per column chunk, so there is no single
-/// file-level answer; the first chunk that exists is the best available witness.
-/// Scanning past empty inputs matters because picking a codec no input uses
-/// would disable splicing for every row group. With no chunks to observe there
-/// is also no data to compress, so fall back to the gem-wide default.
-fn observed_compression(inputs: &[InputPlan]) -> Compression {
-    inputs
-        .iter()
-        .flat_map(|input| input.reader_metadata.metadata().row_groups())
-        .find_map(|row_group| row_group.columns().first())
-        .map(|column| column.compression())
-        .unwrap_or(Compression::SNAPPY)
 }
 
 /// The part of a leaf column that must match for two files' rows to be
@@ -226,6 +338,7 @@ type ColumnShape<'a> = (
     Option<&'a LogicalType>,
     i16,
     i16,
+    i16,
     i32,
     i32,
     i32,
@@ -239,6 +352,10 @@ fn column_shape(column: &ColumnDescriptor) -> ColumnShape<'_> {
         column.logical_type_ref(),
         column.max_def_level(),
         column.max_rep_level(),
+        // Two columns can share both level maxima yet nest differently, e.g.
+        // `optional group a { repeated group b { required int c } }` against
+        // `repeated group a { optional group b { required int c } }`.
+        column.repeated_ancestor_def_level(),
         column.type_length(),
         column.type_precision(),
         column.type_scale(),
@@ -361,28 +478,6 @@ mod tests {
         assert_eq!(output_index("batch-0.parquet.bak", "batch"), None);
         // A longer prefix must not swallow a shorter one's files.
         assert_eq!(output_index("batch-extra-0.parquet", "batch"), None);
-    }
-
-    #[test]
-    fn stale_beyond_reports_only_indexes_the_new_run_did_not_write() {
-        let namespace = OutputNamespace {
-            dir: PathBuf::from("/out"),
-            prefix: "batch".to_string(),
-            existing: vec![
-                (0, PathBuf::from("/out/batch-0.parquet")),
-                (1, PathBuf::from("/out/batch-1.parquet")),
-                (2, PathBuf::from("/out/batch-2.parquet")),
-            ],
-        };
-
-        assert_eq!(
-            namespace.stale_beyond(1).collect::<Vec<_>>(),
-            vec![
-                Path::new("/out/batch-1.parquet"),
-                Path::new("/out/batch-2.parquet")
-            ]
-        );
-        assert_eq!(namespace.stale_beyond(3).count(), 0);
     }
 
     #[test]

@@ -80,23 +80,33 @@ class RepackTest < Minitest::Test
   end
 
   # `max_read_rows_per_chunk` is a resource control, not part of the meaning, so
-  # varying it must not change the result. It also decides which physical path
-  # runs: a chunk large enough to hold a whole row group lets it be spliced
-  # byte-for-byte, while a tiny chunk forces the Arrow re-encode path. Equal
-  # results across the range is what proves the two agree.
+  # varying it must not change the result.
+  #
+  # "The result" is the contractual surface: the returned list, the rows, the
+  # schema, and the per-column codecs. It deliberately excludes compressed byte
+  # counts and page boundaries, which do shift with the chunk size because the
+  # encoder checks its page budget once per batch. Those are representation, not
+  # meaning, and no part of the contract depends on them.
   def test_result_is_independent_of_read_chunk_size
-    input = write_rows("input.parquet", (0...50).map { |row| [row, "name_#{row}"] })
+    input = write_rows("input.parquet", (0...5_000).map { |row| [row, "name_#{row}"] })
     expected = Parquet.each_row(input).to_a
 
     results =
-      [1, 7, 50, 100_000].map do |chunk|
+      [1, 7, 512, 100_000].map do |chunk|
         dir = File.join(@tmp_dir, "chunk_#{chunk}")
         outputs =
-          Parquet.repack(input, output_dir: dir, rows_per_file: 12, max_read_rows_per_chunk: chunk)
-        [outputs.map { |output| output["num_rows"] }, rows_of(outputs)]
+          Parquet.repack(input, output_dir: dir, rows_per_file: 1_200, max_read_rows_per_chunk: chunk)
+        [
+          outputs.map { |output| output["num_rows"] },
+          rows_of(outputs),
+          outputs.map { |output| schema_of(output["path"]) },
+          outputs.map { |output| codecs_of(output["path"]) }
+        ]
       end
 
-    assert_equal [[[12, 12, 12, 12, 2], expected]] * 4, results
+    assert_equal [results.first] * 4, results
+    assert_equal [1_200, 1_200, 1_200, 1_200, 200], results.first[0]
+    assert_equal expected, results.first[1]
   end
 
   def test_output_namespace_equals_the_returned_files
@@ -135,17 +145,6 @@ class RepackTest < Minitest::Test
   # Physical strategies
   # --------------------------------------------------------------------------
 
-  # With no `compression:` the inputs' codec is preserved, which is also the
-  # condition that lets row groups be spliced instead of re-encoded.
-  def test_unspecified_compression_preserves_the_input_codec
-    input =
-      write_rows("input.parquet", (0...20).map { |row| [row, "name_#{row}"] }, compression: "gzip")
-
-    outputs = Parquet.repack(input, output_dir: output_dir)
-
-    assert_equal %w[GZIP GZIP], codecs_of(outputs.first["path"])
-  end
-
   # When the codec matches, whole row groups are copied byte-for-byte rather
   # than decoded and re-encoded. Identical per-column compressed sizes are the
   # observable proof: a re-encode rebuilds dictionaries and page boundaries and
@@ -174,7 +173,7 @@ class RepackTest < Minitest::Test
     assert_equal expected, rows_of(outputs)
   end
 
-  # An explicit codec is honoured even though it forbids splicing, so the rows
+  # An explicit codec is honoured even though it forbids copying, so the rows
   # take the re-encode path and must come back unchanged.
   def test_explicit_compression_re_encodes_and_preserves_rows
     input =
@@ -209,6 +208,70 @@ class RepackTest < Minitest::Test
     assert_equal expected, rows_of(outputs)
   end
 
+  # A Parquet file may compress each column with a different codec. With no
+  # `compression:` every column keeps its own, whichever path its row group
+  # takes: a copied chunk carries its codec in its own metadata, and a
+  # re-encoded one is written with the codec observed for that column.
+  def test_unspecified_compression_preserves_each_columns_codec
+    input = fixture("repack_mixed_codecs.parquet")
+
+    outputs = Parquet.repack(input, output_dir: output_dir)
+
+    assert_equal %w[ZSTD GZIP], codecs_of(input)
+    assert_equal %w[ZSTD GZIP], codecs_of(outputs.first["path"])
+  end
+
+  def test_explicit_compression_overrides_every_columns_codec
+    input = fixture("repack_mixed_codecs.parquet")
+
+    outputs = Parquet.repack(input, output_dir: output_dir, compression: "zstd")
+
+    assert_equal %w[ZSTD ZSTD], codecs_of(outputs.first["path"])
+  end
+
+  # A file's row groups must agree on whether they carry a page index — the
+  # Parquet footer cannot represent a mixture, and building one used to abort
+  # the call. A copied row group can only contribute the index its source had,
+  # so an input without one forces the whole output to go without.
+  def test_inputs_without_a_page_index_can_be_split_mid_row_group
+    input = fixture("repack_no_page_index.parquet")
+
+    outputs = Parquet.repack(input, output_dir: output_dir, rows_per_file: 2_500)
+
+    assert_equal [2_500, 2_500], outputs.map { |output| output["num_rows"] }
+    assert_equal (0...5_000).to_a, rows_of(outputs).map { |row| row["id"] }
+  end
+
+  # A row group with no rows contributes nothing, so it must not be able to
+  # influence how the rows are partitioned. Deciding splice eligibility used to
+  # create the output file, which published an extra empty one.
+  def test_a_zero_row_row_group_does_not_add_an_output
+    input = fixture("repack_zero_row_group.parquet")
+
+    outputs = Parquet.repack(input, output_dir: output_dir, rows_per_file: 4)
+
+    assert_equal [{ "path" => output_path(0), "num_rows" => 4 }], outputs
+    assert_equal ["batch-0.parquet"], Dir.children(output_dir)
+    assert_equal [0, 1, 2, 3], rows_of(outputs).map { |row| row["id"] }
+  end
+
+  # Copying row groups one-for-one would make compaction reproduce the very
+  # fragmentation it is meant to remove, and would run into the Parquet limit of
+  # 32767 row groups per file. Small groups go through the re-encode path and
+  # merge instead.
+  def test_many_small_inputs_are_merged_rather_than_copied_one_row_group_each
+    inputs =
+      200.times.map do |index|
+        write_rows("small-#{index}.parquet", (0...5).map { |row| [index * 5 + row, "v#{row}"] })
+      end
+
+    outputs = Parquet.repack(inputs, output_dir: output_dir)
+
+    assert_equal [{ "path" => output_path(0), "num_rows" => 1_000 }], outputs
+    assert_equal 1, Parquet.metadata(outputs.first["path"])["row_groups"].size
+    assert_equal (0...1_000).to_a, rows_of(outputs).map { |row| row["id"] }
+  end
+
   # Concatenability is a property of the columns, not of who wrote the file.
   # These two fixtures hold the same `id` column but differ in file-level
   # key/value metadata, which must not make them unmergeable. They are written
@@ -221,8 +284,7 @@ class RepackTest < Minitest::Test
   #   pd.DataFrame({'id': [3, 4]}).astype('int64').to_parquet(
   #       'repack_pandas_kv_metadata.parquet', engine='pyarrow', compression='snappy')"
   def test_inputs_differing_only_in_key_value_metadata_concatenate
-    inputs = %w[repack_no_kv_metadata.parquet repack_pandas_kv_metadata.parquet]
-             .map { |name| File.join(FIXTURE_DIR, name) }
+    inputs = %w[repack_no_kv_metadata.parquet repack_pandas_kv_metadata.parquet].map { |n| fixture(n) }
 
     outputs = Parquet.repack(inputs, output_dir: output_dir)
 
@@ -255,6 +317,24 @@ class RepackTest < Minitest::Test
     Parquet.repack(input, output_dir: output_dir, rows_per_file: 2)
 
     outputs = Parquet.repack(input, output_dir: output_dir, rows_per_file: 10, overwrite: true)
+
+    assert_equal [{ "path" => output_path(0), "num_rows" => 10 }], outputs
+    assert_equal ["batch-0.parquet"], Dir.children(output_dir).sort
+    assert_equal expected, rows_of(outputs)
+  end
+
+  # `batch-00.parquet` names the same slot as `batch-0.parquet` but is not a
+  # spelling repack produces, so a run that wrote fewer files than the last one
+  # could leave it behind next to the file that superseded it — and a directory
+  # glob would read both. Membership is decided by name, so cleanup must be too.
+  def test_overwrite_removes_namespace_members_repack_would_not_have_named
+    input = write_rows("input.parquet", (0...10).map { |row| [row, "name_#{row}"] })
+    expected = Parquet.each_row(input).to_a
+    FileUtils.mkdir_p(output_dir)
+    FileUtils.cp(input, File.join(output_dir, "batch-00.parquet"))
+    FileUtils.cp(input, File.join(output_dir, "batch-9.parquet"))
+
+    outputs = Parquet.repack(input, output_dir: output_dir, overwrite: true)
 
     assert_equal [{ "path" => output_path(0), "num_rows" => 10 }], outputs
     assert_equal ["batch-0.parquet"], Dir.children(output_dir).sort
@@ -364,6 +444,10 @@ class RepackTest < Minitest::Test
 
   def output_path(index, prefix: "batch")
     File.join(output_dir, "#{prefix}-#{index}.parquet")
+  end
+
+  def fixture(name)
+    File.join(FIXTURE_DIR, name)
   end
 
   def rows_of(outputs)
