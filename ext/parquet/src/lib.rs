@@ -3,7 +3,7 @@ mod allocator;
 
 use magnus::{function, method, Error, Ruby};
 
-use crate::adapter_ffi::{each_column, each_row, write_columns, write_rows};
+use crate::adapter_ffi::{each_column, each_row, repack, write_columns, write_rows};
 use parquet_ruby_adapter::metadata::parse_metadata;
 
 /// Initializes the Ruby extension and defines methods.
@@ -19,6 +19,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.define_module_function("each_column", method!(each_column, -1))?;
     module.define_module_function("write_rows", function!(write_rows, -1))?;
     module.define_module_function("write_columns", function!(write_columns, -1))?;
+    module.define_module_function("repack", function!(repack, -1))?;
 
     Ok(())
 }

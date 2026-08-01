@@ -175,4 +175,57 @@ module Parquet
     logger: nil
   )
   end
+
+  # Concatenates Parquet files and re-splits them into a new set of files
+  # without translating rows through Ruby. Returns one hash per output file,
+  # `{"path" => String, "num_rows" => Integer}`, in output order.
+  #
+  # The outputs hold exactly the input rows, in input order. Every output but
+  # the last holds `rows_per_file` rows; there is always at least one output,
+  # even when the inputs are empty. Each output's Parquet schema is identical
+  # to the first input's, and that input's file-level key/value metadata (such
+  # as `ARROW:schema` or `pandas`) is carried over.
+  #
+  # Inputs must agree on leaf column shape — path, physical and logical type,
+  # nesting. They may differ in key/value metadata and Parquet field ids.
+  #
+  # Options:
+  #   - `read_from`: String path or array of paths to Parquet files with matching schemas
+  #   - `output_dir`: Directory where {output_file_prefix}-{n}.parquet files will be written
+  #   - `output_file_prefix`: Single filename component used for outputs, default "batch".
+  #     Path separators and `..` are rejected.
+  #   - `rows_per_file`: Optional maximum number of rows per output file. When nil, all input
+  #     rows are concatenated into one file.
+  #   - `max_read_rows_per_chunk`: Optional upper bound for rows read per chunk, default 8192
+  #     and reduced for wide schemas. It bounds memory only; it never changes the returned
+  #     list, the rows, the schema, or the codecs.
+  #   - `compression`: Optional codec for the outputs. When nil each column keeps its own
+  #     codec, which also lets whole row groups be copied without re-encoding.
+  #   - `overwrite`: When false (default), a non-empty `{output_file_prefix}-*.parquet` set in
+  #     `output_dir` raises ArgumentError. When true, that set is replaced and any files left
+  #     over from a longer earlier run are removed. Files outside the set are never touched.
+  #
+  # Raises ArgumentError for an invalid request or mismatched input schemas, and
+  # IOError when an input or output cannot be read or written.
+  sig do
+    params(
+      read_from: T.any(String, T::Array[String]),
+      output_dir: String,
+      output_file_prefix: T.nilable(String),
+      rows_per_file: T.nilable(Integer),
+      max_read_rows_per_chunk: T.nilable(Integer),
+      compression: T.nilable(String),
+      overwrite: T.nilable(T::Boolean)
+    ).returns(T::Array[T::Hash[String, T.any(String, Integer)]])
+  end
+  def self.repack(
+    read_from,
+    output_dir:,
+    output_file_prefix: nil,
+    rows_per_file: nil,
+    max_read_rows_per_chunk: nil,
+    compression: nil,
+    overwrite: nil
+  )
+  end
 end

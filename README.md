@@ -170,6 +170,98 @@ Parquet.write_rows(rows,
 )
 ```
 
+### Repacking Existing Parquet Files
+
+Concatenate Parquet files and re-split them into differently sized files without
+translating rows through Ruby.
+
+```ruby
+Parquet.repack(
+  ["input-0.parquet", "input-1.parquet"],
+  output_dir: "repacked",
+  rows_per_file: 100_000
+)
+# => [{ "path" => "repacked/batch-0.parquet", "num_rows" => 100_000 },
+#     { "path" => "repacked/batch-1.parquet", "num_rows" => 42_137 }]
+```
+
+The outputs hold exactly the input rows, in input order. Every output but the
+last holds `rows_per_file` rows, and there is always at least one output even
+when the inputs are empty. Omit `rows_per_file:` to concatenate everything into
+a single file.
+
+Each output's Parquet schema is identical to the first input's, and that input's
+file-level key/value metadata (`ARROW:schema`, `pandas`, and so on) is carried
+over. Inputs must agree on leaf column shape — path, physical and logical type,
+nesting — but may differ in key/value metadata and Parquet field ids.
+
+#### Compression and copying
+
+With no `compression:`, each column keeps its own codec — Parquet records one
+per column, and a file may legitimately use several. Naming a codec applies it
+to every column instead:
+
+```ruby
+Parquet.repack("input.parquet", output_dir: "out", compression: "zstd")
+```
+
+Keeping the inputs' codecs also lets repack copy whole row groups into the
+output byte-for-byte, skipping decompression and re-encoding entirely. A row
+group is copied when it fits the output's remaining row budget, is large enough
+to be worth copying, and the request did not ask for a different codec;
+otherwise its rows are decoded and re-encoded. Both routes produce the same
+rows, so which one runs is not something callers need to reason about — but the
+copy route is dramatically faster, so a plain concatenation is close to an
+I/O-bound copy.
+
+Small row groups are deliberately merged rather than copied: copying them
+one-for-one would make a compaction of many small files reproduce exactly the
+fragmentation it was meant to remove.
+
+#### Output directory ownership
+
+`repack` owns the `{output_file_prefix}-{n}.parquet` names in `output_dir`. If
+any already exist it raises `ArgumentError` rather than mixing two runs' files
+in one directory:
+
+```ruby
+Parquet.repack("input.parquet", output_dir: "out", rows_per_file: 1000, overwrite: true)
+```
+
+`overwrite: true` replaces that set and deletes members left over from a longer
+earlier run, so the returned list always equals what a reader finds in the
+directory. Files outside the set are never touched.
+
+#### Bounds
+
+`max_read_rows_per_chunk:` (default 8192, reduced for wide schemas) bounds rows
+buffered while reading; output row groups are bounded in rows by the same slot
+budget. Both are resource controls: varying them cannot change the returned
+list, the rows, the schema, or the codecs. They do shift compressed byte counts
+and page boundaries, which are representation rather than contract.
+
+Input metadata is read one file at a time, so peak memory is set by the widest
+single file and its row-group size, not by how many files you pass or how many
+rows they hold in total. Note that the row-group bound is in rows, not bytes: a
+schema with very large values still buffers one row group's worth of encoded
+data.
+
+Reading and writing run with the GVL released, so other Ruby threads keep
+running and `Interrupt` / `Timeout` are honoured. An interrupted call leaves no
+output behind.
+
+A Parquet file cannot hold more than 32767 row groups. Merging small groups
+keeps that limit out of reach in practice; if a single output ever did reach it,
+repack raises rather than writing an unreadable file, and `rows_per_file:` is
+the way out.
+
+#### Page indexes and other optional structures
+
+Every row group in a Parquet file must agree on whether it carries a page index,
+and a copied row group can only contribute the index its source had. So an
+output carries one exactly when every contributing input does. Bloom filters are
+not carried over on either route.
+
 ### Column-wise Writing
 
 Best for: Pre-columnar data, better compression, higher performance

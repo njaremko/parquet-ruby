@@ -688,7 +688,7 @@ fn validate_column_count(column_count: usize) -> Result<()> {
     Ok(())
 }
 
-fn max_batch_size_for_column_count(column_count: usize) -> usize {
+pub fn max_batch_size_for_column_count(column_count: usize) -> usize {
     let width = column_count.max(1);
     (MAX_BUFFERED_VALUE_SLOTS / width)
         .max(1)
