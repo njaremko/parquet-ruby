@@ -85,7 +85,7 @@ pub fn repack(ruby: &Ruby, args: &[Value]) -> std::result::Result<Value, MagnusE
 
 /// Attach a path to an IO failure while keeping its `ErrorKind`, so the Ruby
 /// side still raises `IOError` rather than a generic `RuntimeError`.
-pub(super) fn io_error(context: impl Display, source: std::io::Error) -> RubyAdapterError {
+fn io_error(context: impl Display, source: std::io::Error) -> RubyAdapterError {
     RubyAdapterError::Io(std::io::Error::new(
         source.kind(),
         format!("{context}: {source}"),
@@ -224,6 +224,25 @@ fn repack_files(args: &ParquetRepackArgs, cancelled: &AtomicBool) -> Result<Vec<
     }
 
     let outputs = sink.finish()?;
+
+    // Row preservation is the whole point of repack, and the two physical paths
+    // account for rows differently — spliced groups from row-group metadata,
+    // encoded ones from batch lengths. Check them against the row groups the
+    // loop above consumed, so a miscount can never reach a caller. Summing the
+    // row groups rather than the files' declared totals keeps this an assertion
+    // about our own bookkeeping instead of about input validity.
+    let rows_in: i64 = plan
+        .inputs
+        .iter()
+        .flat_map(|input| input.reader_metadata.metadata().row_groups())
+        .map(|row_group| row_group.num_rows())
+        .sum();
+    let rows_out: usize = outputs.iter().map(|output| output.num_rows).sum();
+    assert_eq!(
+        rows_out as i64, rows_in,
+        "repack wrote {rows_out} rows from inputs holding {rows_in}"
+    );
+
     persist_outputs(&plan, outputs)
 }
 
@@ -337,9 +356,14 @@ impl<'a> OutputSink<'a> {
             .expect("an output file was just ensured"))
     }
 
+    /// Rows the open output may still accept. `None` means unbounded, i.e. the
+    /// caller did not ask for splitting.
     fn rows_remaining(&self) -> Option<usize> {
         let written = self.current.as_ref().map_or(0, OutputFile::rows_written);
-        self.plan.rows_remaining(self.rows_per_file, written)
+        self.rows_per_file.map(|limit| {
+            debug_assert!(written <= limit, "output overshot rows_per_file");
+            limit.saturating_sub(written)
+        })
     }
 
     fn can_splice(
@@ -449,7 +473,8 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
         .map(|(_, path)| path.as_path())
         .collect();
 
-    let mut persisted = Vec::with_capacity(outputs.len());
+    let total = outputs.len();
+    let mut persisted = Vec::with_capacity(total);
     let mut created: Vec<PathBuf> = Vec::new();
 
     for output in outputs {
@@ -464,10 +489,9 @@ fn persist_outputs(plan: &RepackPlan, outputs: Vec<CompletedOutput>) -> Result<V
             let rollback = remove_files(&created);
             return Err(io_error(
                 format!(
-                    "failed to move temporary file to {final_path:?} after publishing {} \
-                     of {} outputs{rollback}",
-                    persisted.len(),
-                    persisted.len() + created.len().max(1)
+                    "failed to move temporary file to {final_path:?} after publishing {} of \
+                     {total} output(s){rollback}",
+                    persisted.len()
                 ),
                 source,
             ));

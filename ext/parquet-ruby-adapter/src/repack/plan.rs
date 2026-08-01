@@ -65,21 +65,6 @@ pub struct RepackPlan {
     pub namespace: OutputNamespace,
 }
 
-impl RepackPlan {
-    /// Rows the current output may still accept before it must be closed.
-    /// `None` means unbounded, i.e. the caller did not ask for splitting.
-    pub fn rows_remaining(
-        &self,
-        rows_per_file: Option<usize>,
-        rows_written: usize,
-    ) -> Option<usize> {
-        rows_per_file.map(|limit| {
-            debug_assert!(rows_written <= limit, "output overshot rows_per_file");
-            limit.saturating_sub(rows_written)
-        })
-    }
-}
-
 /// The `{prefix}-{n}.parquet` filenames in `output_dir` that repack owns.
 ///
 /// Treating this set as a single owned namespace is what makes the returned file
@@ -173,7 +158,7 @@ pub fn build_plan(args: &ParquetRepackArgs) -> Result<RepackPlan> {
 
     let compression = args
         .compression
-        .unwrap_or_else(|| observed_compression(&inputs[0]));
+        .unwrap_or_else(|| observed_compression(&inputs));
 
     let slot_bound = max_batch_size_for_column_count(leaf_column_count);
     let max_read_rows_per_chunk = args
@@ -214,16 +199,15 @@ fn read_input(path: &str, options: &ArrowReaderOptions) -> Result<InputPlan> {
 /// The codec to preserve when the caller did not name one.
 ///
 /// A Parquet file records its codec per column chunk, so there is no single
-/// file-level answer; the first chunk is the best available witness. With no
-/// chunks to observe there is also no data to compress, so fall back to the
-/// gem-wide default.
-fn observed_compression(input: &InputPlan) -> Compression {
-    input
-        .reader_metadata
-        .metadata()
-        .row_groups()
-        .first()
-        .and_then(|row_group| row_group.columns().first())
+/// file-level answer; the first chunk that exists is the best available witness.
+/// Scanning past empty inputs matters because picking a codec no input uses
+/// would disable splicing for every row group. With no chunks to observe there
+/// is also no data to compress, so fall back to the gem-wide default.
+fn observed_compression(inputs: &[InputPlan]) -> Compression {
+    inputs
+        .iter()
+        .flat_map(|input| input.reader_metadata.metadata().row_groups())
+        .find_map(|row_group| row_group.columns().first())
         .map(|column| column.compression())
         .unwrap_or(Compression::SNAPPY)
 }

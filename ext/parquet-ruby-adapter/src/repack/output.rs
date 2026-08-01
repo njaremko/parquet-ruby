@@ -180,6 +180,10 @@ impl OutputFile {
                 // row group metadata is the authority.
                 rows_written: rows,
                 metadata: column.clone(),
+                // Bloom filters live outside the footer and would need a
+                // separate read of the source. Dropping them matches the
+                // re-encode path, which does not build them either, so both
+                // strategies produce the same optional structures.
                 bloom_filter: None,
                 column_index: metadata
                     .column_index()
