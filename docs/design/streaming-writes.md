@@ -54,6 +54,21 @@ The implementation must satisfy:
   rather than rejected or retained with later rows;
 - **commit:** for path output, failure before publication preserves an existing
   destination and leaves an absent destination absent.
+- **property refinement:** internal one-row-group segments may remove only the
+  row-group row and byte limits from caller properties. Any per-column value
+  derived from those limits is resolved and frozen first; rebuilding segment
+  properties must not silently change compression, encoding, statistics, or
+  bloom-filter sizing.
+
+On Unix, path preparation happens before the first input pull. Existing
+symlinks continue to name their resolved target rather than being replaced as
+directory entries. Existing targets must be writable, must still have the same
+device/inode/mode at commit, and must have one hard link; a multiply-linked
+inode is rejected before input is consumed because atomic replacement cannot
+preserve all of its aliases. An absent target is published with no-clobber
+semantics. These rules preserve the prior write-authorization and symlink
+boundary while keeping failure publication atomic. They do not add a new
+non-Unix support contract.
 
 The API is partial for malformed/infinite enumerations and values outside the
 declared schema. Ruby exceptions from enumeration remain Ruby exceptions.
@@ -73,7 +88,7 @@ are:
 | per-column slots | core writer | at most 1,000,000 slots across the configured row quantum | a flush clears all live values |
 | size samples | core writer | at most `sample_size`, maximum 10,000 `usize` values | reservoir replaces an existing slot |
 | string cache | adapter converter | caller-selected entries, additionally capped by existing entry/value-byte budgets | misses do not create an unbounded side table |
-| encoded row group | core writer | `max(flush_threshold, 8 MiB)` target bytes, with one Arrow batch/oversized value of slack | crossing the target closes one independently staged row group |
+| encoded row group | core writer | Ruby builder: `max(flush_threshold, 8 MiB)` target bytes; lower-level custom properties: the exact caller target; both have one Arrow batch/oversized value of slack | crossing the target closes one independently staged row group |
 | footer metadata | core writer | one row group's metadata in memory; completed thrift metadata is serialized immediately to a disk spool | each completed row group releases its heap metadata; close streams the spool once |
 | staged files | filesystem | output-sized destination stage, footer-metadata spool, and one bounded row-group stage | successful close advances to one atomic path publication or bounded IO copy |
 
@@ -108,6 +123,10 @@ Transformation schedule:
 5. Stream the metadata spool into the footer, then publish the staged path or
    stream-copy the staged file to the requested IO with fixed-size
    standard-library buffers.
+
+Disk transport failures while serializing the metadata spool or footer remain
+operating I/O errors. Thrift protocol/application failures remain internal
+encoding errors. Neither class publishes a staged path.
 
 ## Alternatives and decision
 
@@ -161,8 +180,17 @@ Acceptance requires:
 - malformed column batches fail at that batch and do not publish output;
 - late enumeration/conversion/footer failure preserves the destination;
 - crossing row and byte quanta preserves decoded rows exactly;
+- every finite chunk partition in the model produces the same complete decoded
+  row sequence through row and column entry points;
 - tiny converted-value quanta do not create one Parquet row group per row;
+- rebuilding internal segment properties preserves resolved per-column bloom
+  sizing;
 - multiple disk-spooled row groups preserve data and page-index offsets;
+- metadata-spool and footer write failures remain I/O failures and do not
+  advance the observable output;
+- Unix path preflight preserves symlink identity and write authorization,
+  rejects hard-linked targets before pulling input, and refuses a destination
+  replaced during encoding;
 - representative small/large streaming runs show peak RSS reaches a plateau
   rather than scaling with total rows;
 - focused Rust and Ruby tests, formatting, linting, and the repository test
@@ -181,5 +209,13 @@ The slow Ruby regression wrote both row and column streams from 20,000 through
 80,000 1 KiB values and kept post-GC RSS growth below 32 MiB. A four-row-group
 file produced through `Parquet.write_rows` was also read by DuckDB 1.5.2 with
 the exact 24-row count, ID range, payload-length bounds, and group count. The
+five-row finite model exhaustively covered all 16 chunk partitions at 1, 32,
+and 8,192-byte quanta through both core write forms. Injected metadata-spool and
+footer transport failures remained I/O errors without advancing output. The
 warnings-as-errors Rust workspace suite and the full Ruby suite passed; the
-Ruby suite covered 222 tests and 233,991 assertions.
+Ruby suite covered 227 tests and 233,994 assertions. The opt-in RSS suite also
+passed both 80,000-row plateau checks on the integrated repair, and the
+write-only backend-boundary regression completed all 32,768 row groups. The
+documented public write contract was smoke-tested across every accepted
+compression spelling, row and column schema inference, nil return values, and
+staged `StringIO` output.

@@ -1,6 +1,6 @@
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowSchemaConverter, ArrowWriter};
 use parquet::file::properties::WriterProperties;
 #[expect(
     deprecated,
@@ -125,11 +125,7 @@ where
         row_group_target_bytes: usize,
     ) -> Result<Self> {
         let row_group_row_limit = properties.max_row_group_row_count();
-        let segment_properties = properties
-            .into_builder()
-            .set_max_row_group_row_count(None)
-            .set_max_row_group_bytes(None)
-            .build();
+        let segment_properties = segment_properties(&arrow_schema, properties)?;
         let metadata_spool = NamedTempFile::new()?;
         let mut output = SharedOutput::new(output);
         output.write_all(PARQUET_MAGIC)?;
@@ -347,6 +343,36 @@ where
         self.output.flush()?;
         Ok(())
     }
+}
+
+fn segment_properties(
+    arrow_schema: &arrow_schema::Schema,
+    properties: WriterProperties,
+) -> Result<WriterProperties> {
+    let parquet_schema = ArrowSchemaConverter::new()
+        .with_coerce_types(properties.coerce_types())
+        .convert(arrow_schema)?;
+    let resolved_bloom_filters = parquet_schema
+        .columns()
+        .iter()
+        .filter_map(|column| {
+            properties
+                .bloom_filter_properties(column.path())
+                .cloned()
+                .map(|bloom_filter| (column.path().clone(), bloom_filter))
+        })
+        .collect::<Vec<_>>();
+
+    let mut builder = properties
+        .into_builder()
+        .set_max_row_group_row_count(None)
+        .set_max_row_group_bytes(None);
+    for (column_path, bloom_filter) in resolved_bloom_filters {
+        builder = builder
+            .set_column_bloom_filter_fpp(column_path.clone(), bloom_filter.fpp)
+            .set_column_bloom_filter_ndv(column_path, bloom_filter.ndv);
+    }
+    Ok(builder.build())
 }
 
 #[expect(
@@ -632,7 +658,13 @@ fn write_struct_list_field<T: TSerializable>(
 }
 
 fn thrift_error(error: thrift::Error) -> ParquetError {
-    ParquetError::Internal(format!("failed to encode Parquet metadata: {error}"))
+    match error {
+        thrift::Error::Transport(error) => ParquetError::Io(std::io::Error::other(format!(
+            "failed to access Parquet metadata storage: {}",
+            error.message
+        ))),
+        error => ParquetError::Internal(format!("failed to encode Parquet metadata: {error}")),
+    }
 }
 
 #[cfg(test)]

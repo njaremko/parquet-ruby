@@ -145,6 +145,71 @@ puts metadata["row_groups"].size    # Number of row groups
 
 ## Writing Parquet Files
 
+The two write entry points have these public shapes:
+
+```ruby
+Parquet.write_rows(
+  read_from,
+  schema:,
+  write_to:,
+  batch_size: nil,
+  flush_threshold: nil,
+  compression: nil,
+  sample_size: nil,
+  logger: nil,
+  string_cache: nil
+) # => nil
+
+Parquet.write_columns(
+  read_from,
+  schema:,
+  write_to:,
+  flush_threshold: nil,
+  compression: nil,
+  logger: nil
+) # => nil
+```
+
+`read_from` must be a finite object that responds to `each`. `write_rows` pulls
+one row array at a time; values in each row are in schema-field order.
+`write_columns` pulls one batch at a time; a batch is an array containing one
+column array per schema field, also in schema order. Every column in one batch
+must have the same length. The outer enumerable is never materialized by the
+library.
+
+`schema:` is a required keyword and accepts the array form shown below, a
+`Parquet::Schema` DSL result, or a `fields` schema hash. Passing `nil` or `[]`
+infers `f0`, `f1`, ... string columns from the first row or column batch; the
+first item is still written. Inference converts values to strings and cannot
+represent empty input, so pass an explicit schema to write an empty file.
+
+`write_to:` accepts a path string or a writable IO object. Path output is
+encoded in a private staging file in the publication target's directory and
+published only after the complete input and Parquet footer succeed; a
+pre-publication failure preserves an existing destination and leaves an absent
+destination absent. IO output is also encoded to a disk staging file, then
+copied to the IO after finalization; an IO failure during that final copy may
+leave caller-owned IO partially written.
+
+Common options:
+
+| Option | Contract |
+| --- | --- |
+| `compression:` | `nil` defaults to Snappy. Accepted values are `"none"`, `"uncompressed"`, `"snappy"`, `"gzip"`, `"lz4"`, `"zstd"`, and `"brotli"`. |
+| `flush_threshold:` | Positive converted-value byte quantum; defaults to 100 MiB. It bounds an internal batch, not total file size. One larger logical row is written alone. |
+| `logger:` | Optional object responding to `debug`, `info`, `warn`, and `error`. |
+
+Row-only options:
+
+| Option | Contract |
+| --- | --- |
+| `batch_size:` | Positive maximum rows per converted batch. When omitted, sizing starts at 1,000 rows and adapts to sampled row sizes. The maximum is 1,000,000 for a one-column schema and lower for wide schemas. |
+| `sample_size:` | Positive row-size sample capacity used by adaptive sizing; defaults to 100 and is capped at 10,000. |
+| `string_cache:` | `nil`/`false` disables it; `true` retains up to 100 distinct strings; a positive integer selects the capacity, capped at 65,536. Values over 4 KiB are skipped and retained string content is capped at 16 MiB. |
+
+`write_columns` rejects `batch_size:`, `sample_size:`, and `string_cache:`;
+split the input into the desired column batches instead.
+
 ### Row-wise Writing
 
 Best for: Streaming data, converting from other formats, memory-constrained environments
@@ -166,7 +231,7 @@ end
 Parquet.write_rows(rows,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 5000  # Positive rows per batch (default: 1000)
+  batch_size: 5000
 )
 ```
 
@@ -250,8 +315,8 @@ Reading and writing run with the GVL released, so other Ruby threads keep
 running and `Interrupt` / `Timeout` are honoured. An interrupted call leaves no
 output behind.
 
-A Parquet file cannot hold more than 32767 row groups. Merging small groups
-keeps that limit out of reach in practice; if a single output ever did reach it,
+A repacked output is capped at 32,767 row groups. Merging small groups keeps
+that limit out of reach in practice; if a single output would exceed it,
 repack raises rather than writing an unreadable file, and `rows_per_file:` is
 the way out.
 
@@ -288,14 +353,13 @@ schema = [
 Parquet.write_columns(batches.each,
   schema: schema,
   write_to: "output.parquet",
-  compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd
+  compression: "snappy"
 )
 ```
 
-`write_columns` also accepts `logger:` with the same Ruby logger interface as
-row writes. The outer enumerable is pulled one batch at a time; each batch must
-contain one array per schema field, and every array in that batch must have the
-same length.
+The column arrays are moved through the same bounded row-admission path as row
+writes. A malformed batch fails at that batch; length errors in later batches
+cannot cancel it.
 
 ## Data Types
 
@@ -488,20 +552,32 @@ Both write APIs pull from `each`; they never call `to_a` on the outer input.
 Converted values are flushed before admitting a row that would cross
 `flush_threshold` (a single larger row is written alone). Encoded Parquet row
 groups use `max(flush_threshold, 8 MiB)` so tiny memory quanta cannot create one
-row group per row and exhaust the locked backend's row-group ordinal. Completed
-footer metadata is serialized immediately to a disk spool instead of
-accumulating in memory. Peak writer-owned native heap use is therefore
-independent of total file length: it is a constant multiple of the row-group
-quantum, plus schema state, bounded caches/samples, conversion scratch, one
-oversized logical row, and the caller-owned row or column batch currently
-yielded. Memory intentionally owned by a caller-provided in-memory output object
-is outside that bound.
+row group per row and exhaust the locked backend's 32,768-group envelope
+(ordinals 0 through 32,767). Completed footer metadata is serialized
+immediately to a disk spool instead of accumulating in memory. Peak
+writer-owned native heap use is therefore independent of total file length: it
+is a constant multiple of the row-group quantum, plus schema state, bounded
+caches/samples, conversion scratch, and one oversized logical row. The current
+caller-owned yielded row or column batch and a caller-provided in-memory output
+object are outside that native bound; the library does not retain prior yielded
+objects.
+
+Disk use grows with the encoded output and disk-spooled footer metadata, plus
+one active row-group staging file. Large writes therefore require enough free
+temporary/destination storage even though their writer-owned heap stays
+bounded.
 
 `batch_size` is also capped by the schema width, and no full batch is reserved
 up front. Column batches are validated and consumed independently, so earlier
 batches are released before the next one is requested. Path outputs are staged
-beside the destination and atomically published only after the complete stream
-and Parquet footer succeed.
+in the publication target's directory and atomically published only after the
+complete stream and Parquet footer succeed. On Unix, an existing symlink to a
+file remains a symlink and its resolved target is replaced; an existing
+destination's mode is preserved and it must be writable. A multiply linked
+target is rejected before input is pulled because atomic replacement cannot
+preserve its other hard-link aliases. A destination created while encoding, or
+an existing destination whose identity or mode changed before the commit
+check, is not overwritten.
 
 ## Architecture
 

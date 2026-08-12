@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use tempfile::{NamedTempFile, TempPath};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::converter::RubyValueConverter;
 use crate::io::RubyIOWriter;
@@ -31,9 +33,32 @@ enum WriterOutput {
     },
 }
 
+enum PreparedWriterOutput {
+    Path {
+        temp_file: NamedTempFile,
+        destination: PathBuf,
+        final_state: PathFinalState,
+    },
+    Io {
+        temp_file: NamedTempFile,
+        io_object: Value,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
 struct PathFinalState {
     #[cfg(unix)]
-    permissions: std::fs::Permissions,
+    publication_path: PathBuf,
+    #[cfg(unix)]
+    original_identity: Option<FileIdentity>,
+    #[cfg(unix)]
+    mode: u32,
 }
 
 impl WriterOutput {
@@ -53,7 +78,7 @@ struct BatchSizingOptions {
 
 fn create_writer(
     ruby: &Ruby,
-    write_to: Value,
+    prepared_output: PreparedWriterOutput,
     schema: Schema,
     compression: Option<String>,
     options: BatchSizingOptions,
@@ -69,33 +94,49 @@ fn create_writer(
         builder = builder.with_sample_size(size);
     }
 
+    match prepared_output {
+        PreparedWriterOutput::Path {
+            temp_file,
+            destination,
+            final_state,
+        } => {
+            let (writer, staging_path) = build_staged_writer(ruby, builder, temp_file, schema)?;
+            Ok(WriterOutput::Path {
+                writer,
+                staging_path,
+                destination,
+                final_state,
+            })
+        }
+        PreparedWriterOutput::Io {
+            temp_file,
+            io_object,
+        } => {
+            let (writer, staging_path) = build_staged_writer(ruby, builder, temp_file, schema)?;
+            Ok(WriterOutput::Io {
+                writer,
+                staging_path,
+                io_object,
+            })
+        }
+    }
+}
+
+fn prepare_writer_output(
+    ruby: &Ruby,
+    write_to: Value,
+) -> Result<PreparedWriterOutput, MagnusError> {
     if write_to.is_kind_of(ruby.class_string()) {
         let path_str: String = TryConvert::try_convert(write_to)?;
         let destination = PathBuf::from(path_str);
-        let parent = destination
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let (temp_file, final_state) =
-            create_path_staging_file(&destination, parent).map_err(|error| {
-                MagnusError::new(
-                    ruby.exception_runtime_error(),
-                    format!("Failed to create staging file: {error}"),
-                )
-            })?;
-        let file = temp_file.reopen().map_err(|error| {
+        let (temp_file, final_state) = create_path_staging_file(&destination).map_err(|error| {
             MagnusError::new(
                 ruby.exception_runtime_error(),
-                format!("Failed to reopen staging file: {error}"),
+                format!("Failed to create staging file: {error}"),
             )
         })?;
-        let staging_path = temp_file.into_temp_path();
-        let writer = builder
-            .build(file, schema)
-            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
-        Ok(WriterOutput::Path {
-            writer,
-            staging_path,
+        Ok(PreparedWriterOutput::Path {
+            temp_file,
             destination,
             final_state,
         })
@@ -106,52 +147,143 @@ fn create_writer(
                 format!("Failed to create temporary file: {error}"),
             )
         })?;
-        let file = temp_file.reopen().map_err(|error| {
-            MagnusError::new(
-                ruby.exception_runtime_error(),
-                format!("Failed to reopen temporary file: {error}"),
-            )
-        })?;
-        let staging_path = temp_file.into_temp_path();
-        let writer = builder
-            .build(file, schema)
-            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
-        Ok(WriterOutput::Io {
-            writer,
-            staging_path,
+        Ok(PreparedWriterOutput::Io {
+            temp_file,
             io_object: write_to,
         })
     }
 }
 
+fn build_staged_writer(
+    ruby: &Ruby,
+    builder: WriterBuilder,
+    temp_file: NamedTempFile,
+    schema: Schema,
+) -> Result<(parquet_core::Writer<File>, TempPath), MagnusError> {
+    let file = temp_file.reopen().map_err(|error| {
+        MagnusError::new(
+            ruby.exception_runtime_error(),
+            format!("Failed to reopen staging file: {error}"),
+        )
+    })?;
+    let staging_path = temp_file.into_temp_path();
+    let writer = builder
+        .build(file, schema)
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+    Ok((writer, staging_path))
+}
+
 #[cfg(unix)]
 fn create_path_staging_file(
     destination: &Path,
-    parent: &Path,
 ) -> std::io::Result<(NamedTempFile, PathFinalState)> {
-    let mut builder = tempfile::Builder::new();
-    let existing_permissions = match destination.metadata() {
-        Ok(metadata) => Some(metadata.permissions()),
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => create_existing_path_staging_file(destination),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            #[cfg(unix)]
-            builder.permissions(std::fs::Permissions::from_mode(0o666));
-            None
+            create_new_path_staging_file(destination)
         }
-        Err(error) => return Err(error),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn create_existing_path_staging_file(
+    destination: &Path,
+) -> std::io::Result<(NamedTempFile, PathFinalState)> {
+    let publication_path = std::fs::canonicalize(destination)?;
+    let writable_file = OpenOptions::new()
+        .write(true)
+        .open(&publication_path)
+        .map_err(|error| writable_destination_error(destination, error))?;
+    let metadata = writable_file.metadata()?;
+    let hard_link_count = metadata.nlink();
+    if hard_link_count > 1 {
+        return Err(std::io::Error::other(format!(
+            "refusing to atomically replace {}: destination has {hard_link_count} hard links",
+            destination.display()
+        )));
+    }
+    let parent = publication_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination has no parent: {}", destination.display()),
+        )
+    })?;
+    let temp_file = tempfile::Builder::new().tempfile_in(parent)?;
+    let final_state = PathFinalState {
+        publication_path,
+        original_identity: Some(file_identity(&metadata)),
+        mode: metadata.permissions().mode() & 0o7777,
     };
+    Ok((temp_file, final_state))
+}
+
+#[cfg(unix)]
+fn create_new_path_staging_file(
+    destination: &Path,
+) -> std::io::Result<(NamedTempFile, PathFinalState)> {
+    let publication_path = publication_path_for_absent_destination(destination)?;
+    let parent = publication_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination has no parent: {}", destination.display()),
+        )
+    })?;
+    let mut builder = tempfile::Builder::new();
+    builder.permissions(std::fs::Permissions::from_mode(0o666));
     let temp_file = builder.tempfile_in(parent)?;
-    let permissions = match existing_permissions {
-        Some(permissions) => permissions,
-        None => temp_file.as_file().metadata()?.permissions(),
+    let mode = temp_file.as_file().metadata()?.permissions().mode() & 0o7777;
+    let final_state = PathFinalState {
+        publication_path,
+        original_identity: None,
+        mode,
     };
-    Ok((temp_file, PathFinalState { permissions }))
+    Ok((temp_file, final_state))
+}
+
+#[cfg(unix)]
+fn publication_path_for_absent_destination(destination: &Path) -> std::io::Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = destination.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination has no file name: {}", destination.display()),
+        )
+    })?;
+    Ok(std::fs::canonicalize(parent)?.join(file_name))
+}
+
+#[cfg(unix)]
+fn writable_destination_error(destination: &Path, error: std::io::Error) -> std::io::Error {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("destination is not writable: {}", destination.display()),
+        )
+    } else {
+        error
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
 }
 
 #[cfg(not(unix))]
 fn create_path_staging_file(
-    _destination: &Path,
-    parent: &Path,
+    destination: &Path,
 ) -> std::io::Result<(NamedTempFile, PathFinalState)> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     tempfile::Builder::new()
         .tempfile_in(parent)
         .map(|temp_file| (temp_file, PathFinalState {}))
@@ -163,12 +295,71 @@ fn publish_path(
     destination: &Path,
     final_state: PathFinalState,
 ) -> std::io::Result<()> {
-    // Rename preserves the staging inode's mode. Apply the saved mode while the
-    // file is private so a chmod failure cannot expose a new destination.
-    std::fs::set_permissions(&staging_path, final_state.permissions)?;
-    staging_path
-        .persist(destination)
-        .map_err(|error| error.error)
+    let PathFinalState {
+        publication_path,
+        original_identity,
+        mode,
+    } = final_state;
+    std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(mode))?;
+
+    match original_identity {
+        Some(expected_identity) => {
+            validate_existing_publication_target(
+                destination,
+                &publication_path,
+                expected_identity,
+                mode,
+            )?;
+            staging_path
+                .persist(publication_path)
+                .map_err(|error| error.error)
+        }
+        None => {
+            let current_publication_path = publication_path_for_absent_destination(destination)?;
+            if current_publication_path != publication_path {
+                return Err(destination_changed_error(destination));
+            }
+            staging_path
+                .persist_noclobber(publication_path)
+                .map_err(|error| {
+                    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                        destination_changed_error(destination)
+                    } else {
+                        error.error
+                    }
+                })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_existing_publication_target(
+    destination: &Path,
+    publication_path: &Path,
+    expected_identity: FileIdentity,
+    expected_mode: u32,
+) -> std::io::Result<()> {
+    let resolved_path =
+        std::fs::canonicalize(destination).map_err(|_| destination_changed_error(destination))?;
+    let metadata =
+        std::fs::metadata(publication_path).map_err(|_| destination_changed_error(destination))?;
+    let current_mode = metadata.permissions().mode() & 0o7777;
+    if resolved_path != publication_path
+        || file_identity(&metadata) != expected_identity
+        || metadata.nlink() != 1
+        || current_mode != expected_mode
+    {
+        return Err(destination_changed_error(destination));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn destination_changed_error(destination: &Path) -> std::io::Error {
+    std::io::Error::other(format!(
+        "destination changed while writing: {}",
+        destination.display()
+    ))
 }
 
 #[cfg(not(unix))]
@@ -403,6 +594,7 @@ pub fn write_rows(
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
     let logger = RubyLogger::new(write_args.logger)?;
+    let prepared_output = prepare_writer_output(ruby, write_args.write_to)?;
     let mut input = input_enumerator(ruby, write_args.read_from)?;
     let first_row = input.next().transpose()?;
     let schema_hash = process_schema_value(ruby, write_args.schema_value, first_row)
@@ -412,7 +604,7 @@ pub fn write_rows(
     let field_schemas = extract_field_schemas(&schema);
     let mut writer_output = create_writer(
         ruby,
-        write_args.write_to,
+        prepared_output,
         schema,
         write_args.compression,
         BatchSizingOptions {
@@ -480,6 +672,7 @@ pub fn write_columns(
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
     let logger = RubyLogger::new(write_args.logger)?;
+    let prepared_output = prepare_writer_output(ruby, write_args.write_to)?;
     let mut input = input_enumerator(ruby, write_args.read_from)?;
     let first_batch = input.next().transpose()?;
     let schema_hash = process_schema_value(ruby, write_args.schema_value, first_batch)
@@ -495,7 +688,7 @@ pub fn write_columns(
     let field_schemas = extract_field_schemas(&schema);
     let mut writer_output = create_writer(
         ruby,
-        write_args.write_to,
+        prepared_output,
         schema,
         write_args.compression,
         BatchSizingOptions {

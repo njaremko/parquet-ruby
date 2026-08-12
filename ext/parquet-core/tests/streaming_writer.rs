@@ -43,6 +43,109 @@ fn integer_schema() -> Schema {
         .unwrap()
 }
 
+fn model_schema() -> Schema {
+    SchemaBuilder::new()
+        .with_root(SchemaNode::Struct {
+            name: "root".to_string(),
+            nullable: false,
+            fields: vec![
+                SchemaNode::Primitive {
+                    name: "id".to_string(),
+                    primitive_type: PrimitiveType::Int64,
+                    nullable: false,
+                    format: None,
+                },
+                SchemaNode::Primitive {
+                    name: "name".to_string(),
+                    primitive_type: PrimitiveType::String,
+                    nullable: false,
+                    format: None,
+                },
+            ],
+        })
+        .build()
+        .unwrap()
+}
+
+fn model_rows() -> Vec<Vec<ParquetValue>> {
+    ["", "one", "two-two", "three three three", "four"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            vec![
+                ParquetValue::Int64(index as i64),
+                ParquetValue::String(Arc::from(name)),
+            ]
+        })
+        .collect()
+}
+
+fn row_partitions(rows: &[Vec<ParquetValue>], cut_mask: usize) -> Vec<Vec<Vec<ParquetValue>>> {
+    let mut partitions = Vec::new();
+    let mut start = 0;
+    for boundary in 1..rows.len() {
+        if cut_mask & (1 << (boundary - 1)) != 0 {
+            partitions.push(rows[start..boundary].to_vec());
+            start = boundary;
+        }
+    }
+    partitions.push(rows[start..].to_vec());
+    partitions
+}
+
+fn write_partitioned_rows(
+    partitions: &[Vec<Vec<ParquetValue>>],
+    memory_threshold: usize,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut writer = WriterBuilder::new()
+        .with_batch_size(10)
+        .with_memory_threshold(memory_threshold)
+        .build(&mut output, model_schema())
+        .unwrap();
+    for partition in partitions {
+        writer.write_rows(partition.clone()).unwrap();
+    }
+    writer.close().unwrap();
+    output
+}
+
+fn write_partitioned_columns(
+    partitions: &[Vec<Vec<ParquetValue>>],
+    memory_threshold: usize,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut writer = WriterBuilder::new()
+        .with_batch_size(10)
+        .with_memory_threshold(memory_threshold)
+        .build(&mut output, model_schema())
+        .unwrap();
+    for partition in partitions {
+        writer
+            .write_columns(vec![
+                (
+                    "name".to_string(),
+                    partition.iter().map(|row| row[1].clone()).collect(),
+                ),
+                (
+                    "id".to_string(),
+                    partition.iter().map(|row| row[0].clone()).collect(),
+                ),
+            ])
+            .unwrap();
+    }
+    writer.close().unwrap();
+    output
+}
+
+fn read_all_rows(output: Vec<u8>) -> Vec<Vec<ParquetValue>> {
+    Reader::new(Bytes::from(output))
+        .read_rows()
+        .unwrap()
+        .collect::<parquet_core::Result<Vec<_>>>()
+        .unwrap()
+}
+
 fn large_value(index: usize) -> ParquetValue {
     ParquetValue::String(Arc::from(format!("{index:04}-{}", "x".repeat(4_096))))
 }
@@ -72,9 +175,54 @@ fn assert_three_rows_and_row_groups(buffer: Vec<u8>, expected_row_groups: usize)
         .unwrap()
         .collect::<parquet_core::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(3, rows.len());
-    assert_eq!(vec![large_value(0)], rows[0]);
-    assert_eq!(vec![large_value(2)], rows[2]);
+    assert_eq!(
+        (0..3)
+            .map(|index| vec![large_value(index)])
+            .collect::<Vec<_>>(),
+        rows
+    );
+}
+
+#[test]
+fn row_and_column_writes_preserve_every_chunk_partition_across_memory_quanta() {
+    let expected = model_rows();
+    let cut_mask_count = 1 << expected.len().saturating_sub(1);
+
+    for memory_threshold in [1, 32, 8_192] {
+        for cut_mask in 0..cut_mask_count {
+            let partitions = row_partitions(&expected, cut_mask);
+            let actual_rows = read_all_rows(write_partitioned_rows(&partitions, memory_threshold));
+            let actual_columns =
+                read_all_rows(write_partitioned_columns(&partitions, memory_threshold));
+
+            assert_eq!(
+                (expected.clone(), expected.clone()),
+                (actual_rows, actual_columns),
+                "memory threshold {memory_threshold}, cut mask {cut_mask:04b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_row_and_column_writes_have_the_same_complete_observation() {
+    let mut row_output = Vec::new();
+    let row_writer = WriterBuilder::new()
+        .build(&mut row_output, model_schema())
+        .unwrap();
+    row_writer.close().unwrap();
+
+    let mut column_output = Vec::new();
+    let mut column_writer = WriterBuilder::new()
+        .build(&mut column_output, model_schema())
+        .unwrap();
+    column_writer.write_columns(Vec::new()).unwrap();
+    column_writer.close().unwrap();
+
+    assert_eq!(
+        (Vec::new(), Vec::new()),
+        (read_all_rows(row_output), read_all_rows(column_output))
+    );
 }
 
 #[test]
