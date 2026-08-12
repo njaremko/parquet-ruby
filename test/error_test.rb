@@ -88,7 +88,7 @@ class ErrorTest < Minitest::Test
     end
   end
 
-  def test_enumerator_interrupt_partial_write
+  def test_enumerator_interrupt_does_not_publish_partial_write
     temp_path = "test/partial_write.parquet"
     schema = [{ "id" => "int64" }, { "name" => "string" }]
 
@@ -102,13 +102,7 @@ class ErrorTest < Minitest::Test
     begin
       error = assert_raises(RuntimeError) { Parquet.write_rows(enumerator, schema: schema, write_to: temp_path) }
       assert_equal("Simulated stream failure", error.message)
-
-      # The file may or may not exist depending on when the error occurred
-      # If it exists, it might be partially written or truncated
-      if File.exist?(temp_path)
-        # Attempt to read should fail for a partially written file
-        assert_raises(RuntimeError) { Parquet.each_row(temp_path).to_a }
-      end
+      refute File.exist?(temp_path), "failed writes must not publish a destination file"
     ensure
       File.delete(temp_path) if File.exist?(temp_path)
     end

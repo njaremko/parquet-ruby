@@ -1,12 +1,11 @@
 //! Core Parquet writing functionality
 
 use crate::{
-    arrow_conversion::parquet_values_to_arrow_array, ParquetError, ParquetValue, Result, Schema,
-    SchemaNode,
+    arrow_conversion::parquet_values_to_arrow_array, streaming_file_writer::StreamingFileWriter,
+    ParquetError, ParquetValue, Result, Schema, SchemaNode,
 };
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{DataType, Field};
-use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use rand::Rng;
@@ -15,7 +14,12 @@ use std::sync::Arc as StdArc;
 
 // Default configuration constants
 const DEFAULT_BATCH_SIZE: usize = 1000;
-const DEFAULT_MEMORY_THRESHOLD: usize = 100 * 1024 * 1024; // 100MB
+// Default converted-value memory quantum: 100 MiB.
+const DEFAULT_MEMORY_THRESHOLD: usize = 100 * 1024 * 1024;
+// A caller may choose a very small converted-row quantum, but making every such
+// quantum a row group would exhaust Parquet's i16 row-group ordinal. Encoded
+// groups have an independent minimum while their metadata spills to disk.
+const MIN_ROW_GROUP_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SAMPLE_SIZE: usize = 100;
 const MIN_BATCH_SIZE: usize = 10;
 // Ceiling for a fixed or dynamically-estimated batch size on a single-column
@@ -24,7 +28,7 @@ pub const MAX_BATCH_SIZE: usize = 1_000_000;
 // `sample_size` also backs an eager Vec reservation during writer creation.
 // Keep user-provided estimates from becoming an unbounded upfront allocation.
 pub const MAX_SAMPLE_SIZE: usize = 10_000;
-// Total slots eagerly reserved across all per-column buffers. This keeps wide
+// Maximum live value slots across all per-column buffers. This keeps wide
 // schemas from multiplying a row-count cap into an unbounded allocation.
 const MAX_BUFFERED_VALUE_SLOTS: usize = 1_000_000;
 const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
@@ -82,30 +86,39 @@ impl WriterBuilder {
     pub fn build<W: std::io::Write + Send>(self, writer: W, schema: Schema) -> Result<Writer<W>> {
         let arrow_schema = schema_to_arrow(&schema)?;
 
-        let props = WriterProperties::builder()
-            .set_compression(self.compression)
-            .build();
-
-        let arrow_writer = ArrowWriter::try_new(writer, arrow_schema.clone(), Some(props))?;
-
+        validate_memory_threshold(self.memory_threshold)?;
         validate_column_count(arrow_schema.fields().len())?;
         let current_batch_size = match self.batch_size {
             Some(size) => validate_fixed_batch_size(size, arrow_schema.fields().len())?,
             None => default_batch_size_for_column_count(arrow_schema.fields().len()),
         };
         let sample_size = validate_sample_size(self.sample_size)?;
-        let buffered_columns = new_buffered_columns(&arrow_schema, current_batch_size);
+
+        let props = WriterProperties::builder()
+            .set_compression(self.compression)
+            .set_max_row_group_row_count(None)
+            .set_max_row_group_bytes(None)
+            .build();
+
+        let file_writer = StreamingFileWriter::new(
+            writer,
+            arrow_schema.clone(),
+            props,
+            self.memory_threshold.max(MIN_ROW_GROUP_TARGET_BYTES),
+        )?;
+        let buffered_columns = new_buffered_columns(&arrow_schema);
 
         Ok(Writer {
-            arrow_writer: Some(arrow_writer),
+            file_writer: Some(file_writer),
             arrow_schema,
             buffered_columns,
             buffered_row_count: 0,
+            buffered_retained_bytes: 0,
             current_batch_size,
             memory_threshold: self.memory_threshold,
             sample_size,
             size_samples: Vec::with_capacity(sample_size),
-            total_rows_written: 0,
+            total_rows_seen: 0,
             fixed_batch_size: self.batch_size,
         })
     }
@@ -113,15 +126,16 @@ impl WriterBuilder {
 
 /// Core Parquet writer that works with any type implementing Write
 pub struct Writer<W: std::io::Write> {
-    arrow_writer: Option<ArrowWriter<W>>,
+    file_writer: Option<StreamingFileWriter<W>>,
     arrow_schema: StdArc<arrow_schema::Schema>,
     buffered_columns: Vec<Vec<ParquetValue>>,
     buffered_row_count: usize,
+    buffered_retained_bytes: usize,
     current_batch_size: usize,
     memory_threshold: usize,
     sample_size: usize,
     size_samples: Vec<usize>,
-    total_rows_written: usize,
+    total_rows_seen: usize,
     fixed_batch_size: Option<usize>,
 }
 
@@ -137,23 +151,26 @@ where
     /// Create a new writer with custom properties
     pub fn new_with_properties(writer: W, schema: Schema, props: WriterProperties) -> Result<Self> {
         let arrow_schema = schema_to_arrow(&schema)?;
-
-        let arrow_writer = ArrowWriter::try_new(writer, arrow_schema.clone(), Some(props))?;
-
         validate_column_count(arrow_schema.fields().len())?;
         let current_batch_size = default_batch_size_for_column_count(arrow_schema.fields().len());
-        let buffered_columns = new_buffered_columns(&arrow_schema, current_batch_size);
+        let row_group_target_bytes = props
+            .max_row_group_bytes()
+            .unwrap_or(DEFAULT_MEMORY_THRESHOLD);
+        let file_writer =
+            StreamingFileWriter::new(writer, arrow_schema.clone(), props, row_group_target_bytes)?;
+        let buffered_columns = new_buffered_columns(&arrow_schema);
 
         Ok(Self {
-            arrow_writer: Some(arrow_writer),
+            file_writer: Some(file_writer),
             arrow_schema,
             buffered_columns,
             buffered_row_count: 0,
+            buffered_retained_bytes: 0,
             current_batch_size,
             memory_threshold: DEFAULT_MEMORY_THRESHOLD,
             sample_size: DEFAULT_SAMPLE_SIZE,
             size_samples: Vec::with_capacity(DEFAULT_SAMPLE_SIZE),
-            total_rows_written: 0,
+            total_rows_seen: 0,
             fixed_batch_size: None,
         })
     }
@@ -187,18 +204,39 @@ where
             validate_value_against_field(value, field, &format!("row[{}]", idx))?;
         }
 
+        let row_retained_bytes = row.iter().fold(0usize, |total, value| {
+            total.saturating_add(value.retained_size_bytes())
+        });
+
         // Sample row size for dynamic batch sizing
         if self.fixed_batch_size.is_none() {
-            self.sample_row_size(&row)?;
+            self.sample_row_size(row_retained_bytes);
+        }
+
+        // A row that would cross either quantum starts the next batch. A
+        // singleton row larger than the byte quantum is still valid and makes
+        // progress by being written on its own.
+        if self.buffered_row_count > 0
+            && (self.buffered_row_count >= self.current_batch_size
+                || self
+                    .buffered_retained_bytes
+                    .saturating_add(row_retained_bytes)
+                    > self.memory_threshold)
+        {
+            self.flush_buffered_rows()?;
         }
 
         for (col_idx, value) in row.into_iter().enumerate() {
             self.buffered_columns[col_idx].push(value);
         }
         self.buffered_row_count += 1;
+        self.buffered_retained_bytes = self
+            .buffered_retained_bytes
+            .saturating_add(row_retained_bytes);
 
-        // Check if we need to flush
-        if self.buffered_row_count >= self.current_batch_size {
+        if self.buffered_row_count >= self.current_batch_size
+            || self.buffered_retained_bytes >= self.memory_threshold
+        {
             self.flush_buffered_rows()?;
         }
 
@@ -206,15 +244,15 @@ where
     }
 
     /// Sample row size for dynamic batch sizing using reservoir sampling
-    fn sample_row_size(&mut self, row: &[ParquetValue]) -> Result<()> {
-        let row_size = self.estimate_row_size(row)?;
+    fn sample_row_size(&mut self, row_size: usize) {
+        self.total_rows_seen = self.total_rows_seen.saturating_add(1);
 
         if self.size_samples.len() < self.sample_size {
             self.size_samples.push(row_size);
         } else {
             // Reservoir sampling
             let mut rng = rand::rng();
-            let idx = rng.random_range(0..=self.total_rows_written);
+            let idx = rng.random_range(0..self.total_rows_seen);
             if idx < self.sample_size {
                 self.size_samples[idx] = row_size;
             }
@@ -227,124 +265,6 @@ where
         if self.size_samples.len() >= samples_required {
             self.update_batch_size();
         }
-
-        Ok(())
-    }
-
-    /// Estimate the memory size of a single row
-    fn estimate_row_size(&self, row: &[ParquetValue]) -> Result<usize> {
-        let mut size = 0;
-        for (idx, value) in row.iter().enumerate() {
-            let field = &self.arrow_schema.fields()[idx];
-            size += self.estimate_value_size(value, field.data_type())?;
-        }
-        Ok(size)
-    }
-
-    /// Estimate the memory footprint of a single value
-    #[allow(clippy::only_used_in_recursion)]
-    fn estimate_value_size(&self, value: &ParquetValue, data_type: &DataType) -> Result<usize> {
-        use ParquetValue::*;
-
-        Ok(match (value, data_type) {
-            (Null, _) => 0,
-
-            // Fixed size types
-            (Boolean(_), DataType::Boolean) => 1,
-            (Int8(_), DataType::Int8) => 1,
-            (UInt8(_), DataType::UInt8) => 1,
-            (Int16(_), DataType::Int16) => 2,
-            (UInt16(_), DataType::UInt16) => 2,
-            (Int32(_), DataType::Int32) => 4,
-            (UInt32(_), DataType::UInt32) => 4,
-            (Float32(_), DataType::Float32) => 4,
-            (Int64(_), DataType::Int64) => 8,
-            (UInt64(_), DataType::UInt64) => 8,
-            (Float64(_), DataType::Float64) => 8,
-            (Date32(_), DataType::Date32) => 4,
-            (Date64(_), DataType::Date64) => 8,
-            (TimeMillis(_), DataType::Time32(_)) => 4,
-            (TimeMicros(_), DataType::Time64(_)) => 8,
-            (TimeNanos(_), DataType::Time64(_)) => 8,
-            (TimestampSecond(_, _), DataType::Timestamp(_, _)) => 8,
-            (TimestampMillis(_, _), DataType::Timestamp(_, _)) => 8,
-            (TimestampMicros(_, _), DataType::Timestamp(_, _)) => 8,
-            (TimestampNanos(_, _), DataType::Timestamp(_, _)) => 8,
-            (Decimal128(_, _), DataType::Decimal128(_, _)) => 16,
-
-            // Variable size types
-            (String(s), DataType::Utf8) => s.len() + std::mem::size_of::<usize>() * 3,
-            (Bytes(b), DataType::Binary) => b.len() + std::mem::size_of::<usize>() * 3,
-            (Bytes(_), DataType::FixedSizeBinary(len)) => *len as usize,
-
-            (Decimal256(v, _), DataType::Decimal256(_, _)) => {
-                let bytes = v.to_signed_bytes_le();
-                32 + bytes.len()
-            }
-
-            // Complex types
-            (List(items), DataType::List(field)) => {
-                let base_size = std::mem::size_of::<usize>() * 3;
-                if items.is_empty() {
-                    base_size
-                } else {
-                    // Sample up to 5 elements
-                    let sample_count = items.len().min(5);
-                    let sample_size: usize = items
-                        .iter()
-                        .take(sample_count)
-                        .map(|item| {
-                            self.estimate_value_size(item, field.data_type())
-                                .unwrap_or(0)
-                        })
-                        .sum();
-                    let avg_size = sample_size / sample_count;
-                    base_size + (avg_size * items.len())
-                }
-            }
-
-            (Map(entries), DataType::Map(entries_field, _)) => {
-                if let DataType::Struct(fields) = entries_field.data_type() {
-                    let base_size = std::mem::size_of::<usize>() * 4;
-                    if entries.is_empty() || fields.len() < 2 {
-                        base_size
-                    } else {
-                        // Sample up to 5 entries
-                        let sample_count = entries.len().min(5);
-                        let mut total_size = base_size;
-
-                        for (key, val) in entries.iter().take(sample_count) {
-                            total_size += self
-                                .estimate_value_size(key, fields[0].data_type())
-                                .unwrap_or(0);
-                            total_size += self
-                                .estimate_value_size(val, fields[1].data_type())
-                                .unwrap_or(0);
-                        }
-
-                        let avg_entry_size = (total_size - base_size) / sample_count;
-                        base_size + (avg_entry_size * entries.len())
-                    }
-                } else {
-                    100 // Default estimate
-                }
-            }
-
-            (Record(fields), DataType::Struct(schema_fields)) => {
-                let base_size = std::mem::size_of::<usize>() * 3;
-                let field_sizes: usize = fields
-                    .iter()
-                    .zip(schema_fields.iter())
-                    .map(|((_, val), field)| {
-                        self.estimate_value_size(val, field.data_type())
-                            .unwrap_or(0)
-                    })
-                    .sum();
-                base_size + field_sizes
-            }
-
-            _ => 100, // Default estimate for mismatched types
-        })
     }
 
     /// Update dynamic batch size based on current samples
@@ -353,7 +273,10 @@ where
             return;
         }
 
-        let total_size: usize = self.size_samples.iter().sum();
+        let total_size = self
+            .size_samples
+            .iter()
+            .fold(0usize, |total, size| total.saturating_add(*size));
         let avg_row_size = (total_size as f64 / self.size_samples.len() as f64).max(1.0);
         let suggested_batch_size = (self.memory_threshold as f64 / avg_row_size).floor() as usize;
         self.current_batch_size = dynamic_batch_size_for_column_count(
@@ -380,28 +303,16 @@ where
         let batch = RecordBatch::try_new(self.arrow_schema.clone(), arrow_columns)?;
 
         // Write the batch
-        if let Some(writer) = &mut self.arrow_writer {
+        if let Some(writer) = &mut self.file_writer {
             writer.write(&batch)?;
 
-            let num_rows = self.buffered_row_count;
             self.buffered_row_count = 0;
-            self.total_rows_written += num_rows;
-            let reserve_target = self.current_batch_size;
+            self.buffered_retained_bytes = 0;
             for column in &mut self.buffered_columns {
                 column.clear();
-                let additional_capacity = reserve_target.saturating_sub(column.capacity());
-                column.reserve(additional_capacity);
-            }
-
-            // Check if we need to flush based on memory usage
-            if writer.in_progress_size() >= self.memory_threshold
-                || writer.memory_size() >= self.memory_threshold
-            {
-                writer.flush()?;
             }
         } else {
-            return Err(ParquetError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(ParquetError::Io(std::io::Error::other(
                 "Writer has been closed",
             )));
         }
@@ -411,21 +322,20 @@ where
 
     /// Write columns to the Parquet file
     ///
-    /// Each element is a tuple of (column_name, values)
+    /// Each element is one bounded caller-owned column batch. Values are moved
+    /// through the same byte-aware row admission path as `write_row`, so Arrow
+    /// conversion never materializes a second batch proportional to the full
+    /// file.
     pub fn write_columns(&mut self, columns: Vec<(String, Vec<ParquetValue>)>) -> Result<()> {
-        self.flush_buffered_rows()?;
-
         if columns.is_empty() {
-            return Ok(());
+            return self.flush_buffered_rows();
         }
 
-        // Verify column names match schema
-        let schema_fields = self.arrow_schema.fields();
-        if columns.len() != schema_fields.len() {
+        if columns.len() != self.arrow_schema.fields().len() {
             return Err(ParquetError::Schema(format!(
                 "Provided {} columns but schema has {} fields",
                 columns.len(),
-                schema_fields.len()
+                self.arrow_schema.fields().len()
             )));
         }
 
@@ -444,60 +354,66 @@ where
             }
         }
 
-        // Anchor the expected length to the first schema column and report
-        // mismatches in schema order, so the error is deterministic regardless
-        // of HashMap iteration order.
-        let expected_len = schema_fields
-            .first()
-            .and_then(|field| columns_by_name.get(field.name().as_str()))
-            .map_or(0, Vec::len);
-        for field in schema_fields {
-            if let Some(values) = columns_by_name.get(field.name().as_str()) {
-                if values.len() != expected_len {
-                    return Err(ParquetError::Schema(format!(
-                        "Column '{}' has {} values but expected {}",
-                        field.name(),
-                        values.len(),
-                        expected_len
-                    )));
+        let ordered_columns = {
+            let schema_fields = self.arrow_schema.fields();
+            // Anchor the expected length to the first schema column and report
+            // mismatches in schema order, independent of HashMap iteration.
+            let expected_len = schema_fields
+                .first()
+                .and_then(|field| columns_by_name.get(field.name().as_str()))
+                .map_or(0, Vec::len);
+            for field in schema_fields {
+                if let Some(values) = columns_by_name.get(field.name().as_str()) {
+                    if values.len() != expected_len {
+                        return Err(ParquetError::Schema(format!(
+                            "Column '{}' has {} values but expected {}",
+                            field.name(),
+                            values.len(),
+                            expected_len
+                        )));
+                    }
                 }
             }
-        }
 
-        // Sort columns to match schema order and convert to arrays
-        let mut arrow_columns = Vec::with_capacity(schema_fields.len());
-
-        for field in schema_fields {
-            let values = columns_by_name
-                .remove(field.name().as_str())
-                .ok_or_else(|| ParquetError::Schema(format!("Missing column: {}", field.name())))?;
-
-            for (idx, value) in values.iter().enumerate() {
-                validate_value_against_field(
-                    value,
-                    field,
-                    &format!("column '{}'[{}]", field.name(), idx),
-                )?;
+            let mut ordered = Vec::with_capacity(schema_fields.len());
+            for field in schema_fields {
+                let values = columns_by_name
+                    .remove(field.name().as_str())
+                    .ok_or_else(|| {
+                        ParquetError::Schema(format!("Missing column: {}", field.name()))
+                    })?;
+                for (index, value) in values.iter().enumerate() {
+                    validate_value_against_field(
+                        value,
+                        field,
+                        &format!("column '{}'[{}]", field.name(), index),
+                    )?;
+                }
+                ordered.push(values);
             }
+            ordered
+        };
 
-            let array = parquet_values_to_arrow_array(&values, field)?;
-            arrow_columns.push(array);
+        let row_count = ordered_columns.first().map_or(0, Vec::len);
+        let mut columns = ordered_columns
+            .into_iter()
+            .map(Vec::into_iter)
+            .collect::<Vec<_>>();
+        for _ in 0..row_count {
+            let row = columns
+                .iter_mut()
+                .map(|column| {
+                    column.next().ok_or_else(|| {
+                        ParquetError::Schema(
+                            "validated column batch ended unexpectedly".to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.write_row(row)?;
         }
 
-        // Create RecordBatch
-        let batch = RecordBatch::try_new(self.arrow_schema.clone(), arrow_columns)?;
-
-        // Write the batch
-        if let Some(writer) = &mut self.arrow_writer {
-            writer.write(&batch)?;
-        } else {
-            return Err(ParquetError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Writer has been closed",
-            )));
-        }
-
-        Ok(())
+        self.flush_buffered_rows()
     }
 
     /// Flush any buffered data
@@ -506,8 +422,8 @@ where
         self.flush_buffered_rows()?;
 
         // Then flush the arrow writer
-        if let Some(writer) = &mut self.arrow_writer {
-            writer.flush()?;
+        if let Some(writer) = &mut self.file_writer {
+            writer.flush_row_group()?;
         }
         Ok(())
     }
@@ -520,7 +436,7 @@ where
         self.flush_buffered_rows()?;
 
         // Close the arrow writer
-        if let Some(writer) = self.arrow_writer.take() {
+        if let Some(writer) = self.file_writer.take() {
             writer.close()?;
         }
         Ok(())
@@ -688,11 +604,18 @@ fn validate_column_count(column_count: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_memory_threshold(memory_threshold: usize) -> Result<()> {
+    if memory_threshold == 0 {
+        return Err(ParquetError::Schema(
+            "memory threshold must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn max_batch_size_for_column_count(column_count: usize) -> usize {
     let width = column_count.max(1);
-    (MAX_BUFFERED_VALUE_SLOTS / width)
-        .max(1)
-        .min(MAX_BATCH_SIZE)
+    (MAX_BUFFERED_VALUE_SLOTS / width).clamp(1, MAX_BATCH_SIZE)
 }
 
 fn default_batch_size_for_column_count(column_count: usize) -> usize {
@@ -822,19 +745,11 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
     }
 }
 
-fn new_buffered_columns(
-    arrow_schema: &arrow_schema::Schema,
-    capacity: usize,
-) -> Vec<Vec<ParquetValue>> {
+fn new_buffered_columns(arrow_schema: &arrow_schema::Schema) -> Vec<Vec<ParquetValue>> {
     let column_count = arrow_schema.fields().len();
     debug_assert!(column_count <= MAX_BUFFERED_VALUE_SLOTS);
-    debug_assert!(capacity <= max_batch_size_for_column_count(column_count));
 
-    arrow_schema
-        .fields()
-        .iter()
-        .map(|_| Vec::with_capacity(capacity))
-        .collect()
+    arrow_schema.fields().iter().map(|_| Vec::new()).collect()
 }
 
 fn validate_decimal128_schema(
@@ -1011,23 +926,26 @@ mod tests {
     }
 
     #[test]
-    fn fixed_batch_size_preserves_small_user_value() {
+    fn fixed_batch_size_preserves_small_user_value_without_eager_allocation() {
         let writer = WriterBuilder::new()
             .with_batch_size(1)
             .build(Vec::new(), single_int64_schema())
             .unwrap();
 
         assert_eq!(writer.current_batch_size, 1);
-        assert_eq!(writer.buffered_columns[0].capacity(), 1);
+        assert_eq!(writer.buffered_columns[0].capacity(), 0);
     }
 
     #[test]
     fn oversized_fixed_batch_size_is_rejected_before_initial_buffer_allocation() {
-        let result = WriterBuilder::new()
-            .with_batch_size(MAX_BATCH_SIZE + 1)
-            .build(Vec::new(), single_int64_schema());
-
-        assert!(result.is_err());
+        let mut output = Vec::new();
+        {
+            let result = WriterBuilder::new()
+                .with_batch_size(MAX_BATCH_SIZE + 1)
+                .build(&mut output, single_int64_schema());
+            assert!(result.is_err());
+        }
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -1063,17 +981,23 @@ mod tests {
         assert_eq!(writer.size_samples.len(), 1);
         assert_eq!(
             writer.current_batch_size,
-            dynamic_batch_size_for_column_count(16, 1)
+            dynamic_batch_size_for_column_count(
+                128 / ParquetValue::Int64(1).retained_size_bytes(),
+                1
+            )
         );
     }
 
     #[test]
     fn oversized_sample_size_is_rejected_before_initial_buffer_allocation() {
-        let result = WriterBuilder::new()
-            .with_sample_size(usize::MAX)
-            .build(Vec::new(), single_int64_schema());
-
-        assert!(result.is_err());
+        let mut output = Vec::new();
+        {
+            let result = WriterBuilder::new()
+                .with_sample_size(usize::MAX)
+                .build(&mut output, single_int64_schema());
+            assert!(result.is_err());
+        }
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -1164,45 +1088,5 @@ mod tests {
 
         // Close to flush remaining rows
         writer.close().unwrap();
-    }
-
-    #[test]
-    fn test_row_size_estimation() {
-        let schema = SchemaBuilder::new()
-            .with_root(SchemaNode::Struct {
-                name: "root".to_string(),
-                nullable: false,
-                fields: vec![
-                    SchemaNode::Primitive {
-                        name: "id".to_string(),
-                        primitive_type: crate::PrimitiveType::Int64,
-                        nullable: false,
-                        format: None,
-                    },
-                    SchemaNode::Primitive {
-                        name: "data".to_string(),
-                        primitive_type: crate::PrimitiveType::String,
-                        nullable: false,
-                        format: None,
-                    },
-                ],
-            })
-            .build()
-            .unwrap();
-
-        let buffer = Vec::new();
-        let writer = Writer::new(buffer, schema).unwrap();
-
-        // Test size estimation for different value types
-        let row = vec![
-            ParquetValue::Int64(12345),
-            ParquetValue::String(Arc::from("Hello, World!")),
-        ];
-
-        let size = writer.estimate_row_size(&row).unwrap();
-        assert!(size > 0);
-
-        // Int64 = 8 bytes, String = 13 chars + overhead
-        assert!(size >= 8 + 13);
     }
 }

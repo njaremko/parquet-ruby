@@ -106,7 +106,11 @@ pub fn parse_parquet_write_args(
             kwargs.optional.0.flatten(),
             MAX_BATCH_SIZE,
         )?,
-        flush_threshold: kwargs.optional.1.flatten(),
+        flush_threshold: parse_positive_usize(
+            ruby,
+            "flush_threshold",
+            kwargs.optional.1.flatten(),
+        )?,
         compression: kwargs.optional.2.flatten(),
         sample_size: parse_positive_bounded_usize(
             ruby,
@@ -287,6 +291,23 @@ fn parse_positive_bounded_usize(
         return Err(MagnusError::new(
             ruby.exception_arg_error(),
             format!("{name} must be at most {max}"),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn parse_positive_usize(
+    ruby: &Ruby,
+    name: &str,
+    value: Option<usize>,
+) -> Result<Option<usize>, MagnusError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == 0 {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            format!("{name} must be positive"),
         ));
     }
     Ok(Some(value))

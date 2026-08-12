@@ -63,6 +63,15 @@ class DynamicBatchTest < Minitest::Test
     assert_equal 10_000, rows.last['value'].length
   end
 
+  def test_memory_threshold_rejects_zero
+    error = assert_raises(ArgumentError) do
+      Parquet.write_rows([[1, 'one']], schema: SCHEMA, write_to: @test_file, flush_threshold: 0)
+    end
+
+    assert_match(/flush_threshold must be positive/, error.message)
+    refute File.exist?(@test_file)
+  end
+
   def test_sample_size_option_round_trips
     data = (0...20).map { |i| [i, 'small'] } + (0...80).map { |i| [i + 20, 'x' * 5000] }
     rows = write_and_read(data, sample_size: 10, flush_threshold: 512 * 1024)

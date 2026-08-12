@@ -159,7 +159,7 @@ schema = [
 ]
 
 # Stream data from any enumerable
-rows = CSV.foreach("input.csv").map do |row|
+rows = CSV.foreach("input.csv").lazy.map do |row|
   [row[0].to_i, row[1], row[2] == "true", row[3].to_f]
 end
 
@@ -293,7 +293,9 @@ Parquet.write_columns(batches.each,
 ```
 
 `write_columns` also accepts `logger:` with the same Ruby logger interface as
-row writes.
+row writes. The outer enumerable is pulled one batch at a time; each batch must
+contain one array per schema field, and every array in that batch must have the
+same length.
 
 ## Data Types
 
@@ -477,14 +479,29 @@ Control memory usage with flush thresholds:
 Parquet.write_rows(huge_dataset.each,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 1000,              # Positive rows before considering flush
-  flush_threshold: 32 * 1024**2  # Flush if batch exceeds 32MB
+  batch_size: 1000,              # Maximum converted rows per native batch
+  flush_threshold: 32 * 1024**2  # Converted-value memory quantum
 )
 ```
 
-Write batch and sample sizes are bounded before buffer allocation. Very large
-batch sizes are rejected, and wide schemas have a lower effective batch cap so
-the writer cannot reserve unbounded per-column value slots.
+Both write APIs pull from `each`; they never call `to_a` on the outer input.
+Converted values are flushed before admitting a row that would cross
+`flush_threshold` (a single larger row is written alone). Encoded Parquet row
+groups use `max(flush_threshold, 8 MiB)` so tiny memory quanta cannot create one
+row group per row and exhaust the locked backend's row-group ordinal. Completed
+footer metadata is serialized immediately to a disk spool instead of
+accumulating in memory. Peak writer-owned native heap use is therefore
+independent of total file length: it is a constant multiple of the row-group
+quantum, plus schema state, bounded caches/samples, conversion scratch, one
+oversized logical row, and the caller-owned row or column batch currently
+yielded. Memory intentionally owned by a caller-provided in-memory output object
+is outside that bound.
+
+`batch_size` is also capped by the schema width, and no full batch is reserved
+up front. Column batches are validated and consumed independently, so earlier
+batches are released before the next one is requested. Path outputs are staged
+beside the destination and atomically published only after the complete stream
+and Parquet footer succeed.
 
 ## Architecture
 

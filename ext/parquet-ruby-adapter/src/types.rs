@@ -1,9 +1,7 @@
 use crate::string_storage::StringStorageConfig;
 use magnus::Value;
 use parquet::basic::Compression;
-use std::fs::File;
 use std::str::FromStr;
-use tempfile::NamedTempFile;
 
 /// Arguments for writing Parquet files
 #[derive(Debug)]
@@ -62,12 +60,6 @@ pub struct ColumnEnumeratorArgs {
     pub strict: bool,
     pub string_storage: StringStorageConfig,
     pub logger: Option<Value>,
-}
-
-/// Enum to handle different writer outputs
-pub enum WriterOutput {
-    File(parquet_core::Writer<File>),
-    TempFile(parquet_core::Writer<File>, NamedTempFile, Value), // Writer, temp file, IO object
 }
 
 /// Result type for parser output

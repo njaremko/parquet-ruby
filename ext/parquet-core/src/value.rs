@@ -160,6 +160,103 @@ impl ParquetValue {
             ParquetValue::Null => "Null",
         }
     }
+
+    /// Conservative retained-memory charge used by the streaming writer.
+    ///
+    /// Shared string/byte contents are charged to every value that can retain
+    /// them. This may flush early, but it prevents sharing from making the
+    /// writer's admission decision depend on ownership aliases it cannot see.
+    /// The traversal is iterative so adversarially nested values do not consume
+    /// the native call stack.
+    pub(crate) fn retained_size_bytes(&self) -> usize {
+        let mut total = 0usize;
+        let mut pending = vec![self];
+
+        while let Some(value) = pending.pop() {
+            total = total.saturating_add(std::mem::size_of::<Self>());
+            match value {
+                Self::String(value) => {
+                    total = total
+                        .saturating_add(value.len())
+                        .saturating_add(2 * std::mem::size_of::<usize>());
+                }
+                Self::Bytes(value) => {
+                    total = total
+                        .saturating_add(value.len())
+                        .saturating_add(2 * std::mem::size_of::<usize>());
+                }
+                Self::Decimal256(value, _) => {
+                    let byte_len = (value.bits().saturating_add(7) / 8).max(32);
+                    total = total.saturating_add(usize::try_from(byte_len).unwrap_or(usize::MAX));
+                }
+                Self::TimestampSecond(_, timezone)
+                | Self::TimestampMillis(_, timezone)
+                | Self::TimestampMicros(_, timezone)
+                | Self::TimestampNanos(_, timezone) => {
+                    if let Some(timezone) = timezone {
+                        total = total.saturating_add(timezone.len());
+                    }
+                }
+                Self::List(values) => {
+                    total = total.saturating_add(
+                        values
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<Self>()),
+                    );
+                    pending.extend(values);
+                }
+                Self::Map(entries) => {
+                    total = total.saturating_add(
+                        entries
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(Self, Self)>()),
+                    );
+                    for (key, value) in entries {
+                        pending.push(key);
+                        pending.push(value);
+                    }
+                }
+                Self::Record(fields) => {
+                    // IndexMap owns both a dense entry table and a hash index.
+                    // Charging two dense entries per capacity is deliberately
+                    // conservative across IndexMap implementation changes.
+                    let entry_bytes = std::mem::size_of::<(Arc<str>, Self)>();
+                    total = total.saturating_add(
+                        fields
+                            .capacity()
+                            .saturating_mul(entry_bytes)
+                            .saturating_mul(2),
+                    );
+                    for (name, value) in fields {
+                        total = total.saturating_add(name.len());
+                        pending.push(value);
+                    }
+                }
+                Self::Int8(_)
+                | Self::Int16(_)
+                | Self::Int32(_)
+                | Self::Int64(_)
+                | Self::UInt8(_)
+                | Self::UInt16(_)
+                | Self::UInt32(_)
+                | Self::UInt64(_)
+                | Self::Float16(_)
+                | Self::Float32(_)
+                | Self::Float64(_)
+                | Self::Boolean(_)
+                | Self::Uuid(_)
+                | Self::Date32(_)
+                | Self::Date64(_)
+                | Self::Decimal128(_, _)
+                | Self::TimeMillis(_)
+                | Self::TimeMicros(_)
+                | Self::TimeNanos(_)
+                | Self::Null => {}
+            }
+        }
+
+        total
+    }
 }
 
 #[cfg(test)]

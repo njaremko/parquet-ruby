@@ -46,6 +46,7 @@ pub mod arrow_conversion;
 pub mod error;
 pub mod reader;
 pub mod schema;
+mod streaming_file_writer;
 pub mod traits;
 pub mod value;
 pub mod writer;

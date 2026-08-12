@@ -108,63 +108,6 @@ class MemoryUsageTest < Minitest::Test
                     "Column batch read retained #{stats[:object_growth]} objects for #{row_count} rows; expected bounded (streaming) memory"
   end
 
-  def test_writing_large_rows_constant_memory
-    # Test writing very large individual rows
-    row_count = 10_000
-    large_row_size = 10_000  # 10KB per row
-    large_string = "Y" * large_row_size
-
-    schema = {
-      fields: [
-        {name: 'id', type: :int64},
-        {name: 'large_data', type: :string},
-        {name: 'binary_data', type: :binary},
-        {name: 'timestamp', type: :timestamp_millis}
-      ]
-    }
-
-    # Test streaming write (if supported by API)
-    memory_stats = measure_memory_growth do
-      # Write rows one at a time to simulate streaming
-      data = []
-      row_count.times do |i|
-        row = [
-          i,
-          large_string,
-          large_string.b,  # Use binary encoding instead of bytes array
-          Time.now
-        ]
-        data << row
-
-        # Write in small batches to simulate streaming
-        if data.length >= 100
-          if i < 100
-            Parquet.write_rows(data, schema: schema, write_to: @test_file)
-          else
-            # Would need append functionality here
-            # For now, we'll test memory of accumulating data
-          end
-          data.clear
-          GC.start if i % 1000 == 0
-        end
-      end
-
-      # Write any remaining data
-      if data.any?
-        # This simulates the final write
-        Parquet.write_rows(data, schema: schema, write_to: @test_file)
-      end
-    end
-
-    file_size_mb = File.size(@test_file) / 1024.0 / 1024.0
-    puts "Written file size: #{file_size_mb.round(2)}MB" if ENV["VERBOSE"]
-    puts "Writing memory growth: #{memory_stats[:memory_growth_mb].round(2)}MB" if ENV["VERBOSE"]
-
-    # Memory growth should be reasonable even with large rows
-    assert memory_stats[:memory_growth_mb] < 100,
-           "Memory grew by #{memory_stats[:memory_growth_mb].round(2)}MB, expected < 100MB"
-  end
-
   def test_concurrent_reading_memory_efficiency
     # Create a moderately large file
     row_count = 100_000

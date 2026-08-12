@@ -90,7 +90,8 @@ module Parquet
   end
 
   # Options:
-  #   - `read_from`: An Enumerator yielding arrays of values representing each row
+  #   - `read_from`: An Enumerable yielding arrays of values representing each row. The outer
+  #                  enumerable is pulled incrementally and is never materialized with `to_a`.
   #   - `schema`: Array of hashes specifying column names and types. Supported types:
   #     - `int8`, `int16`, `int32`, `int64`
   #     - `uint8`, `uint16`, `uint32`, `uint64`
@@ -103,8 +104,9 @@ module Parquet
   #   - `write_to`: String path or IO object to write the parquet file to
   #   - `batch_size`: Optional positive batch size for writing (defaults to 1000, at most 1_000_000
   #                   for one-column schemas; wide schemas may have a lower safety cap)
-  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
-  #                        buffer before a row group is flushed (defaults to 100MB)
+  #   - `flush_threshold`: Optional positive byte quantum for converted native values (defaults
+  #                        to 100MB). One larger row is written alone. Encoded row groups use this
+  #                        value with an 8MB minimum; completed footer metadata is disk-spooled.
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   #   - `sample_size`: Optional positive number of rows to sample for size estimation
@@ -116,7 +118,7 @@ module Parquet
   #                     cached string content.
   sig do
     params(
-      read_from: T::Enumerator[T::Array[T.untyped]],
+      read_from: T::Enumerable[T::Array[T.untyped]],
       schema: T::Array[T::Hash[String, String]],
       write_to: T.any(String, IO),
       batch_size: T.nilable(Integer),
@@ -139,7 +141,8 @@ module Parquet
   end
 
   # Options:
-  #   - `read_from`: An Enumerator yielding arrays of column batches
+  #   - `read_from`: An Enumerable yielding arrays of column batches. Batches are validated and
+  #                  consumed one at a time; all columns in each batch must have equal length.
   #   - `schema`: Array of hashes specifying column names and types. Supported types:
   #     - `int8`, `int16`, `int32`, `int64`
   #     - `uint8`, `uint16`, `uint32`, `uint64`
@@ -151,14 +154,15 @@ module Parquet
   #     - `timestamp_millis`, `timestamp_micros`
   #     - Looks like [{"column_name" => {"type" => "date32", "format" => "%Y-%m-%d"}}, {"column_name" => "int8"}]
   #   - `write_to`: String path or IO object to write the parquet file to
-  #   - `flush_threshold`: Optional threshold in bytes for the writer's in-progress (encoded)
-  #                        buffer before a row group is flushed (defaults to 100MB)
+  #   - `flush_threshold`: Optional positive byte quantum for converted native values (defaults
+  #                        to 100MB). One larger row is written alone. Encoded row groups use this
+  #                        value with an 8MB minimum; completed footer metadata is disk-spooled.
   #   - `compression`: Optional compression type to use (defaults to "zstd")
   #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
   #   - `logger`: Optional Ruby logger for column-write progress messages
   sig do
     params(
-      read_from: T::Enumerator[T::Array[T::Array[T.untyped]]],
+      read_from: T::Enumerable[T::Array[T::Array[T.untyped]]],
       schema: T::Array[T::Hash[String, String]],
       write_to: T.any(String, IO),
       flush_threshold: T.nilable(Integer),

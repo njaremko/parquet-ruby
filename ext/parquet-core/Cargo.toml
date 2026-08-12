@@ -16,9 +16,8 @@ ordered-float = "5.0.0"
 parquet = { version = "58.3.0", features = ["arrow", "zstd", "lz4", "snap"] }
 rand = "0.9.1"
 serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.8"
 thiserror = "2.0"
+thrift = { version = "0.17", default-features = false }
 triomphe = "0.1.15"
 uuid = { version = "1.0", features = ["v4"] }
-
-[dev-dependencies]
-tempfile = "3.8"

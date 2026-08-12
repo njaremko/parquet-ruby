@@ -1,26 +1,57 @@
 use magnus::value::ReprValue;
-use magnus::{Error as MagnusError, Ruby, TryConvert, Value};
+use magnus::{Enumerator, Error as MagnusError, RArray, Ruby, TryConvert, Value};
 use parquet_core::writer::WriterBuilder;
-use parquet_core::Schema;
+use parquet_core::{Schema, SchemaNode};
+use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
-use tempfile::NamedTempFile;
+use std::path::{Path, PathBuf};
+use tempfile::{NamedTempFile, TempPath};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use crate::converter::RubyValueConverter;
 use crate::io::RubyIOWriter;
-use crate::types::WriterOutput;
+use crate::logger::RubyLogger;
+use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
+use crate::string_cache::StringCache;
 use crate::utils::parse_compression;
 
-/// How the writer batches rows before flushing. All batch sizing is owned by the
-/// core `Writer`; the adapter only forwards the user's options.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BatchSizingOptions {
-    pub batch_size: Option<usize>,
-    pub flush_threshold: Option<usize>,
-    pub sample_size: Option<usize>,
+enum WriterOutput {
+    Path {
+        writer: parquet_core::Writer<File>,
+        staging_path: TempPath,
+        destination: PathBuf,
+        final_state: PathFinalState,
+    },
+    Io {
+        writer: parquet_core::Writer<File>,
+        staging_path: TempPath,
+        io_object: Value,
+    },
 }
 
-/// Create a writer based on the output type (file path or IO object), forwarding
-/// the batch-sizing options to the core writer (the single source of truth).
-pub fn create_writer(
+struct PathFinalState {
+    #[cfg(unix)]
+    permissions: std::fs::Permissions,
+}
+
+impl WriterOutput {
+    fn writer_mut(&mut self) -> &mut parquet_core::Writer<File> {
+        match self {
+            Self::Path { writer, .. } | Self::Io { writer, .. } => writer,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct BatchSizingOptions {
+    batch_size: Option<usize>,
+    flush_threshold: Option<usize>,
+    sample_size: Option<usize>,
+}
+
+fn create_writer(
     ruby: &Ruby,
     write_to: Value,
     schema: Schema,
@@ -39,135 +70,350 @@ pub fn create_writer(
     }
 
     if write_to.is_kind_of(ruby.class_string()) {
-        // Direct file path
         let path_str: String = TryConvert::try_convert(write_to)?;
-        let file = std::fs::File::create(&path_str)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let destination = PathBuf::from(path_str);
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let (temp_file, final_state) =
+            create_path_staging_file(&destination, parent).map_err(|error| {
+                MagnusError::new(
+                    ruby.exception_runtime_error(),
+                    format!("Failed to create staging file: {error}"),
+                )
+            })?;
+        let file = temp_file.reopen().map_err(|error| {
+            MagnusError::new(
+                ruby.exception_runtime_error(),
+                format!("Failed to reopen staging file: {error}"),
+            )
+        })?;
+        let staging_path = temp_file.into_temp_path();
         let writer = builder
             .build(file, schema)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        Ok(WriterOutput::File(writer))
+            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+        Ok(WriterOutput::Path {
+            writer,
+            staging_path,
+            destination,
+            final_state,
+        })
     } else {
-        // IO-like object - create temporary file
-        let temp_file = NamedTempFile::new().map_err(|e| {
+        let temp_file = NamedTempFile::new().map_err(|error| {
             MagnusError::new(
                 ruby.exception_runtime_error(),
-                format!("Failed to create temporary file: {}", e),
+                format!("Failed to create temporary file: {error}"),
             )
         })?;
-
-        // Clone the file handle for the writer
-        let file = temp_file.reopen().map_err(|e| {
+        let file = temp_file.reopen().map_err(|error| {
             MagnusError::new(
                 ruby.exception_runtime_error(),
-                format!("Failed to reopen temporary file: {}", e),
+                format!("Failed to reopen temporary file: {error}"),
             )
         })?;
-
+        let staging_path = temp_file.into_temp_path();
         let writer = builder
             .build(file, schema)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-        Ok(WriterOutput::TempFile(writer, temp_file, write_to))
+            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+        Ok(WriterOutput::Io {
+            writer,
+            staging_path,
+            io_object: write_to,
+        })
     }
 }
 
-/// Finalize the writer and copy temp file to IO if needed
-pub fn finalize_writer(ruby: &Ruby, writer_output: WriterOutput) -> Result<(), MagnusError> {
-    match writer_output {
-        WriterOutput::File(writer) => writer
-            .close()
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string())),
-        WriterOutput::TempFile(writer, temp_file, io_object) => {
-            // Close the writer first
-            writer
-                .close()
-                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+#[cfg(unix)]
+fn create_path_staging_file(
+    destination: &Path,
+    parent: &Path,
+) -> std::io::Result<(NamedTempFile, PathFinalState)> {
+    let mut builder = tempfile::Builder::new();
+    let existing_permissions = match destination.metadata() {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            builder.permissions(std::fs::Permissions::from_mode(0o666));
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    let temp_file = builder.tempfile_in(parent)?;
+    let permissions = match existing_permissions {
+        Some(permissions) => permissions,
+        None => temp_file.as_file().metadata()?.permissions(),
+    };
+    Ok((temp_file, PathFinalState { permissions }))
+}
 
-            // Copy temp file to IO object
-            copy_temp_file_to_io(ruby, temp_file, io_object)
+#[cfg(not(unix))]
+fn create_path_staging_file(
+    _destination: &Path,
+    parent: &Path,
+) -> std::io::Result<(NamedTempFile, PathFinalState)> {
+    tempfile::Builder::new()
+        .tempfile_in(parent)
+        .map(|temp_file| (temp_file, PathFinalState {}))
+}
+
+#[cfg(unix)]
+fn publish_path(
+    staging_path: TempPath,
+    destination: &Path,
+    final_state: PathFinalState,
+) -> std::io::Result<()> {
+    // Rename preserves the staging inode's mode. Apply the saved mode while the
+    // file is private so a chmod failure cannot expose a new destination.
+    std::fs::set_permissions(&staging_path, final_state.permissions)?;
+    staging_path
+        .persist(destination)
+        .map_err(|error| error.error)
+}
+
+#[cfg(not(unix))]
+fn publish_path(
+    staging_path: TempPath,
+    destination: &Path,
+    _final_state: PathFinalState,
+) -> std::io::Result<()> {
+    staging_path
+        .persist(destination)
+        .map_err(|error| error.error)
+}
+
+/// Close the footer before making any bytes visible at the requested output.
+fn finalize_writer(ruby: &Ruby, writer_output: WriterOutput) -> Result<(), MagnusError> {
+    match writer_output {
+        WriterOutput::Path {
+            writer,
+            staging_path,
+            destination,
+            final_state,
+        } => {
+            writer.close().map_err(|error| {
+                MagnusError::new(ruby.exception_runtime_error(), error.to_string())
+            })?;
+            publish_path(staging_path, &destination, final_state).map_err(|error| {
+                MagnusError::new(
+                    ruby.exception_runtime_error(),
+                    format!(
+                        "Failed to publish staging file to {}: {}",
+                        destination.display(),
+                        error
+                    ),
+                )
+            })
+        }
+        WriterOutput::Io {
+            writer,
+            staging_path,
+            io_object,
+        } => {
+            writer.close().map_err(|error| {
+                MagnusError::new(ruby.exception_runtime_error(), error.to_string())
+            })?;
+            copy_temp_file_to_io(ruby, staging_path, io_object)
         }
     }
 }
 
-/// Copy temporary file contents to Ruby IO object
 fn copy_temp_file_to_io(
     ruby: &Ruby,
-    temp_file: NamedTempFile,
+    staging_path: TempPath,
     io_object: Value,
 ) -> Result<(), MagnusError> {
-    let file = temp_file.reopen().map_err(|e| {
+    let file = File::open(&staging_path).map_err(|error| {
         MagnusError::new(
             ruby.exception_runtime_error(),
-            format!("Failed to reopen temporary file: {}", e),
+            format!("Failed to reopen temporary file: {error}"),
         )
     })?;
+    let mut reader = BufReader::new(file);
+    let mut writer = BufWriter::new(RubyIOWriter::new(io_object));
 
-    let mut buf_reader = BufReader::new(file);
-    let ruby_io_writer = RubyIOWriter::new(io_object);
-    let mut buf_writer = BufWriter::new(ruby_io_writer);
-
-    std::io::copy(&mut buf_reader, &mut buf_writer).map_err(|e| {
+    std::io::copy(&mut reader, &mut writer).map_err(|error| {
         MagnusError::new(
             ruby.exception_runtime_error(),
-            format!("Failed to copy temp file to IO object: {}", e),
+            format!("Failed to copy temp file to IO object: {error}"),
         )
     })?;
-
-    buf_writer.flush().map_err(|e| {
+    writer.flush().map_err(|error| {
         MagnusError::new(
             ruby.exception_runtime_error(),
-            format!("Failed to flush IO object: {}", e),
+            format!("Failed to flush IO object: {error}"),
         )
-    })?;
-
-    // The temporary file will be automatically deleted when temp_file is dropped
-    Ok(())
+    })
 }
 
-/// Write data in row format to a parquet file
+fn input_enumerator(ruby: &Ruby, input: Value) -> Result<Enumerator, MagnusError> {
+    if !input.respond_to("each", false)? {
+        return Err(MagnusError::new(
+            ruby.exception_type_error(),
+            "data must respond to 'each'",
+        ));
+    }
+    Ok(input.enumeratorize("each", ()))
+}
+
+fn conversion_error(ruby: &Ruby, error: impl ToString) -> MagnusError {
+    let message = error.to_string();
+    if message.contains("EncodingError") || message.contains("invalid utf-8") {
+        let message = message
+            .find("EncodingError: ")
+            .map(|position| message[position + 15..].to_string())
+            .unwrap_or(message);
+        MagnusError::new(ruby.exception_encoding_error(), message)
+    } else {
+        MagnusError::new(ruby.exception_runtime_error(), message)
+    }
+}
+
+fn apply_non_fatal_logging_policy(result: Result<(), MagnusError>) {
+    if let Err(_logger_error) = result {
+        // Logging is observational: caller logger failures must not change file
+        // contents, publication, or the result of the write operation.
+    }
+}
+
+fn array_entry(ruby: &Ruby, array: RArray, index: usize) -> Result<Value, MagnusError> {
+    let index = isize::try_from(index).map_err(|_| {
+        MagnusError::new(ruby.exception_runtime_error(), "array index exceeds isize")
+    })?;
+    array.entry(index)
+}
+
+fn write_row_value(
+    ruby: &Ruby,
+    writer: &mut parquet_core::Writer<File>,
+    converter: &mut RubyValueConverter,
+    field_schemas: &[SchemaNode],
+    row_value: Value,
+) -> Result<(), MagnusError> {
+    if !row_value.is_kind_of(ruby.class_array()) {
+        return Err(MagnusError::new(
+            ruby.exception_type_error(),
+            "each row must be an array",
+        ));
+    }
+
+    let row_array: RArray = TryConvert::try_convert(row_value)?;
+    if row_array.len() != field_schemas.len() {
+        return Err(MagnusError::new(
+            ruby.exception_runtime_error(),
+            format!(
+                "Row has {} values but schema has {} fields",
+                row_array.len(),
+                field_schemas.len()
+            ),
+        ));
+    }
+
+    let mut row = Vec::with_capacity(field_schemas.len());
+    for (column_index, field_schema) in field_schemas.iter().enumerate() {
+        let value = array_entry(ruby, row_array, column_index)?;
+        row.push(
+            converter
+                .to_parquet_with_schema_hint(value, Some(field_schema))
+                .map_err(|error| conversion_error(ruby, error))?,
+        );
+    }
+
+    writer
+        .write_row(row)
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))
+}
+
+fn write_column_batch(
+    ruby: &Ruby,
+    writer: &mut parquet_core::Writer<File>,
+    converter: &mut RubyValueConverter,
+    field_schemas: &[SchemaNode],
+    batch_index: usize,
+    batch_value: Value,
+) -> Result<usize, MagnusError> {
+    if !batch_value.is_kind_of(ruby.class_array()) {
+        return Err(MagnusError::new(
+            ruby.exception_type_error(),
+            format!("batch {batch_index} must be an array of column values"),
+        ));
+    }
+
+    let batch: RArray = TryConvert::try_convert(batch_value)?;
+    if batch.len() != field_schemas.len() {
+        return Err(MagnusError::new(
+            ruby.exception_runtime_error(),
+            format!(
+                "Batch {batch_index} has {} columns but schema has {}",
+                batch.len(),
+                field_schemas.len()
+            ),
+        ));
+    }
+
+    let mut columns = Vec::with_capacity(field_schemas.len());
+    let mut row_count = None;
+    for column_index in 0..field_schemas.len() {
+        let values = array_entry(ruby, batch, column_index)?;
+        if !values.is_kind_of(ruby.class_array()) {
+            return Err(MagnusError::new(
+                ruby.exception_type_error(),
+                format!("batch {batch_index} column {column_index} must be an array"),
+            ));
+        }
+        let values: RArray = TryConvert::try_convert(values)?;
+        match row_count {
+            None => row_count = Some(values.len()),
+            Some(expected) if values.len() != expected => {
+                return Err(MagnusError::new(
+                    ruby.exception_runtime_error(),
+                    format!(
+                        "batch {batch_index} column {column_index} has {} values but expected {expected}",
+                        values.len()
+                    ),
+                ));
+            }
+            Some(_) => {}
+        }
+        columns.push(values);
+    }
+
+    let row_count = row_count.unwrap_or(0);
+    for row_index in 0..row_count {
+        let mut row = Vec::with_capacity(field_schemas.len());
+        for (column, field_schema) in columns.iter().zip(field_schemas) {
+            let value = array_entry(ruby, *column, row_index)?;
+            row.push(
+                converter
+                    .to_parquet_with_schema_hint(value, Some(field_schema))
+                    .map_err(|error| conversion_error(ruby, error))?,
+            );
+        }
+        writer
+            .write_row(row)
+            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+    }
+
+    Ok(row_count)
+}
+
+/// Write a finite enumeration of logical rows without retaining prior input.
 pub fn write_rows(
     ruby: &Ruby,
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
-    use crate::converter::RubyValueConverter;
-    use crate::logger::RubyLogger;
-    use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
-    use crate::string_cache::StringCache;
-    use magnus::{RArray, TryConvert};
-
-    // Convert data to array if it isn't already
-    let data_array = if write_args.read_from.is_kind_of(ruby.class_array()) {
-        TryConvert::try_convert(write_args.read_from)?
-    } else if write_args.read_from.respond_to("to_a", false)? {
-        let array_value: Value = write_args.read_from.funcall("to_a", ())?;
-        TryConvert::try_convert(array_value)?
-    } else {
-        return Err(MagnusError::new(
-            ruby.exception_type_error(),
-            "data must be an array or respond to 'to_a'",
-        ));
-    };
-
-    let data_array: RArray = data_array;
-
-    // Process schema value
-    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(&data_array))
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-    // Create schema
+    let logger = RubyLogger::new(write_args.logger)?;
+    let mut input = input_enumerator(ruby, write_args.read_from)?;
+    let first_row = input.next().transpose()?;
+    let schema_hash = process_schema_value(ruby, write_args.schema_value, first_row)
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
     let schema = ruby_schema_to_parquet(schema_hash)
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-    // Extract field schemas for conversion hints
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
     let field_schemas = extract_field_schemas(&schema);
-
-    // Create writer. All batch sizing and flushing is owned by the core writer;
-    // the user's batch_size/flush_threshold/sample_size are forwarded to it.
     let mut writer_output = create_writer(
         ruby,
         write_args.write_to,
-        schema.clone(),
+        schema,
         write_args.compression,
         BatchSizingOptions {
             batch_size: write_args.batch_size,
@@ -176,138 +422,81 @@ pub fn write_rows(
         },
     )?;
 
-    // Create logger
-    let logger = RubyLogger::new(write_args.logger)?;
-    let _ = logger.info(|| "Starting to write parquet file".to_string());
-
-    // Create converter with string cache if enabled. `string_cache` is the
-    // requested capacity (None = disabled).
+    apply_non_fatal_logging_policy(logger.info(|| "Starting to write parquet file".to_string()));
     let mut converter = if let Some(capacity) = write_args.string_cache {
-        let _ = logger.debug(|| format!("String cache enabled (capacity {})", capacity));
+        apply_non_fatal_logging_policy(
+            logger.debug(|| format!("String cache enabled (capacity {capacity})")),
+        );
         RubyValueConverter::with_string_cache(StringCache::new(capacity))
     } else {
         RubyValueConverter::new()
     };
-
-    // Stream each row to the core writer, which buffers and flushes internally
-    // according to its (now sole) batch-sizing policy.
     let mut total_rows = 0u64;
 
-    for row_value in data_array.into_iter() {
-        // Convert Ruby row to ParquetValue vector
-        let row = if row_value.is_kind_of(ruby.class_array()) {
-            let array: RArray = TryConvert::try_convert(row_value)?;
-            let mut values = Vec::with_capacity(array.len());
-
-            for (idx, item) in array.into_iter().enumerate() {
-                let schema_hint = field_schemas.get(idx);
-                let pq_value = converter
-                    .to_parquet_with_schema_hint(item, schema_hint)
-                    .map_err(|e| {
-                        let error_msg = e.to_string();
-                        // Check if this is an encoding error
-                        if error_msg.contains("EncodingError")
-                            || error_msg.contains("invalid utf-8")
-                        {
-                            // Extract the actual encoding error message
-                            if let Some(pos) = error_msg.find("EncodingError: ") {
-                                let encoding_msg = error_msg[pos + 15..].to_string();
-                                MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
-                            } else {
-                                MagnusError::new(ruby.exception_encoding_error(), error_msg)
-                            }
-                        } else {
-                            MagnusError::new(ruby.exception_runtime_error(), error_msg)
-                        }
-                    })?;
-                values.push(pq_value);
-            }
-            values
-        } else {
-            return Err(MagnusError::new(
-                ruby.exception_type_error(),
-                "each row must be an array",
-            ));
-        };
-
-        match &mut writer_output {
-            WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
-                writer
-                    .write_row(row)
-                    .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-            }
-        }
+    if let Some(row) = first_row {
+        write_row_value(
+            ruby,
+            writer_output.writer_mut(),
+            &mut converter,
+            &field_schemas,
+            row,
+        )?;
         total_rows += 1;
     }
+    for row in input {
+        write_row_value(
+            ruby,
+            writer_output.writer_mut(),
+            &mut converter,
+            &field_schemas,
+            row?,
+        )?;
+        total_rows = total_rows.checked_add(1).ok_or_else(|| {
+            MagnusError::new(ruby.exception_runtime_error(), "row count exceeds u64")
+        })?;
+    }
 
-    // The core writer flushes any remaining buffered rows when closed by
-    // finalize_writer below.
-    let _ = logger.info(|| format!("Finished writing {} rows to parquet file", total_rows));
-
-    // Log string cache statistics if enabled. `misses` is exact even after the
-    // bounded cache fills; exact distinct cardinality would require an unbounded
-    // side table, so the log labels it as misses rather than unique strings.
     if let Some(stats) = converter.string_cache_stats() {
-        let _ = logger.info(|| {
+        apply_non_fatal_logging_policy(logger.info(|| {
             format!(
                 "String cache stats: {} cache misses, {} hits ({:.1}% hit rate)",
                 stats.misses,
                 stats.hits,
                 stats.hit_rate * 100.0
             )
-        });
+        }));
     }
-
-    // Finalize the writer
     finalize_writer(ruby, writer_output)?;
+    apply_non_fatal_logging_policy(
+        logger.info(|| format!("Finished writing {total_rows} rows to parquet file")),
+    );
 
     Ok(ruby.qnil().as_value())
 }
 
-/// Write data in column format to a parquet file
+/// Write a finite enumeration of column batches without retaining prior batches.
 pub fn write_columns(
     ruby: &Ruby,
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
-    use crate::converter::RubyValueConverter;
-    use crate::logger::RubyLogger;
-    use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
-    use magnus::{RArray, TryConvert};
-
     let logger = RubyLogger::new(write_args.logger)?;
-
-    // Convert data to array for processing
-    let data_array = if write_args.read_from.is_kind_of(ruby.class_array()) {
-        TryConvert::try_convert(write_args.read_from)?
-    } else if write_args.read_from.respond_to("to_a", false)? {
-        let array_value: Value = write_args.read_from.funcall("to_a", ())?;
-        TryConvert::try_convert(array_value)?
-    } else {
-        return Err(MagnusError::new(
-            ruby.exception_type_error(),
-            "data must be an array or respond to 'to_a'",
-        ));
-    };
-
-    let data_array: RArray = data_array;
-
-    // Process schema value
-    let schema_hash = process_schema_value(ruby, write_args.schema_value, Some(&data_array))
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-    // Create schema
+    let mut input = input_enumerator(ruby, write_args.read_from)?;
+    let first_batch = input.next().transpose()?;
+    let schema_hash = process_schema_value(ruby, write_args.schema_value, first_batch)
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
     let schema = ruby_schema_to_parquet(schema_hash)
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-    // Extract field schemas for conversion hints
+        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+    if !matches!(schema.root, SchemaNode::Struct { .. }) {
+        return Err(MagnusError::new(
+            ruby.exception_runtime_error(),
+            "Schema root must be a struct",
+        ));
+    }
     let field_schemas = extract_field_schemas(&schema);
-
-    // Create writer. The columnar path writes one record batch per write_columns
-    // call, so row batch-sizing options are rejected before this point.
     let mut writer_output = create_writer(
         ruby,
         write_args.write_to,
-        schema.clone(),
+        schema,
         write_args.compression,
         BatchSizingOptions {
             batch_size: None,
@@ -315,108 +504,51 @@ pub fn write_columns(
             sample_size: None,
         },
     )?;
-    let _ = logger.info(|| "Starting to write parquet file columns".to_string());
 
-    // Get column names from schema
-    let column_names: Vec<String> =
-        if let parquet_core::SchemaNode::Struct { fields, .. } = &schema.root {
-            fields.iter().map(|f| f.name().to_string()).collect()
-        } else {
-            return Err(MagnusError::new(
-                ruby.exception_runtime_error(),
-                "Schema root must be a struct",
-            ));
-        };
+    apply_non_fatal_logging_policy(
+        logger.info(|| "Starting to write parquet file columns".to_string()),
+    );
+    let mut converter = RubyValueConverter::new();
+    let mut total_rows = 0u64;
+    let mut batch_index = 0usize;
 
-    // Convert data to columns format
-    let mut all_columns: Vec<(String, Vec<parquet_core::ParquetValue>)> = Vec::new();
-
-    // Process batches
-    for (batch_idx, batch) in data_array.into_iter().enumerate() {
-        if !batch.is_kind_of(ruby.class_array()) {
-            return Err(MagnusError::new(
-                ruby.exception_type_error(),
-                "each batch must be an array of column values",
-            ));
-        }
-
-        let batch_array: RArray = TryConvert::try_convert(batch)?;
-
-        // Verify batch has the right number of columns
-        if batch_array.len() != column_names.len() {
-            return Err(MagnusError::new(
-                ruby.exception_runtime_error(),
-                format!(
-                    "Batch has {} columns but schema has {}",
-                    batch_array.len(),
-                    column_names.len()
-                ),
-            ));
-        }
-
-        // Process each column in the batch
-        for (col_idx, column_values) in batch_array.into_iter().enumerate() {
-            if !column_values.is_kind_of(ruby.class_array()) {
-                return Err(MagnusError::new(
-                    ruby.exception_type_error(),
-                    format!("Column {} values must be an array", col_idx),
-                ));
-            }
-
-            let values_array: RArray = TryConvert::try_convert(column_values)?;
-
-            // Initialize column vector on first batch
-            if batch_idx == 0 {
-                all_columns.push((column_names[col_idx].clone(), Vec::new()));
-            }
-
-            // Convert and append values
-            let mut converter = RubyValueConverter::new();
-            let schema_hint = field_schemas.get(col_idx);
-
-            for value in values_array.into_iter() {
-                let pq_value = converter
-                    .to_parquet_with_schema_hint(value, schema_hint)
-                    .map_err(|e| {
-                        let error_msg = e.to_string();
-                        // Check if this is an encoding error
-                        if error_msg.contains("EncodingError")
-                            || error_msg.contains("invalid utf-8")
-                        {
-                            // Extract the actual encoding error message
-                            if let Some(pos) = error_msg.find("EncodingError: ") {
-                                let encoding_msg = error_msg[pos + 15..].to_string();
-                                MagnusError::new(ruby.exception_encoding_error(), encoding_msg)
-                            } else {
-                                MagnusError::new(ruby.exception_encoding_error(), error_msg)
-                            }
-                        } else {
-                            MagnusError::new(ruby.exception_runtime_error(), error_msg)
-                        }
-                    })?;
-                all_columns[col_idx].1.push(pq_value);
-            }
-        }
+    if let Some(batch) = first_batch {
+        let rows = write_column_batch(
+            ruby,
+            writer_output.writer_mut(),
+            &mut converter,
+            &field_schemas,
+            batch_index,
+            batch,
+        )?;
+        total_rows = u64::try_from(rows).map_err(|_| {
+            MagnusError::new(ruby.exception_runtime_error(), "row count exceeds u64")
+        })?;
+        batch_index += 1;
+    }
+    for batch in input {
+        let rows = write_column_batch(
+            ruby,
+            writer_output.writer_mut(),
+            &mut converter,
+            &field_schemas,
+            batch_index,
+            batch?,
+        )?;
+        total_rows = total_rows
+            .checked_add(u64::try_from(rows).map_err(|_| {
+                MagnusError::new(ruby.exception_runtime_error(), "row count exceeds u64")
+            })?)
+            .ok_or_else(|| {
+                MagnusError::new(ruby.exception_runtime_error(), "row count exceeds u64")
+            })?;
+        batch_index += 1;
     }
 
-    let total_rows = all_columns
-        .first()
-        .map(|(_name, values)| values.len())
-        .unwrap_or(0);
-
-    // Write the columns
-    match &mut writer_output {
-        WriterOutput::File(writer) | WriterOutput::TempFile(writer, _, _) => {
-            writer
-                .write_columns(all_columns)
-                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-        }
-    }
-
-    let _ = logger.info(|| format!("Finished writing {total_rows} rows to parquet file columns"));
-
-    // Finalize the writer
     finalize_writer(ruby, writer_output)?;
+    apply_non_fatal_logging_policy(
+        logger.info(|| format!("Finished writing {total_rows} rows to parquet file columns")),
+    );
 
     Ok(ruby.qnil().as_value())
 }
