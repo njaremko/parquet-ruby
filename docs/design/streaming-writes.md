@@ -62,13 +62,21 @@ The implementation must satisfy:
 
 On Unix, path preparation happens before the first input pull. Existing
 symlinks continue to name their resolved target rather than being replaced as
-directory entries. Existing targets must be writable, must still have the same
-device/inode/mode at commit, and must have one hard link; a multiply-linked
+directory entries. Existing targets must be writable and must have one hard
+link; a multiply-linked
 inode is rejected before input is consumed because atomic replacement cannot
-preserve all of its aliases. An absent target is published with no-clobber
-semantics. These rules preserve the prior write-authorization and symlink
-boundary while keeping failure publication atomic. They do not add a new
-non-Unix support contract.
+preserve all of its aliases. The staging inode receives the existing target's
+uid, gid, and mode before input is consumed; failure to reproduce them fails
+preflight. They are reapplied and verified after encoding closes the stage and
+before publication, because writes may clear special mode bits. Publication is
+one same-directory atomic rename. Existing target
+names therefore use the filesystem's standard last-committer-wins semantics and
+require a stable namespace for callers that need exclusion; portable POSIX has
+no compare-by-inode rename. An absent target is published with no-clobber
+semantics. Atomic replacement creates a new inode, so extended attributes and
+ACLs are outside this contract. These rules preserve ordinary Unix ownership,
+write authorization, and the symlink boundary while keeping failure publication
+atomic. They do not add a new non-Unix support contract.
 
 The API is partial for malformed/infinite enumerations and values outside the
 declared schema. Ruby exceptions from enumeration remain Ruby exceptions.
@@ -85,7 +93,7 @@ are:
 | --- | --- | --- | --- |
 | Ruby input | adapter | one yielded row or one yielded column batch | each `next` is consumed once |
 | converted rows | core writer | at most `batch_size` rows and normally at most `flush_threshold` conservatively charged retained bytes; one oversized row is allowed alone | admission either appends one row or flushes a nonempty buffer |
-| per-column slots | core writer | at most 1,000,000 slots across the configured row quantum | a flush clears all live values |
+| per-column slots | core writer | normally at most 1,000,000 slots across the configured row quantum; one complete row for a wider schema | a flush clears all live values |
 | size samples | core writer | at most `sample_size`, maximum 10,000 `usize` values | reservoir replaces an existing slot |
 | string cache | adapter converter | caller-selected entries, additionally capped by existing entry/value-byte budgets | misses do not create an unbounded side table |
 | encoded row group | core writer | Ruby builder: `max(flush_threshold, 8 MiB)` target bytes; lower-level custom properties: the exact caller target; both have one Arrow batch/oversized value of slack | crossing the target closes one independently staged row group |
@@ -188,9 +196,9 @@ Acceptance requires:
 - multiple disk-spooled row groups preserve data and page-index offsets;
 - metadata-spool and footer write failures remain I/O failures and do not
   advance the observable output;
-- Unix path preflight preserves symlink identity and write authorization,
-  rejects hard-linked targets before pulling input, and refuses a destination
-  replaced during encoding;
+- Unix path preflight preserves symlink identity, uid/gid/mode, and write
+  authorization, rejects hard-linked targets before pulling input, and uses
+  no-clobber publication for an initially absent destination;
 - representative small/large streaming runs show peak RSS reaches a plateau
   rather than scaling with total rows;
 - focused Rust and Ruby tests, formatting, linting, and the repository test

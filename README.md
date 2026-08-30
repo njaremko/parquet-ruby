@@ -166,8 +166,11 @@ and is capped at 10,000. `string_cache: true` uses a capacity of 100, or you can
 pass a capacity up to 65,536; `nil` and `false` disable it.
 
 Path output is staged and atomically published only after the complete file has
-been written. IO output is first staged on disk, then copied to the IO; a failed
-copy may leave the IO partially written.
+been written. On Unix, replacing an existing path preserves its uid, gid, and
+mode and uses standard last-committer-wins rename semantics; creating a path is
+no-clobber. Extended attributes and ACLs are not preserved. IO output is first
+staged on disk, then copied to the IO; a failed copy may leave the IO partially
+written.
 
 ### Row-wise Writing
 

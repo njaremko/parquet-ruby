@@ -1,6 +1,8 @@
 require_relative "test_helper"
+require "rbconfig"
 
 class WriteMemoryUsageTest < Minitest::Test
+  FRESH_PROCESS_ENV = "PARQUET_RUBY_WRITE_MEMORY_CHILD"
   ROW_COUNT = 80_000
   EARLY_SAMPLE_ROW = 20_000
   MAX_PLATEAU_GROWTH_KIB = 32 * 1_024
@@ -16,6 +18,8 @@ class WriteMemoryUsageTest < Minitest::Test
   end
 
   def test_row_write_peak_memory_reaches_a_plateau
+    return assert_plateau_in_fresh_process unless fresh_process?
+
     samples = {}
     rows = Enumerator.new do |yielder|
       ROW_COUNT.times do |index|
@@ -36,6 +40,8 @@ class WriteMemoryUsageTest < Minitest::Test
   end
 
   def test_column_write_peak_memory_reaches_a_plateau
+    return assert_plateau_in_fresh_process unless fresh_process?
+
     samples = {}
     batches = Enumerator.new do |yielder|
       first = 0
@@ -60,6 +66,24 @@ class WriteMemoryUsageTest < Minitest::Test
   end
 
   private
+
+  def fresh_process?
+    ENV[FRESH_PROCESS_ENV] == "1"
+  end
+
+  def assert_plateau_in_fresh_process
+    root = File.expand_path("..", __dir__)
+    passed = system(
+      { FRESH_PROCESS_ENV => "1" },
+      RbConfig.ruby,
+      "-I#{File.join(root, "lib")}",
+      "-I#{__dir__}",
+      File.expand_path(__FILE__),
+      "--name=#{name}"
+    )
+
+    assert passed, "fresh-process memory plateau check failed"
+  end
 
   def sample_rss(samples, row_count)
     return unless [EARLY_SAMPLE_ROW, ROW_COUNT].include?(row_count)

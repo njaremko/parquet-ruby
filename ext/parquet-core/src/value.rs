@@ -161,6 +161,63 @@ impl ParquetValue {
         }
     }
 
+    /// Replace storage whose retained capacity cannot be observed with compact,
+    /// value-equivalent ownership before the writer admits it to a batch.
+    ///
+    /// `Bytes` slices and a `BigInt` with a small current magnitude can retain
+    /// arbitrarily larger backing allocations. Rebuilding those leaves the
+    /// public value unchanged while making the retained-memory charge sound.
+    /// The traversal is iterative so nested values do not consume the call
+    /// stack.
+    pub(crate) fn normalize_retained_storage(&mut self) {
+        let mut pending = vec![self];
+
+        while let Some(value) = pending.pop() {
+            match value {
+                Self::Bytes(bytes) => {
+                    *bytes = compact_bytes(std::mem::take(bytes));
+                }
+                Self::Decimal256(value, _) => {
+                    let compact = value.to_signed_bytes_le();
+                    *value = BigInt::from_signed_bytes_le(&compact);
+                }
+                Self::List(values) => pending.extend(values.iter_mut()),
+                Self::Map(entries) => {
+                    for (key, value) in entries {
+                        pending.push(key);
+                        pending.push(value);
+                    }
+                }
+                Self::Record(fields) => pending.extend(fields.values_mut()),
+                Self::Int8(_)
+                | Self::Int16(_)
+                | Self::Int32(_)
+                | Self::Int64(_)
+                | Self::UInt8(_)
+                | Self::UInt16(_)
+                | Self::UInt32(_)
+                | Self::UInt64(_)
+                | Self::Float16(_)
+                | Self::Float32(_)
+                | Self::Float64(_)
+                | Self::Boolean(_)
+                | Self::String(_)
+                | Self::Uuid(_)
+                | Self::Date32(_)
+                | Self::Date64(_)
+                | Self::Decimal128(_, _)
+                | Self::TimestampSecond(_, _)
+                | Self::TimestampMillis(_, _)
+                | Self::TimestampMicros(_, _)
+                | Self::TimestampNanos(_, _)
+                | Self::TimeMillis(_)
+                | Self::TimeMicros(_)
+                | Self::TimeNanos(_)
+                | Self::Null => {}
+            }
+        }
+    }
+
     /// Conservative retained-memory charge used by the streaming writer.
     ///
     /// Shared string/byte contents are charged to every value that can retain
@@ -194,7 +251,9 @@ impl ParquetValue {
                 | Self::TimestampMicros(_, timezone)
                 | Self::TimestampNanos(_, timezone) => {
                     if let Some(timezone) = timezone {
-                        total = total.saturating_add(timezone.len());
+                        total = total
+                            .saturating_add(timezone.len())
+                            .saturating_add(2 * std::mem::size_of::<usize>());
                     }
                 }
                 Self::List(values) => {
@@ -228,7 +287,9 @@ impl ParquetValue {
                             .saturating_mul(2),
                     );
                     for (name, value) in fields {
-                        total = total.saturating_add(name.len());
+                        total = total
+                            .saturating_add(name.len())
+                            .saturating_add(2 * std::mem::size_of::<usize>());
                         pending.push(value);
                     }
                 }
@@ -257,6 +318,10 @@ impl ParquetValue {
 
         total
     }
+}
+
+fn compact_bytes(bytes: Bytes) -> Bytes {
+    Bytes::from(bytes.as_ref().to_vec().into_boxed_slice())
 }
 
 #[cfg(test)]
@@ -313,5 +378,37 @@ mod tests {
         assert!(set.contains(&ParquetValue::Int32(42)));
         assert!(set.contains(&ParquetValue::String(Arc::from("hello"))));
         assert!(!set.contains(&ParquetValue::Int32(43)));
+    }
+
+    #[test]
+    fn retained_storage_normalization_preserves_nested_values() {
+        let mut formerly_large = BigInt::from(1_u8) << 4096;
+        formerly_large >>= 4096;
+        let mut value = ParquetValue::List(vec![
+            ParquetValue::Bytes(Bytes::from(vec![1, 2, 3, 4]).slice(1..3)),
+            ParquetValue::Decimal256(formerly_large, 0),
+        ]);
+        let expected = value.clone();
+
+        value.normalize_retained_storage();
+
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn uniquely_owned_tail_slice_is_copied_out_of_its_large_backing_storage() {
+        let full = Bytes::from(vec![7_u8; 4096]);
+        let tail = full.slice(4095..);
+        drop(full);
+        let retained_pointer = tail.as_ptr();
+        let mut value = ParquetValue::Bytes(tail);
+
+        value.normalize_retained_storage();
+
+        let ParquetValue::Bytes(bytes) = value else {
+            panic!("normalized value changed variant");
+        };
+        assert_eq!(bytes.as_ref(), [7]);
+        assert_ne!(bytes.as_ptr(), retained_pointer);
     }
 }

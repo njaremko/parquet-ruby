@@ -152,6 +152,45 @@ class WriteStreamingTest < Minitest::Test
     assert_equal "existing destination", File.binread(path)
   end
 
+  def test_interrupt_preserves_existing_destination_and_cleans_the_stage
+    Dir.mktmpdir("parquet-ruby-existing-interrupt") do |directory|
+      destination = File.join(directory, "destination.parquet")
+      File.binwrite(destination, "existing destination")
+      interruption = Interrupt.new("write interrupted")
+      rows = Enumerator.new do |yielder|
+        yielder << [1, "one"]
+        raise interruption
+      end
+
+      error = assert_raises(Interrupt) do
+        Parquet.write_rows(rows, schema: ROW_SCHEMA, write_to: destination)
+      end
+
+      assert_same interruption, error
+      assert_equal "existing destination", File.binread(destination)
+      assert_equal ["destination.parquet"], Dir.children(directory)
+    end
+  end
+
+  def test_interrupt_leaves_an_absent_destination_absent_and_cleans_the_stage
+    Dir.mktmpdir("parquet-ruby-absent-interrupt") do |directory|
+      destination = File.join(directory, "destination.parquet")
+      interruption = Interrupt.new("write interrupted")
+      rows = Enumerator.new do |yielder|
+        yielder << [1, "one"]
+        raise interruption
+      end
+
+      error = assert_raises(Interrupt) do
+        Parquet.write_rows(rows, schema: ROW_SCHEMA, write_to: destination)
+      end
+
+      assert_same interruption, error
+      refute File.exist?(destination)
+      assert_empty Dir.children(directory)
+    end
+  end
+
   def test_atomic_path_publication_preserves_creation_and_writable_file_permissions
     skip "Unix permission modes are not available" if Gem.win_platform?
 
@@ -159,12 +198,18 @@ class WriteStreamingTest < Minitest::Test
     new_path = output_path("new_permissions")
     existing_paths = {
       0o666 => output_path("existing_read_write_permissions"),
-      0o777 => output_path("existing_executable_permissions")
+      0o777 => output_path("existing_executable_permissions"),
+      0o4666 => output_path("existing_setuid_permissions"),
+      0o2777 => output_path("existing_setgid_permissions")
     }
     File.binwrite(reference, "reference")
     existing_paths.each do |mode, path|
       File.binwrite(path, "existing")
       File.chmod(mode, path)
+    end
+    existing_metadata = existing_paths.to_h do |mode, path|
+      metadata = File.stat(path)
+      [path, [metadata.uid, metadata.gid, mode]]
     end
 
     Parquet.write_rows([[1, "one"]], schema: ROW_SCHEMA, write_to: new_path)
@@ -174,7 +219,9 @@ class WriteStreamingTest < Minitest::Test
 
     assert_equal File.stat(reference).mode & 0o777, File.stat(new_path).mode & 0o777
     existing_paths.each do |mode, path|
-      assert_equal mode, File.stat(path).mode & 0o777
+      metadata = File.stat(path)
+      actual_metadata = [metadata.uid, metadata.gid, metadata.mode & 0o7777]
+      assert_equal existing_metadata.fetch(path), actual_metadata
       assert_equal({ "id" => 2, "name" => "two" }, Parquet.each_row(path).first)
     end
   end
@@ -261,7 +308,7 @@ class WriteStreamingTest < Minitest::Test
     File.chmod(0o644, destination) if destination && File.exist?(destination)
   end
 
-  def test_publication_rejects_a_replaced_destination_without_overwriting_it
+  def test_existing_destination_publication_uses_atomic_last_committer_wins
     skip "Unix file identities are not available" if Gem.win_platform?
 
     destination = output_path("raced_destination")
@@ -273,18 +320,14 @@ class WriteStreamingTest < Minitest::Test
       File.binwrite(destination, "concurrent replacement")
     end
 
-    error = assert_raises(RuntimeError) do
-      Parquet.write_rows(rows, schema: ROW_SCHEMA, write_to: destination)
-    end
+    Parquet.write_rows(rows, schema: ROW_SCHEMA, write_to: destination)
 
     assert_equal(
       [
-        RuntimeError,
-        "Failed to publish staging file to #{destination}: destination changed while writing: #{destination}",
-        "concurrent replacement",
+        { "id" => 1, "name" => "one" },
         "original destination"
       ],
-      [error.class, error.message, File.binread(destination), File.binread(displaced)]
+      [Parquet.each_row(destination).first, File.binread(displaced)]
     )
   end
 

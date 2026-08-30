@@ -28,8 +28,10 @@ pub const MAX_BATCH_SIZE: usize = 1_000_000;
 // `sample_size` also backs an eager Vec reservation during writer creation.
 // Keep user-provided estimates from becoming an unbounded upfront allocation.
 pub const MAX_SAMPLE_SIZE: usize = 10_000;
-// Maximum live value slots across all per-column buffers. This keeps wide
-// schemas from multiplying a row-count cap into an unbounded allocation.
+// Target maximum live value slots across all per-column buffers. This keeps
+// wide schemas from multiplying a row-count cap into an unbounded allocation;
+// a schema wider than the target still makes progress one complete row at a
+// time.
 const MAX_BUFFERED_VALUE_SLOTS: usize = 1_000_000;
 const MIN_SAMPLES_FOR_ESTIMATE: usize = 10;
 
@@ -87,9 +89,8 @@ impl WriterBuilder {
         let arrow_schema = schema_to_arrow(&schema)?;
 
         validate_memory_threshold(self.memory_threshold)?;
-        validate_column_count(arrow_schema.fields().len())?;
         let current_batch_size = match self.batch_size {
-            Some(size) => validate_fixed_batch_size(size, arrow_schema.fields().len())?,
+            Some(size) => fixed_batch_size_for_column_count(size, arrow_schema.fields().len())?,
             None => default_batch_size_for_column_count(arrow_schema.fields().len()),
         };
         let sample_size = validate_sample_size(self.sample_size)?;
@@ -151,7 +152,6 @@ where
     /// Create a new writer with custom properties
     pub fn new_with_properties(writer: W, schema: Schema, props: WriterProperties) -> Result<Self> {
         let arrow_schema = schema_to_arrow(&schema)?;
-        validate_column_count(arrow_schema.fields().len())?;
         let current_batch_size = default_batch_size_for_column_count(arrow_schema.fields().len());
         let row_group_target_bytes = props
             .max_row_group_bytes()
@@ -188,7 +188,7 @@ where
     /// Write a single row to the Parquet file
     ///
     /// Rows are buffered internally and written in batches to optimize memory usage
-    pub fn write_row(&mut self, row: Vec<ParquetValue>) -> Result<()> {
+    pub fn write_row(&mut self, mut row: Vec<ParquetValue>) -> Result<()> {
         // Validate row length
         let num_cols = self.arrow_schema.fields().len();
         if row.len() != num_cols {
@@ -202,6 +202,10 @@ where
         // Validate each value matches its schema
         for (idx, (value, field)) in row.iter().zip(self.arrow_schema.fields()).enumerate() {
             validate_value_against_field(value, field, &format!("row[{}]", idx))?;
+        }
+
+        for value in &mut row {
+            value.normalize_retained_storage();
         }
 
         let row_retained_bytes = row.iter().fold(0usize, |total, value| {
@@ -594,16 +598,6 @@ fn schema_to_arrow(schema: &Schema) -> Result<StdArc<arrow_schema::Schema>> {
     }
 }
 
-fn validate_column_count(column_count: usize) -> Result<()> {
-    if column_count > MAX_BUFFERED_VALUE_SLOTS {
-        return Err(ParquetError::Schema(format!(
-            "Schema has {} columns, exceeding the writer buffer slot limit of {}",
-            column_count, MAX_BUFFERED_VALUE_SLOTS
-        )));
-    }
-    Ok(())
-}
-
 fn validate_memory_threshold(memory_threshold: usize) -> Result<()> {
     if memory_threshold == 0 {
         return Err(ParquetError::Schema(
@@ -622,22 +616,14 @@ fn default_batch_size_for_column_count(column_count: usize) -> usize {
     DEFAULT_BATCH_SIZE.min(max_batch_size_for_column_count(column_count))
 }
 
-fn validate_fixed_batch_size(batch_size: usize, column_count: usize) -> Result<usize> {
+fn fixed_batch_size_for_column_count(batch_size: usize, column_count: usize) -> Result<usize> {
     if batch_size == 0 {
         return Err(ParquetError::Schema(
             "batch_size must be greater than 0".to_string(),
         ));
     }
 
-    let max_batch_size = max_batch_size_for_column_count(column_count);
-    if batch_size > max_batch_size {
-        return Err(ParquetError::Schema(format!(
-            "batch_size {} exceeds maximum {} for {} columns",
-            batch_size, max_batch_size, column_count
-        )));
-    }
-
-    Ok(batch_size)
+    Ok(batch_size.min(max_batch_size_for_column_count(column_count)))
 }
 
 fn validate_sample_size(sample_size: usize) -> Result<usize> {
@@ -746,9 +732,6 @@ fn schema_node_to_arrow_field(node: &SchemaNode) -> Result<Field> {
 }
 
 fn new_buffered_columns(arrow_schema: &arrow_schema::Schema) -> Vec<Vec<ParquetValue>> {
-    let column_count = arrow_schema.fields().len();
-    debug_assert!(column_count <= MAX_BUFFERED_VALUE_SLOTS);
-
     arrow_schema.fields().iter().map(|_| Vec::new()).collect()
 }
 
@@ -862,7 +845,28 @@ fn primitive_type_to_arrow(ptype: &crate::PrimitiveType) -> Result<DataType> {
 mod tests {
     use super::*;
     use crate::SchemaBuilder;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc as StdSyncArc,
+    };
     use triomphe::Arc;
+
+    struct RetainedBytesOwner {
+        bytes: Vec<u8>,
+        live_owner_count: StdSyncArc<AtomicUsize>,
+    }
+
+    impl AsRef<[u8]> for RetainedBytesOwner {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl Drop for RetainedBytesOwner {
+        fn drop(&mut self) {
+            self.live_owner_count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 
     fn int64_schema(column_count: usize) -> Schema {
         SchemaBuilder::new()
@@ -884,6 +888,22 @@ mod tests {
 
     fn single_int64_schema() -> Schema {
         int64_schema(1)
+    }
+
+    fn single_binary_schema() -> Schema {
+        SchemaBuilder::new()
+            .with_root(SchemaNode::Struct {
+                name: "root".to_string(),
+                nullable: false,
+                fields: vec![SchemaNode::Primitive {
+                    name: "payload".to_string(),
+                    primitive_type: crate::PrimitiveType::Binary,
+                    nullable: false,
+                    format: None,
+                }],
+            })
+            .build()
+            .unwrap()
     }
 
     fn single_int64_writer(buffer: Vec<u8>) -> Writer<Vec<u8>> {
@@ -937,24 +957,85 @@ mod tests {
     }
 
     #[test]
-    fn oversized_fixed_batch_size_is_rejected_before_initial_buffer_allocation() {
-        let mut output = Vec::new();
-        {
-            let result = WriterBuilder::new()
-                .with_batch_size(MAX_BATCH_SIZE + 1)
-                .build(&mut output, single_int64_schema());
-            assert!(result.is_err());
-        }
-        assert!(output.is_empty());
+    fn oversized_fixed_batch_size_is_capped_without_eager_allocation() {
+        let writer = WriterBuilder::new()
+            .with_batch_size(MAX_BATCH_SIZE + 1)
+            .build(Vec::new(), single_int64_schema())
+            .unwrap();
+
+        assert_eq!(writer.current_batch_size, MAX_BATCH_SIZE);
+        assert_eq!(writer.buffered_columns[0].capacity(), 0);
     }
 
     #[test]
-    fn wide_schema_fixed_batch_size_is_rejected_by_total_slot_bound() {
-        let result = WriterBuilder::new()
+    fn wide_schema_fixed_batch_size_is_capped_by_total_slot_bound() {
+        let writer = WriterBuilder::new()
             .with_batch_size(MAX_BATCH_SIZE)
-            .build(Vec::new(), int64_schema(2));
+            .build(Vec::new(), int64_schema(2))
+            .unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(
+            writer.current_batch_size,
+            max_batch_size_for_column_count(2)
+        );
+    }
+
+    #[test]
+    fn schema_wider_than_slot_quantum_uses_singleton_batches() {
+        let column_count = MAX_BUFFERED_VALUE_SLOTS + 1;
+
+        assert_eq!(max_batch_size_for_column_count(column_count), 1);
+        assert_eq!(
+            fixed_batch_size_for_column_count(2, column_count).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn effective_batch_size_is_bounded_across_schema_width_boundaries() {
+        let cases = [
+            (0, MAX_BATCH_SIZE),
+            (1, MAX_BATCH_SIZE),
+            (MAX_BUFFERED_VALUE_SLOTS, 1),
+            (MAX_BUFFERED_VALUE_SLOTS + 1, 1),
+            (usize::MAX, 1),
+        ];
+
+        for (column_count, expected_maximum) in cases {
+            assert_eq!(
+                max_batch_size_for_column_count(column_count),
+                expected_maximum
+            );
+            assert_eq!(
+                fixed_batch_size_for_column_count(usize::MAX, column_count).unwrap(),
+                expected_maximum
+            );
+        }
+        assert!(fixed_batch_size_for_column_count(0, 1).is_err());
+    }
+
+    #[test]
+    fn byte_slices_release_hidden_backing_storage_before_buffering() {
+        let live_owner_count = StdSyncArc::new(AtomicUsize::new(0));
+        let mut writer = WriterBuilder::new()
+            .with_batch_size(16)
+            .build(Vec::new(), single_binary_schema())
+            .unwrap();
+
+        for byte in 0..16_u8 {
+            live_owner_count.fetch_add(1, Ordering::SeqCst);
+            let owner = RetainedBytesOwner {
+                bytes: vec![byte; 1024],
+                live_owner_count: live_owner_count.clone(),
+            };
+            let visible_byte = bytes::Bytes::from_owner(owner).slice(0..1);
+
+            writer
+                .write_row(vec![ParquetValue::Bytes(visible_byte)])
+                .unwrap();
+
+            assert_eq!(live_owner_count.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

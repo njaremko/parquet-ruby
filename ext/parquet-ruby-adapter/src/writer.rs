@@ -46,19 +46,24 @@ enum PreparedWriterOutput {
 }
 
 #[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
+#[derive(Clone, Copy)]
+struct UnixFileMetadata {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+#[cfg(unix)]
+enum PublicationMode {
+    ReplaceExisting(UnixFileMetadata),
+    CreateNew,
 }
 
 struct PathFinalState {
     #[cfg(unix)]
     publication_path: PathBuf,
     #[cfg(unix)]
-    original_identity: Option<FileIdentity>,
-    #[cfg(unix)]
-    mode: u32,
+    publication_mode: PublicationMode,
 }
 
 impl WriterOutput {
@@ -210,10 +215,11 @@ fn create_existing_path_staging_file(
         )
     })?;
     let temp_file = tempfile::Builder::new().tempfile_in(parent)?;
+    let expected_metadata = unix_file_metadata(&metadata);
+    preserve_existing_path_metadata(temp_file.path(), destination, expected_metadata)?;
     let final_state = PathFinalState {
         publication_path,
-        original_identity: Some(file_identity(&metadata)),
-        mode: metadata.permissions().mode() & 0o7777,
+        publication_mode: PublicationMode::ReplaceExisting(expected_metadata),
     };
     Ok((temp_file, final_state))
 }
@@ -232,11 +238,9 @@ fn create_new_path_staging_file(
     let mut builder = tempfile::Builder::new();
     builder.permissions(std::fs::Permissions::from_mode(0o666));
     let temp_file = builder.tempfile_in(parent)?;
-    let mode = temp_file.as_file().metadata()?.permissions().mode() & 0o7777;
     let final_state = PathFinalState {
         publication_path,
-        original_identity: None,
-        mode,
+        publication_mode: PublicationMode::CreateNew,
     };
     Ok((temp_file, final_state))
 }
@@ -269,11 +273,52 @@ fn writable_destination_error(destination: &Path, error: std::io::Error) -> std:
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
-    FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
+fn preserve_existing_path_metadata(
+    staging_path: &Path,
+    destination: &Path,
+    expected: UnixFileMetadata,
+) -> std::io::Result<()> {
+    std::os::unix::fs::chown(staging_path, Some(expected.uid), Some(expected.gid))
+        .map_err(|error| metadata_preservation_error(destination, "ownership", error))?;
+    std::fs::set_permissions(staging_path, std::fs::Permissions::from_mode(expected.mode))
+        .map_err(|error| metadata_preservation_error(destination, "permissions", error))?;
+
+    let staged_metadata = std::fs::metadata(staging_path)?;
+    let staged_mode = staged_metadata.permissions().mode() & 0o7777;
+    if staged_metadata.uid() != expected.uid
+        || staged_metadata.gid() != expected.gid
+        || staged_mode != expected.mode
+    {
+        return Err(std::io::Error::other(format!(
+            "failed to preserve destination ownership and permissions: {}",
+            destination.display()
+        )));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_file_metadata(metadata: &std::fs::Metadata) -> UnixFileMetadata {
+    UnixFileMetadata {
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.permissions().mode() & 0o7777,
+    }
+}
+
+#[cfg(unix)]
+fn metadata_preservation_error(
+    destination: &Path,
+    metadata_kind: &str,
+    error: std::io::Error,
+) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "failed to preserve destination {metadata_kind} for {}: {error}",
+            destination.display()
+        ),
+    )
 }
 
 #[cfg(not(unix))]
@@ -297,24 +342,17 @@ fn publish_path(
 ) -> std::io::Result<()> {
     let PathFinalState {
         publication_path,
-        original_identity,
-        mode,
+        publication_mode,
     } = final_state;
-    std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(mode))?;
 
-    match original_identity {
-        Some(expected_identity) => {
-            validate_existing_publication_target(
-                destination,
-                &publication_path,
-                expected_identity,
-                mode,
-            )?;
+    match publication_mode {
+        PublicationMode::ReplaceExisting(expected_metadata) => {
+            preserve_existing_path_metadata(&staging_path, destination, expected_metadata)?;
             staging_path
                 .persist(publication_path)
                 .map_err(|error| error.error)
         }
-        None => {
+        PublicationMode::CreateNew => {
             let current_publication_path = publication_path_for_absent_destination(destination)?;
             if current_publication_path != publication_path {
                 return Err(destination_changed_error(destination));
@@ -330,28 +368,6 @@ fn publish_path(
                 })
         }
     }
-}
-
-#[cfg(unix)]
-fn validate_existing_publication_target(
-    destination: &Path,
-    publication_path: &Path,
-    expected_identity: FileIdentity,
-    expected_mode: u32,
-) -> std::io::Result<()> {
-    let resolved_path =
-        std::fs::canonicalize(destination).map_err(|_| destination_changed_error(destination))?;
-    let metadata =
-        std::fs::metadata(publication_path).map_err(|_| destination_changed_error(destination))?;
-    let current_mode = metadata.permissions().mode() & 0o7777;
-    if resolved_path != publication_path
-        || file_identity(&metadata) != expected_identity
-        || metadata.nlink() != 1
-        || current_mode != expected_mode
-    {
-        return Err(destination_changed_error(destination));
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -406,6 +422,41 @@ fn finalize_writer(ruby: &Ruby, writer_output: WriterOutput) -> Result<(), Magnu
             })?;
             copy_temp_file_to_io(ruby, staging_path, io_object)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_metadata_failure_leaves_existing_destination_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("destination.parquet");
+        std::fs::write(&destination, b"existing destination").unwrap();
+        let expected_metadata = unix_file_metadata(&std::fs::metadata(&destination).unwrap());
+
+        let mut staging_file = tempfile::Builder::new()
+            .tempfile_in(directory.path())
+            .unwrap();
+        staging_file.write_all(b"complete replacement").unwrap();
+        let staging_path = staging_file.into_temp_path();
+        std::fs::remove_file(&staging_path).unwrap();
+
+        let result = publish_path(
+            staging_path,
+            &destination,
+            PathFinalState {
+                publication_path: destination.clone(),
+                publication_mode: PublicationMode::ReplaceExisting(expected_metadata),
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"existing destination"
+        );
     }
 }
 
