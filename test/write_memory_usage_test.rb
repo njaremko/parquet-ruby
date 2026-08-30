@@ -3,6 +3,7 @@ require "rbconfig"
 
 class WriteMemoryUsageTest < Minitest::Test
   FRESH_PROCESS_ENV = "PARQUET_RUBY_WRITE_MEMORY_CHILD"
+  JEMALLOC_CONFIG_ENV = "_RJEM_MALLOC_CONF"
   JEMALLOC_TEST_CONF = "tcache:false,dirty_decay_ms:0,muzzy_decay_ms:0"
   ROW_COUNT = 80_000
   EARLY_SAMPLE_ROW = 20_000
@@ -79,7 +80,7 @@ class WriteMemoryUsageTest < Minitest::Test
         FRESH_PROCESS_ENV => "1",
         # Linux builds use jemalloc for Rust allocations. Purging freed pages
         # makes RSS measure the writer's live set instead of allocator caches.
-        "MALLOC_CONF" => JEMALLOC_TEST_CONF
+        JEMALLOC_CONFIG_ENV => JEMALLOC_TEST_CONF
       },
       RbConfig.ruby,
       "-I#{File.join(root, "lib")}",
