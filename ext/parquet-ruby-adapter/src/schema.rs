@@ -741,10 +741,10 @@ pub fn is_dsl_schema(ruby: &Ruby, schema_value: Value) -> Result<bool, RubyAdapt
 }
 
 /// Process schema value and convert to format expected by ruby_schema_to_parquet
-pub fn process_schema_value(
+pub(crate) fn process_schema_value(
     ruby: &Ruby,
     schema_value: Value,
-    data_array: Option<&RArray>,
+    first_data_item: Option<Value>,
 ) -> Result<Value, RubyAdapterError> {
     // Check if it's the new DSL format
     if is_dsl_schema(ruby, schema_value)? {
@@ -813,17 +813,7 @@ pub fn process_schema_value(
 
     // Check if we need to infer schema from data
     if schema_array.is_empty() {
-        if let Some(data) = data_array {
-            if data.is_empty() {
-                return Err(RubyAdapterError::InvalidInput(
-                    "Cannot infer schema from empty data".to_string(),
-                ));
-            }
-
-            // Get first row/batch to determine column count
-            let first_item: Value = data.entry(0).map_err(|e| {
-                ParquetError::Schema(format!("Failed to get first data item: {}", e))
-            })?;
+        if let Some(first_item) = first_data_item {
             let num_columns = if first_item.is_kind_of(ruby.class_array()) {
                 let first_array: RArray =
                     TryConvert::try_convert(first_item).map_err(|e: MagnusError| {
@@ -861,7 +851,7 @@ pub fn process_schema_value(
             schema_array = new_schema;
         } else {
             return Err(RubyAdapterError::InvalidInput(
-                "Schema is required when data is not provided for inference".to_string(),
+                "Cannot infer schema from empty data".to_string(),
             ));
         }
     }
@@ -875,7 +865,7 @@ pub fn process_schema_value(
 }
 
 /// Extract schema nodes from schema fields
-pub fn extract_field_schemas(schema: &Schema) -> Vec<SchemaNode> {
+pub(crate) fn extract_field_schemas(schema: &Schema) -> Vec<SchemaNode> {
     if let SchemaNode::Struct { fields, .. } = &schema.root {
         fields.to_vec()
     } else {

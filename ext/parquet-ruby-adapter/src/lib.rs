@@ -54,8 +54,8 @@ pub use logger::RubyLogger;
 
 pub mod schema;
 pub use schema::{
-    convert_legacy_schema, extract_field_schemas, is_dsl_schema, parquet_schema_to_ruby,
-    process_schema_value, ruby_schema_to_parquet, RubySchemaBuilder,
+    convert_legacy_schema, is_dsl_schema, parquet_schema_to_ruby, ruby_schema_to_parquet,
+    RubySchemaBuilder,
 };
 
 pub mod string_cache;
@@ -73,7 +73,6 @@ pub use metadata::{parse_metadata, RubyParquetMetaData};
 pub mod types;
 pub use types::{
     ColumnEnumeratorArgs, ParquetRepackArgs, ParquetWriteArgs, ParserResultType, RowEnumeratorArgs,
-    WriterOutput,
 };
 
 pub mod utils;
@@ -86,7 +85,7 @@ pub mod reader;
 pub use reader::{each_column, each_row};
 
 pub mod writer;
-pub use writer::{create_writer, finalize_writer, write_columns, write_rows};
+pub use writer::{write_columns, write_rows};
 
 pub mod repack;
 pub use repack::repack;

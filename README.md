@@ -145,6 +145,33 @@ puts metadata["row_groups"].size    # Number of row groups
 
 ## Writing Parquet Files
 
+`write_rows` and `write_columns` stream an enumerable to a path or writable IO
+and return `nil`. Each row is an array in schema order. For column writing, each
+yielded batch contains one array per field, all of the same length.
+
+Both methods require `schema:` and `write_to:`. `schema:` accepts the array form
+shown below, a `Parquet::Schema` DSL result, or a `fields` schema hash. Use `nil`
+or `[]` to infer string columns named `f0`, `f1`, ... from the first row or
+batch. Empty input requires an explicit schema.
+
+`compression:` accepts `"none"`, `"uncompressed"`, `"snappy"`, `"gzip"`,
+`"lz4"`, `"zstd"`, and `"brotli"`; `nil` defaults to Snappy.
+`flush_threshold:` defaults to 100 MiB. `logger:` accepts a Ruby logger with
+`debug`, `info`, `warn`, and `error` methods.
+
+`write_rows` also accepts `batch_size:`, `sample_size:`, and `string_cache:`.
+Without `batch_size:`, sizing starts at 1,000 rows and adapts to row size; the
+cap is 1,000,000 rows and lower for wide schemas. Sampling defaults to 100 rows
+and is capped at 10,000. `string_cache: true` uses a capacity of 100, or you can
+pass a capacity up to 65,536; `nil` and `false` disable it.
+
+Path output is staged and atomically published only after the complete file has
+been written. On Unix, replacing an existing path preserves its uid, gid, and
+mode and uses standard last-committer-wins rename semantics; creating a path is
+no-clobber. Extended attributes and ACLs are not preserved. IO output is first
+staged on disk, then copied to the IO; a failed copy may leave the IO partially
+written.
+
 ### Row-wise Writing
 
 Best for: Streaming data, converting from other formats, memory-constrained environments
@@ -159,14 +186,14 @@ schema = [
 ]
 
 # Stream data from any enumerable
-rows = CSV.foreach("input.csv").map do |row|
+rows = CSV.foreach("input.csv").lazy.map do |row|
   [row[0].to_i, row[1], row[2] == "true", row[3].to_f]
 end
 
 Parquet.write_rows(rows,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 5000  # Positive rows per batch (default: 1000)
+  batch_size: 5000
 )
 ```
 
@@ -250,8 +277,8 @@ Reading and writing run with the GVL released, so other Ruby threads keep
 running and `Interrupt` / `Timeout` are honoured. An interrupted call leaves no
 output behind.
 
-A Parquet file cannot hold more than 32767 row groups. Merging small groups
-keeps that limit out of reach in practice; if a single output ever did reach it,
+A repacked output is capped at 32,767 row groups. Merging small groups keeps
+that limit out of reach in practice; if a single output would exceed it,
 repack raises rather than writing an unreadable file, and `rows_per_file:` is
 the way out.
 
@@ -288,12 +315,9 @@ schema = [
 Parquet.write_columns(batches.each,
   schema: schema,
   write_to: "output.parquet",
-  compression: "snappy"  # Options: none, snappy, gzip, lz4, zstd
+  compression: "snappy"
 )
 ```
-
-`write_columns` also accepts `logger:` with the same Ruby logger interface as
-row writes.
 
 ## Data Types
 
@@ -477,14 +501,19 @@ Control memory usage with flush thresholds:
 Parquet.write_rows(huge_dataset.each,
   schema: schema,
   write_to: "output.parquet",
-  batch_size: 1000,              # Positive rows before considering flush
-  flush_threshold: 32 * 1024**2  # Flush if batch exceeds 32MB
+  batch_size: 1_000,
+  flush_threshold: 32 * 1024**2 # 32 MiB
 )
 ```
 
-Write batch and sample sizes are bounded before buffer allocation. Very large
-batch sizes are rejected, and wide schemas have a lower effective batch cap so
-the writer cannot reserve unbounded per-column value slots.
+Writer-owned memory stays bounded as the file grows. `flush_threshold` controls
+the converted-value buffer; a single larger row may exceed it temporarily. The
+row-group target is at least 8 MiB, and each file may contain up to 32,768 row
+groups.
+
+Encoded data and completed row-group metadata are staged on disk, so large
+writes need temporary disk space. Ruby still owns the current row or batch, and
+an in-memory destination such as `StringIO` holds the output in memory.
 
 ## Architecture
 
