@@ -32,24 +32,17 @@ where
         Ok(builder.metadata().file_metadata().clone())
     }
 
+    /// Get the number of row groups in the file
+    pub fn num_row_groups(&mut self) -> Result<usize> {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner.clone())?;
+        Ok(builder.metadata().num_row_groups())
+    }
+
     /// Read rows from the Parquet file
     ///
     /// Returns an iterator over rows where each row is a vector of ParquetValues
     pub fn read_rows(self) -> Result<RowIterator<R>> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let schema = builder.schema().clone();
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
-        let reader = builder.build()?;
-
-        Ok(RowIterator {
-            batch_reader: reader,
-            schema,
-            current_batch: None,
-            current_row: 0,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+        self.read_rows_selected(None, None)
     }
 
     /// Read rows with column projection
@@ -58,38 +51,29 @@ where
     /// improve performance for wide tables. Projected row values are returned
     /// in file schema order, not request order.
     pub fn read_rows_with_projection(self, columns: &[String]) -> Result<RowIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let arrow_schema = builder.schema();
-        let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
+        self.read_rows_selected(Some(columns), None)
+    }
 
-        // Create projection mask based on column names
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if requested_columns.contains(field.name().as_str()) {
-                column_indices.push(idx);
-            }
-        }
-        // The projected batches are emitted in file order over the selected
-        // columns; build that schema so alignment and field access match.
-        let projected_schema = Arc::new(arrow_schema::Schema::new(
-            column_indices
-                .iter()
-                .map(|idx| arrow_schema.field(*idx).clone())
-                .collect::<Vec<_>>(),
-        ));
-
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
-
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
+    /// Read rows with optional column projection and row-group selection.
+    ///
+    /// `columns` behaves as in [`Reader::read_rows_with_projection`]. When
+    /// `row_groups` is `Some`, only the row groups at the given indexes are
+    /// decoded, in the order given; the underlying reader still fetches the
+    /// footer, but only the selected row groups' column chunks are read.
+    /// Passing `Some(Vec::new())` yields no rows.
+    pub fn read_rows_selected(
+        self,
+        columns: Option<&[String]>,
+        row_groups: Option<Vec<usize>>,
+    ) -> Result<RowIterator<R>> {
+        let (builder, schema) = self.build_batch_builder(columns, row_groups)?;
         let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
+        let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
         let reader = builder.build()?;
 
         Ok(RowIterator {
             batch_reader: reader,
-            schema: projected_schema,
+            schema,
             current_batch: None,
             current_row: 0,
             aligned_parquet_fields,
@@ -102,7 +86,29 @@ where
     /// Returns an iterator over column batches where each batch contains
     /// arrays of values for each column.
     pub fn read_columns(self, batch_size: Option<usize>) -> Result<ColumnIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+        self.read_columns_selected(None, None, batch_size)
+    }
+
+    /// Read columns with projection
+    pub fn read_columns_with_projection(
+        self,
+        columns: &[String],
+        batch_size: Option<usize>,
+    ) -> Result<ColumnIterator<R>> {
+        self.read_columns_selected(Some(columns), None, batch_size)
+    }
+
+    /// Read columns with optional column projection and row-group selection.
+    ///
+    /// See [`Reader::read_rows_selected`] for the semantics of `columns` and
+    /// `row_groups`.
+    pub fn read_columns_selected(
+        self,
+        columns: Option<&[String]>,
+        row_groups: Option<Vec<usize>>,
+        batch_size: Option<usize>,
+    ) -> Result<ColumnIterator<R>> {
+        let (mut builder, schema) = self.build_batch_builder(columns, row_groups)?;
 
         let is_empty = builder.metadata().file_metadata().num_rows() == 0;
 
@@ -110,7 +116,6 @@ where
             builder = builder.with_batch_size(size);
         }
 
-        let schema = builder.schema().clone();
         let metadata = builder.metadata().clone();
         let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
         let reader = builder.build()?;
@@ -125,54 +130,54 @@ where
         })
     }
 
-    /// Read columns with projection
-    pub fn read_columns_with_projection(
+    /// Build the record-batch reader builder with projection and row-group
+    /// selection applied, returning it together with the output arrow schema
+    /// (the projected subset in file order, or the full schema).
+    fn build_batch_builder(
         self,
-        columns: &[String],
-        batch_size: Option<usize>,
-    ) -> Result<ColumnIterator<R>> {
+        columns: Option<&[String]>,
+        row_groups: Option<Vec<usize>>,
+    ) -> Result<(ParquetRecordBatchReaderBuilder<R>, Arc<arrow_schema::Schema>)> {
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
         let arrow_schema = builder.schema();
-        let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
 
-        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
+        let schema = match columns {
+            Some(columns) => {
+                let requested_columns =
+                    columns.iter().map(String::as_str).collect::<HashSet<_>>();
 
-        // Create projection mask
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if requested_columns.contains(field.name().as_str()) {
-                column_indices.push(idx);
+                // Create projection mask based on column names
+                let mut column_indices = Vec::new();
+                for (idx, field) in arrow_schema.fields().iter().enumerate() {
+                    if requested_columns.contains(field.name().as_str()) {
+                        column_indices.push(idx);
+                    }
+                }
+                // The projected batches are emitted in file order over the selected
+                // columns; build that schema so alignment and field access match.
+                let projected_schema = Arc::new(arrow_schema::Schema::new(
+                    column_indices
+                        .iter()
+                        .map(|idx| arrow_schema.field(*idx).clone())
+                        .collect::<Vec<_>>(),
+                ));
+
+                // Allow empty column projections to match v1 behavior
+                // This will result in rows with no fields
+
+                let mask =
+                    parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
+                builder = builder.with_projection(mask);
+                projected_schema
             }
-        }
-        let projected_schema = Arc::new(arrow_schema::Schema::new(
-            column_indices
-                .iter()
-                .map(|idx| arrow_schema.field(*idx).clone())
-                .collect::<Vec<_>>(),
-        ));
+            None => arrow_schema.clone(),
+        };
 
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
-
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
-
-        if let Some(size) = batch_size {
-            builder = builder.with_batch_size(size);
+        if let Some(row_groups) = row_groups {
+            builder = builder.with_row_groups(row_groups);
         }
 
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
-        let reader = builder.build()?;
-
-        Ok(ColumnIterator {
-            batch_reader: reader,
-            schema: projected_schema,
-            returned_empty_batch: false,
-            is_empty_file: is_empty,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+        Ok((builder, schema))
     }
 }
 

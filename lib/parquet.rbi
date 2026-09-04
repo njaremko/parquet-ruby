@@ -18,6 +18,9 @@ module Parquet
   #                    ("hash" or "array" or :hash or :array)
   #   - `columns`: When present, only the specified columns will be included in the output.
   #                This is useful for reducing how much data is read and improving performance.
+  #   - `row_groups`: When present, only the listed row group indexes are decoded, in the
+  #                   order given (e.g. `row_groups: [2]` or `row_groups: [1, 0]`). Only the
+  #                   selected row groups' column chunks are read from the input.
   #   - `string_storage`: How string *values* become Ruby strings (default `:copy`). Hash keys
   #                       (struct field names and top-level column names) are always interned and
   #                       reused regardless of this setting.
@@ -39,6 +42,7 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
       strict: T.nilable(T::Boolean),
       string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped]))
     ).returns(T::Enumerator[T.any(T::Hash[String, T.untyped], T::Array[T.untyped])])
@@ -48,12 +52,13 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
       strict: T.nilable(T::Boolean),
       string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped])),
       blk: T.nilable(T.proc.params(row: T.any(T::Hash[String, T.untyped], T::Array[T.untyped])).void)
     ).returns(NilClass)
   end
-  def self.each_row(input, result_type: nil, columns: nil, strict: nil, string_storage: nil, &blk)
+  def self.each_row(input, result_type: nil, columns: nil, row_groups: nil, strict: nil, string_storage: nil, &blk)
   end
 
   # Options:
@@ -61,6 +66,8 @@ module Parquet
   #   - `result_type`: String specifying the output format
   #                    ("hash" or "array" or :hash or :array)
   #   - `columns`: When present, only the specified columns will be included in the output.
+  #   - `row_groups`: When present, only the listed row group indexes are decoded, in the
+  #                   order given. See `each_row` for details.
   #   - `batch_size`: When present, specifies the number of rows per batch
   #   - `string_storage`: How string values become Ruby strings (`:copy` (default), `:intern`,
   #                       or `:shared`). See `each_row` for the semantics of each mode.
@@ -69,6 +76,7 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
       batch_size: T.nilable(Integer),
       strict: T.nilable(T::Boolean),
       string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped]))
@@ -79,6 +87,7 @@ module Parquet
       input: T.any(String, File, StringIO, IO),
       result_type: T.nilable(T.any(String, Symbol)),
       columns: T.nilable(T::Array[String]),
+      row_groups: T.nilable(T::Array[Integer]),
       batch_size: T.nilable(Integer),
       strict: T.nilable(T::Boolean),
       string_storage: T.nilable(T.any(String, Symbol, T::Hash[Symbol, T.untyped])),
@@ -86,7 +95,7 @@ module Parquet
         T.nilable(T.proc.params(batch: T.any(T::Hash[String, T::Array[T.untyped]], T::Array[T::Array[T.untyped]])).void)
     ).returns(NilClass)
   end
-  def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, strict: nil, string_storage: nil, &blk)
+  def self.each_column(input, result_type: nil, columns: nil, row_groups: nil, batch_size: nil, strict: nil, string_storage: nil, &blk)
   end
 
   # Options:

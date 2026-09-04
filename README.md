@@ -98,6 +98,14 @@ Parquet.each_row("data.parquet", columns: ["id", "name"]) do |row|
   # Only requested columns are loaded from disk
 end
 
+# Read specific row groups only (indexing matches Parquet.metadata)
+Parquet.each_row("data.parquet", row_groups: [2]) do |row|
+  # Only row group 2's column chunks are read from disk
+end
+
+# Order is respected, so this yields group 1's rows before group 0's
+Parquet.each_row("data.parquet", row_groups: [1, 0])
+
 # Works with IO objects
 File.open("data.parquet", "rb") do |file|
   Parquet.each_row(file) do |row|
@@ -127,6 +135,11 @@ Parquet.each_column("data.parquet",
                     columns: ["id", "name"]) do |batch|
   # batch is an array of arrays
   # [[1, 2, ...], ["Alice", "Bob", ...]]
+end
+
+# Row-group selection works here too
+Parquet.each_column("data.parquet", row_groups: [1]) do |batch|
+  # Only row group 1's data is decoded
 end
 ```
 
