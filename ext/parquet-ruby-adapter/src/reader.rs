@@ -13,6 +13,34 @@ use crate::{
 };
 use std::collections::HashSet;
 
+/// Validate `row_groups` against the file's row-group count, so an out-of-range
+/// index is a clear ArgumentError instead of a decode error from mid-read.
+fn validate_row_groups(
+    ruby: &Ruby,
+    row_groups: Option<&[usize]>,
+    num_row_groups: usize,
+) -> Result<(), MagnusError> {
+    let Some(row_groups) = row_groups else {
+        return Ok(());
+    };
+    if row_groups.is_empty() {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            "row_groups must include at least one row group index",
+        ));
+    }
+    if let Some(index) = row_groups.iter().find(|i| **i >= num_row_groups) {
+        return Err(MagnusError::new(
+            ruby.exception_arg_error(),
+            format!(
+                "row_groups index {} is out of range; the file has {} row groups",
+                index, num_row_groups
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Read parquet file row by row
 pub fn each_row(
     ruby: &Ruby,
@@ -20,6 +48,7 @@ pub fn each_row(
     to_read: Value,
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
+    row_groups: Option<Vec<usize>>,
     strict: bool,
     string_storage: StringStorageConfig,
     logger: RubyLogger,
@@ -32,6 +61,7 @@ pub fn each_row(
                 to_read,
                 result_type,
                 columns: columns.clone(),
+                row_groups: row_groups.clone(),
                 strict,
                 string_storage,
                 logger: logger.inner(),
@@ -86,6 +116,11 @@ pub fn each_row(
 
     let _ = logger.info(|| format!("Processing {} columns", all_column_names.len()));
 
+    let num_row_groups = reader_for_metadata
+        .num_row_groups()
+        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+    validate_row_groups(ruby, row_groups.as_deref(), num_row_groups)?;
+
     // Get the row iterator. Projected rows are yielded in file-schema order, not
     // request order, so the hash keys must follow file order too — derive them by
     // filtering the file columns, never from the request-ordered `cols`.
@@ -97,12 +132,12 @@ pub fn each_row(
             .cloned()
             .collect::<Vec<_>>();
         let iter = reader
-            .read_rows_with_projection(cols)
+            .read_rows_selected(Some(cols), row_groups)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
         (iter, projected_names)
     } else {
         let iter = reader
-            .read_rows()
+            .read_rows_selected(None, row_groups)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
         (iter, all_column_names)
     };
@@ -168,6 +203,7 @@ struct EachColumnArgs {
     to_read: Value,
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
+    row_groups: Option<Vec<usize>>,
     batch_size: Option<usize>,
     strict: bool,
     string_storage: StringStorageConfig,
@@ -182,6 +218,7 @@ pub fn each_column(
     to_read: Value,
     result_type: ParserResultType,
     columns: Option<Vec<String>>,
+    row_groups: Option<Vec<usize>>,
     batch_size: Option<usize>,
     strict: bool,
     string_storage: StringStorageConfig,
@@ -192,6 +229,7 @@ pub fn each_column(
         to_read,
         result_type,
         columns,
+        row_groups,
         batch_size,
         strict,
         string_storage,
@@ -209,6 +247,7 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 to_read: args.to_read,
                 result_type: args.result_type,
                 columns: args.columns.clone(),
+                row_groups: args.row_groups.clone(),
                 batch_size: args.batch_size,
                 strict: args.strict,
                 string_storage: args.string_storage,
@@ -268,15 +307,20 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         .map(|f| f.name().to_string())
         .collect();
 
+    let num_row_groups = reader_for_metadata
+        .num_row_groups()
+        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+    validate_row_groups(ruby, args.row_groups.as_deref(), num_row_groups)?;
+
     // Get the column iterator
     let (col_iter, _column_names) = if let Some(ref cols) = args.columns {
         let iter = reader
-            .read_columns_with_projection(cols, args.batch_size)
+            .read_columns_selected(Some(cols), args.row_groups, args.batch_size)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
         (iter, cols.clone())
     } else {
         let iter = reader
-            .read_columns(args.batch_size)
+            .read_columns_selected(None, args.row_groups, args.batch_size)
             .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
         (iter, all_column_names)
     };

@@ -45,6 +45,8 @@ pub struct RowEnumeratorArgs {
     pub to_read: Value,
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
+    /// Row-group indexes to decode; `None` decodes all row groups in order.
+    pub row_groups: Option<Vec<usize>>,
     pub strict: bool,
     pub string_storage: StringStorageConfig,
     pub logger: Option<Value>,
@@ -56,6 +58,8 @@ pub struct ColumnEnumeratorArgs {
     pub to_read: Value,
     pub result_type: ParserResultType,
     pub columns: Option<Vec<String>>,
+    /// Row-group indexes to decode; `None` decodes all row groups in order.
+    pub row_groups: Option<Vec<usize>>,
     pub batch_size: Option<usize>,
     pub strict: bool,
     pub string_storage: StringStorageConfig,
