@@ -132,6 +132,7 @@ pub fn each_row(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
         (
             Option<Option<Value>>,       // result_type
             Option<Option<Vec<String>>>, // columns
+            Option<Option<Vec<usize>>>,  // row_groups
             Option<Option<bool>>,        // strict
             Option<Option<Value>>,       // string_storage
             Option<Option<Value>>,       // logger
@@ -143,6 +144,7 @@ pub fn each_row(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
         &[
             "result_type",
             "columns",
+            "row_groups",
             "strict",
             "string_storage",
             "logger",
@@ -162,9 +164,10 @@ pub fn each_row(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
         ParserResultType::Hash
     };
     let columns = kwargs.optional.1.flatten();
-    let strict = kwargs.optional.2.flatten().unwrap_or(true);
-    let string_storage = parse_string_storage(&ruby, kwargs.optional.3.flatten())?;
-    let logger = RubyLogger::new(kwargs.optional.4.flatten())?;
+    let row_groups = kwargs.optional.2.flatten();
+    let strict = kwargs.optional.3.flatten().unwrap_or(true);
+    let string_storage = parse_string_storage(&ruby, kwargs.optional.4.flatten())?;
+    let logger = RubyLogger::new(kwargs.optional.5.flatten())?;
 
     // Delegate to parquet_ruby_adapter
     parquet_ruby_adapter::reader::each_row(
@@ -173,6 +176,7 @@ pub fn each_row(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError> {
         to_read,
         result_type,
         columns,
+        row_groups,
         strict,
         string_storage,
         logger,
@@ -193,6 +197,7 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
         (
             Option<Option<Value>>,       // result_type
             Option<Option<Vec<String>>>, // columns
+            Option<Option<Vec<usize>>>,  // row_groups
             Option<Option<usize>>,       // batch_size
             Option<Option<bool>>,        // strict
             Option<Option<Value>>,       // string_storage
@@ -205,6 +210,7 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
         &[
             "result_type",
             "columns",
+            "row_groups",
             "batch_size",
             "strict",
             "string_storage",
@@ -225,7 +231,8 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
         ParserResultType::Hash
     };
     let columns = kwargs.optional.1.flatten();
-    let batch_size = if let Some(bs) = kwargs.optional.2.flatten() {
+    let row_groups = kwargs.optional.2.flatten();
+    let batch_size = if let Some(bs) = kwargs.optional.3.flatten() {
         if bs == 0 {
             return Err(MagnusError::new(
                 ruby.exception_arg_error(),
@@ -236,9 +243,9 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
     } else {
         None
     };
-    let strict = kwargs.optional.3.flatten().unwrap_or(true);
-    let string_storage = parse_string_storage(&ruby, kwargs.optional.4.flatten())?;
-    let logger = RubyLogger::new(kwargs.optional.5.flatten())?;
+    let strict = kwargs.optional.4.flatten().unwrap_or(true);
+    let string_storage = parse_string_storage(&ruby, kwargs.optional.5.flatten())?;
+    let logger = RubyLogger::new(kwargs.optional.6.flatten())?;
 
     // Delegate to parquet_ruby_adapter
     parquet_ruby_adapter::reader::each_column(
@@ -247,6 +254,7 @@ pub fn each_column(rb_self: Value, args: &[Value]) -> Result<Value, MagnusError>
         to_read,
         result_type,
         columns,
+        row_groups,
         batch_size,
         strict,
         string_storage,

@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Add `row_groups:` option to `Parquet.each_row` and `Parquet.each_column` to
+  decode only the listed row group indexes (in the order given) instead of the
+  whole file. Indexes refer to the row groups reported by `Parquet.metadata`.
+  Only the selected row groups' column chunks are read from the underlying IO,
+  so combined with HTTP Range requests this enables fetching just one row group
+  of a remote file. An empty array or an out-of-range index raises
+  `ArgumentError`.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

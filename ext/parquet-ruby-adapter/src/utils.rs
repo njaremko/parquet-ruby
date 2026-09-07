@@ -397,6 +397,9 @@ pub fn create_row_enumerator(
     if let Some(columns) = args.columns {
         kwargs.aset(ruby.to_symbol("columns"), ruby.ary_from_vec(columns))?;
     }
+    if let Some(row_groups) = args.row_groups {
+        kwargs.aset(ruby.to_symbol("row_groups"), ruby.ary_from_vec(row_groups))?;
+    }
     if args.strict {
         kwargs.aset(ruby.to_symbol("strict"), true)?;
     }
@@ -424,6 +427,9 @@ pub fn create_column_enumerator(
     )?;
     if let Some(columns) = args.columns {
         kwargs.aset(ruby.to_symbol("columns"), ruby.ary_from_vec(columns))?;
+    }
+    if let Some(row_groups) = args.row_groups {
+        kwargs.aset(ruby.to_symbol("row_groups"), ruby.ary_from_vec(row_groups))?;
     }
     if let Some(batch_size) = args.batch_size {
         kwargs.aset(ruby.to_symbol("batch_size"), batch_size)?;
