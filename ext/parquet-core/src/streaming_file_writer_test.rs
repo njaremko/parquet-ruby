@@ -2,7 +2,7 @@ use super::{row_group_ordinal, StreamingFileWriter, MAX_ROW_GROUPS_PER_FILE};
 use arrow::record_batch::RecordBatch;
 use arrow_array::Int64Array;
 use arrow_schema::{DataType, Field, Schema};
-use parquet::file::properties::{BloomFilterProperties, WriterProperties};
+use parquet::file::properties::{BloomFilterProperties, EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -37,6 +37,30 @@ impl Write for ToggleWriter {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Records the bytes written to it, and how many it held each time it was flushed.
+#[derive(Default)]
+struct FlushRecorderState {
+    bytes: Mutex<Vec<u8>>,
+    flushed_at: Mutex<Vec<usize>>,
+}
+
+struct FlushRecorder {
+    state: Arc<FlushRecorderState>,
+}
+
+impl Write for FlushRecorder {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.state.bytes.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let written = self.state.bytes.lock().unwrap().len();
+        self.state.flushed_at.lock().unwrap().push(written);
+        Ok(())
     }
 }
 
@@ -147,6 +171,33 @@ fn footer_write_failure_is_an_operating_error_without_more_output() {
     assert_eq!(
         ("io", bytes_before_failure),
         (error_class(error), bytes_after_failure)
+    );
+}
+
+#[test]
+fn each_row_group_is_flushed_to_the_output_once_it_is_written() {
+    let state = Arc::new(FlushRecorderState::default());
+    let output = FlushRecorder {
+        state: Arc::clone(&state),
+    };
+    // Without an offset index, whose rewrite also flushes the output, so that the
+    // flush at the end of the row group is the only one.
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .set_offset_index_disabled(true)
+        .build();
+    let mut writer =
+        StreamingFileWriter::new(output, integer_arrow_schema(), properties, 1).unwrap();
+
+    writer.write(&integer_batch()).unwrap();
+    let after_first_row_group = state.bytes.lock().unwrap().len();
+    writer.write(&integer_batch()).unwrap();
+    let after_second_row_group = state.bytes.lock().unwrap().len();
+
+    assert_eq!(
+        vec![after_first_row_group, after_second_row_group],
+        *state.flushed_at.lock().unwrap()
     );
 }
 

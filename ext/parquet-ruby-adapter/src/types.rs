@@ -16,6 +16,9 @@ pub struct ParquetWriteArgs {
     pub logger: Option<Value>,
     /// Requested string-cache capacity; `None` means the cache is disabled.
     pub string_cache: Option<usize>,
+    /// Whether output to an IO object is staged on disk and copied to it once the
+    /// file is complete (the default), rather than written to it as it is encoded.
+    pub stage_io: bool,
 }
 
 /// A fully validated `Parquet.repack` request.

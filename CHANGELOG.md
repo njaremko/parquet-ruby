@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Add `stage_io: false` to `Parquet.write_rows` and `Parquet.write_columns` to
+  write IO output while the file is encoded, rather than staging the whole file
+  on disk and copying it to the IO once it is complete. Each row group reaches the
+  IO as soon as it is complete, and the footer once the input ends, so a pipe or
+  an upload receives the file as it is written, and only the row group being
+  encoded is staged on disk. A failed write leaves a partial file in the IO; an
+  error raised by the IO, including a `throw`, is raised unchanged and nothing
+  more is written after it. The default, `stage_io: true`, is unchanged, and a
+  path is always staged, so `stage_io: false` with a path raises `ArgumentError`.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

@@ -260,6 +260,9 @@ where
             write_row_group_metadata(self.metadata_spool.as_file_mut(), &row_group)?;
             self.row_groups_written += 1;
         }
+        // An output that buffers, such as a pipe or a socket wrapper, then delivers
+        // the row group now, rather than along with the next one.
+        self.output.flush()?;
         Ok(())
     }
 

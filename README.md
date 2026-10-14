@@ -172,6 +172,23 @@ no-clobber. Extended attributes and ACLs are not preserved. IO output is first
 staged on disk, then copied to the IO; a failed copy may leave the IO partially
 written.
 
+Pass `stage_io: false` to write to the IO while the file is encoded instead.
+Each row group reaches the IO as soon as it is complete, and the footer once the
+input ends, so the IO, such as a pipe or an upload, receives the file as it is
+written, and only the row group being encoded is staged on disk. If the write
+then fails, the IO holds a partial file. The IO must respond to `write`; `flush`
+is called once the file is complete when the IO responds to it. An error raised
+by the IO, such as from `write`, is raised unchanged, and nothing more is written
+to the IO after it. A path is always staged, so `stage_io: false` with a path
+raises `ArgumentError`.
+
+```ruby
+# Upload to S3 in parts while the rows are written, without a local copy of the file
+s3_object.upload_stream do |upload|
+  Parquet.write_rows(rows, schema: schema, write_to: upload, stage_io: false)
+end
+```
+
 ### Row-wise Writing
 
 Best for: Streaming data, converting from other formats, memory-constrained environments
@@ -512,8 +529,10 @@ row-group target is at least 8 MiB, and each file may contain up to 32,768 row
 groups.
 
 Encoded data and completed row-group metadata are staged on disk, so large
-writes need temporary disk space. Ruby still owns the current row or batch, and
-an in-memory destination such as `StringIO` holds the output in memory.
+writes need temporary disk space. With `stage_io: false`, IO output stages only
+the row group being encoded and the row-group metadata, rather than the whole
+file. Ruby still owns the current row or batch, and an in-memory destination
+such as `StringIO` holds the output in memory.
 
 ## Architecture
 
