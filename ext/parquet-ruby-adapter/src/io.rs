@@ -1,6 +1,8 @@
 use bytes::Bytes;
+use magnus::error::OpaqueError;
+use magnus::gc;
 use magnus::value::{Opaque, ReprValue};
-use magnus::{Error as MagnusError, RString, Ruby, Value};
+use magnus::{Error as MagnusError, RString, Ruby, TryConvert, Value};
 use std::io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write};
 
 use parquet::{
@@ -353,6 +355,193 @@ impl Write for RubyIOWriter {
             Ok(_) => Ok(()),
             Err(e) => Err(IoError::new(ErrorKind::Other, e.to_string())),
         }
+    }
+}
+
+/// Bytes that a `RubyIoSink` collects before it calls the IO object's `write`, so
+/// that the many small writes of a footer reach Ruby as a few large strings.
+const IO_SINK_BUFFER_BYTES: usize = 1024 * 1024;
+
+/// Carries the first error that a Ruby IO object raises while a `RubyIoSink`
+/// writes to it, to the writer that raises it once the Parquet writer stops.
+///
+/// The Parquet writer owns the sink and turns a failed write into its own error,
+/// whose message is all that survives the footer's thrift encoding, so the Ruby
+/// error travels here instead: an exception, or a non-local exit such as `throw`.
+/// The sink reports to it, and the writer takes the error from it.
+#[derive(Clone, Default)]
+pub struct RubyIoFailure(Arc<Mutex<Option<KeptError>>>);
+
+impl RubyIoFailure {
+    /// Keeps the error, unless an earlier one is already kept.
+    fn report(&self, error: MagnusError) {
+        if let Ok(mut kept) = self.0.lock() {
+            if kept.is_none() {
+                *kept = Some(KeptError::new(error));
+            }
+        }
+    }
+
+    /// Takes the error that the IO object raised, if it raised one.
+    pub fn take(&self, ruby: &Ruby) -> Option<MagnusError> {
+        let kept = self.0.lock().ok()?.take()?;
+        Some(kept.into_error(ruby))
+    }
+}
+
+/// An error kept on the heap until it is raised. Its Ruby object, the exception
+/// or its class, is registered with the garbage collector meanwhile, since only
+/// the stack would otherwise keep it alive.
+struct KeptError {
+    error: OpaqueError,
+    root: Option<Box<Opaque<Value>>>,
+}
+
+impl KeptError {
+    fn new(error: MagnusError) -> Self {
+        let root = error.value().map(|value| {
+            let root = Box::new(Opaque::from(value));
+            gc::register_address(&*root);
+            root
+        });
+        Self {
+            error: OpaqueError::from(error),
+            root,
+        }
+    }
+
+    /// Returns the error, whose Ruby object the stack then keeps alive.
+    fn into_error(self, ruby: &Ruby) -> MagnusError {
+        OpaqueError::into_error_with(self.error.clone(), ruby)
+    }
+}
+
+impl Drop for KeptError {
+    fn drop(&mut self) {
+        if let Some(root) = &self.root {
+            gc::unregister_address(&**root);
+        }
+    }
+}
+
+/// Writes all of `bytes` to a Ruby IO object, passing the rest to `write` again
+/// when it writes only some of them.
+///
+/// `IO#write` writes every byte and returns how many. An IO-like object may write
+/// fewer, or return something other than an Integer, which is taken to mean that
+/// it wrote them all. The bytes are copied into one String, and the rest after a
+/// short write is a slice of it that shares its memory.
+fn write_to_io(ruby: &Ruby, io: Value, bytes: &[u8]) -> Result<(), MagnusError> {
+    let string = ruby.str_from_slice(bytes);
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = bytes.len() - offset;
+        let chunk: Value = if offset == 0 {
+            string.as_value()
+        } else {
+            string.funcall("byteslice", (offset, remaining))?
+        };
+        let result: Value = io.funcall("write", (chunk,))?;
+        let written = if result.is_kind_of(ruby.class_integer()) {
+            match i64::try_convert(result) {
+                Ok(count) if count > 0 => usize::try_from(count).unwrap_or(usize::MAX),
+                _ => {
+                    return Err(MagnusError::new(
+                        ruby.exception_io_error(),
+                        format!("IO object's write returned {result}, rather than the number of bytes it wrote"),
+                    ))
+                }
+            }
+        } else {
+            remaining
+        };
+        offset += written.min(remaining);
+    }
+    Ok(())
+}
+
+/// Writes the bytes of a Parquet file to a Ruby IO object as they are produced,
+/// rather than staging the whole file on disk first.
+///
+/// Calls the IO object's `write` with up to `IO_SINK_BUFFER_BYTES` at a time, and
+/// with whatever remains when the writer flushes, which it does after each row
+/// group and at the end of the file. Once a write fails, it reports the error to
+/// its `RubyIoFailure` and writes nothing more to the IO object. Bytes still
+/// buffered when the sink is dropped are discarded, so a failed Parquet write
+/// sends nothing more to the IO object either.
+pub struct RubyIoSink {
+    io: Opaque<Value>,
+    buffer: Vec<u8>,
+    failure: RubyIoFailure,
+    failed: bool,
+}
+
+impl RubyIoSink {
+    pub fn new(io: Value, failure: RubyIoFailure) -> Self {
+        Self {
+            io: Opaque::from(io),
+            buffer: Vec::with_capacity(IO_SINK_BUFFER_BYTES),
+            failure,
+            failed: false,
+        }
+    }
+
+    fn drain(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let result = send(self.io, &self.buffer);
+        self.buffer.clear();
+        result.map_err(|error| self.fail(error))
+    }
+
+    /// Stops writing to the IO object, and reports the Ruby error, when there is
+    /// one, so that the writer raises it.
+    fn fail(&mut self, error: Option<MagnusError>) -> IoError {
+        self.failed = true;
+        match error {
+            Some(error) => {
+                self.failure.report(error);
+                IoError::other("the IO object raised an error")
+            }
+            None => IoError::other("a Ruby IO object can only be written from a Ruby thread"),
+        }
+    }
+
+    fn check_usable(&self) -> io::Result<()> {
+        if self.failed {
+            Err(IoError::other("an earlier write to the IO object failed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Writes the bytes to the IO object, returning the Ruby error that it raised, or
+/// no error when this is not a Ruby thread.
+fn send(io: Opaque<Value>, bytes: &[u8]) -> Result<(), Option<MagnusError>> {
+    let ruby = Ruby::get().map_err(|_| None)?;
+    write_to_io(&ruby, ruby.get_inner(io), bytes).map_err(Some)
+}
+
+impl Write for RubyIoSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.check_usable()?;
+        if self.buffer.len() + bytes.len() > IO_SINK_BUFFER_BYTES {
+            self.drain()?;
+        }
+        if bytes.len() >= IO_SINK_BUFFER_BYTES {
+            send(self.io, bytes).map_err(|error| self.fail(error))?;
+        } else {
+            self.buffer.extend_from_slice(bytes);
+        }
+        Ok(bytes.len())
+    }
+
+    /// Writes the buffered bytes to the IO object, without calling its `flush`.
+    fn flush(&mut self) -> io::Result<()> {
+        self.check_usable()?;
+        self.drain()
     }
 }
 

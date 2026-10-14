@@ -107,15 +107,21 @@ module Parquet
   #   - `flush_threshold`: Optional positive byte quantum for converted native values (defaults
   #                        to 100MB). One larger row is written alone. Encoded row groups use this
   #                        value with an 8MB minimum; completed footer metadata is disk-spooled.
-  #   - `compression`: Optional compression type to use (defaults to "zstd")
-  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  #   - `compression`: Optional compression type to use (defaults to "snappy")
+  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd",
+  #                   "brotli"
   #   - `sample_size`: Optional positive number of rows to sample for size estimation
   #                    (defaults to 100, at most 10_000)
+  #   - `logger`: Optional Ruby logger for write progress messages
   #   - `string_cache`: Deduplicate repeated string values while writing. `false` (default)
   #                     disables it, `true` enables it with a default capacity, and an Integer
   #                     enables it with that many retained distinct strings (at most 65_536).
   #                     Retention also skips values larger than 4KB and stops after 16MB of
   #                     cached string content.
+  #   - `stage_io`: For an IO `write_to`, whether to stage the whole file on disk and copy it to
+  #                 the IO once it is complete (`true`, the default), or to write each row group
+  #                 to the IO as soon as it is encoded (`false`), leaving a partial file in the IO
+  #                 if the write fails. A path is always staged.
   sig do
     params(
       read_from: T::Enumerable[T::Array[T.untyped]],
@@ -125,7 +131,9 @@ module Parquet
       flush_threshold: T.nilable(Integer),
       compression: T.nilable(String),
       sample_size: T.nilable(Integer),
-      string_cache: T.nilable(T.any(T::Boolean, Integer))
+      logger: T.nilable(T.untyped),
+      string_cache: T.nilable(T.any(T::Boolean, Integer)),
+      stage_io: T.nilable(T::Boolean)
     ).void
   end
   def self.write_rows(
@@ -136,7 +144,9 @@ module Parquet
     flush_threshold: nil,
     compression: nil,
     sample_size: nil,
-    string_cache: nil
+    logger: nil,
+    string_cache: nil,
+    stage_io: nil
   )
   end
 
@@ -157,9 +167,13 @@ module Parquet
   #   - `flush_threshold`: Optional positive byte quantum for converted native values (defaults
   #                        to 100MB). One larger row is written alone. Encoded row groups use this
   #                        value with an 8MB minimum; completed footer metadata is disk-spooled.
-  #   - `compression`: Optional compression type to use (defaults to "zstd")
-  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd"
+  #   - `compression`: Optional compression type to use (defaults to "snappy")
+  #                   Supported values: "none", "uncompressed", "snappy", "gzip", "lz4", "zstd",
+  #                   "brotli"
   #   - `logger`: Optional Ruby logger for column-write progress messages
+  #   - `stage_io`: For an IO `write_to`, whether to stage the whole file on disk first (`true`,
+  #                 the default) or write each row group to the IO as it is encoded (`false`),
+  #                 see `write_rows`
   sig do
     params(
       read_from: T::Enumerable[T::Array[T::Array[T.untyped]]],
@@ -167,7 +181,8 @@ module Parquet
       write_to: T.any(String, IO),
       flush_threshold: T.nilable(Integer),
       compression: T.nilable(String),
-      logger: T.nilable(T.untyped)
+      logger: T.nilable(T.untyped),
+      stage_io: T.nilable(T::Boolean)
     ).void
   end
   def self.write_columns(
@@ -176,7 +191,8 @@ module Parquet
     write_to:,
     flush_threshold: nil,
     compression: nil,
-    logger: nil
+    logger: nil,
+    stage_io: nil
   )
   end
 
