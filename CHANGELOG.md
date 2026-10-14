@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+- IO output raises the error that the IO raised, such as from `write`, unchanged,
+  rather than a `RuntimeError` with its message, and a `throw` from the IO leaves
+  the write. Nothing more is written to the IO once it raises, where a write that
+  failed as the copy was flushed was retried as it was cleaned up. An IO whose
+  `write` returns something other than a byte count, such as `nil`, and an IO
+  without `flush` are accepted. A `write_to` that is neither a String path nor
+  responds to `write` raises `TypeError` before any row is read, rather than a
+  `RuntimeError` once the whole file has been written.
+- Add `stage_io: false` to `Parquet.write_rows` and `Parquet.write_columns` to
+  write IO output while the file is encoded, rather than staging the whole file
+  on disk and copying it to the IO once it is complete. Each row group reaches the
+  IO as soon as it is complete, and the footer once the input ends, so a pipe or
+  an upload receives the file as it is written, and only the row group being
+  encoded is staged on disk. A failed write leaves a partial file in the IO; an
+  error raised by the IO, including a `throw`, is raised unchanged and nothing
+  more is written after it. The default, `stage_io: true`, is unchanged, and a
+  path is always staged, so `stage_io: false` with a path raises `ArgumentError`.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

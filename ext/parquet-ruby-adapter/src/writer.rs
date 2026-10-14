@@ -3,7 +3,7 @@ use magnus::{Enumerator, Error as MagnusError, RArray, Ruby, TryConvert, Value};
 use parquet_core::writer::WriterBuilder;
 use parquet_core::{Schema, SchemaNode};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use tempfile::{NamedTempFile, TempPath};
 
@@ -13,23 +13,53 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::converter::RubyValueConverter;
-use crate::io::RubyIOWriter;
+use crate::io::{RubyIoFailure, RubyIoSink};
 use crate::logger::RubyLogger;
 use crate::schema::{extract_field_schemas, process_schema_value, ruby_schema_to_parquet};
 use crate::string_cache::StringCache;
 use crate::utils::parse_compression;
 
+/// Where the Parquet writer sends the bytes of the file: a staging file, or the
+/// Ruby IO object itself when IO output is not staged, see `stage_io`.
+enum OutputSink {
+    Staged(File),
+    Io(RubyIoSink),
+}
+
+impl Write for OutputSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Staged(file) => file.write(bytes),
+            Self::Io(sink) => sink.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Staged(file) => file.flush(),
+            Self::Io(sink) => sink.flush(),
+        }
+    }
+}
+
 enum WriterOutput {
     Path {
-        writer: parquet_core::Writer<File>,
+        writer: parquet_core::Writer<OutputSink>,
         staging_path: TempPath,
         destination: PathBuf,
         final_state: PathFinalState,
     },
     Io {
-        writer: parquet_core::Writer<File>,
+        writer: parquet_core::Writer<OutputSink>,
         staging_path: TempPath,
         io_object: Value,
+    },
+    /// IO output with `stage_io: false`: each row group reaches the IO object as
+    /// soon as it is encoded, and the footer once the writer closes.
+    UnstagedIo {
+        writer: parquet_core::Writer<OutputSink>,
+        io_object: Value,
+        io_failure: RubyIoFailure,
     },
 }
 
@@ -41,6 +71,9 @@ enum PreparedWriterOutput {
     },
     Io {
         temp_file: NamedTempFile,
+        io_object: Value,
+    },
+    UnstagedIo {
         io_object: Value,
     },
 }
@@ -67,11 +100,34 @@ struct PathFinalState {
 }
 
 impl WriterOutput {
-    fn writer_mut(&mut self) -> &mut parquet_core::Writer<File> {
+    fn writer_mut(&mut self) -> &mut parquet_core::Writer<OutputSink> {
         match self {
-            Self::Path { writer, .. } | Self::Io { writer, .. } => writer,
+            Self::Path { writer, .. }
+            | Self::Io { writer, .. }
+            | Self::UnstagedIo { writer, .. } => writer,
         }
     }
+
+    /// The error to raise for a failure of the Parquet writer: the error that the
+    /// IO object raised, when writing to it is what failed, otherwise the
+    /// writer's own.
+    fn writer_error(&self, ruby: &Ruby, error: impl ToString) -> MagnusError {
+        match self {
+            Self::UnstagedIo { io_failure, .. } => io_writer_error(ruby, io_failure, error),
+            Self::Path { .. } | Self::Io { .. } => {
+                MagnusError::new(ruby.exception_runtime_error(), error.to_string())
+            }
+        }
+    }
+}
+
+/// The error to raise for a failure of a Parquet writer that writes to an IO
+/// object: the error that the IO object raised, when it raised one, otherwise the
+/// writer's own.
+fn io_writer_error(ruby: &Ruby, io_failure: &RubyIoFailure, error: impl ToString) -> MagnusError {
+    io_failure
+        .take(ruby)
+        .unwrap_or_else(|| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -124,14 +180,34 @@ fn create_writer(
                 io_object,
             })
         }
+        PreparedWriterOutput::UnstagedIo { io_object } => {
+            let io_failure = RubyIoFailure::default();
+            let sink = OutputSink::Io(RubyIoSink::new(io_object, io_failure.clone()));
+            let writer = builder
+                .build(sink, schema)
+                .map_err(|error| io_writer_error(ruby, &io_failure, error))?;
+            Ok(WriterOutput::UnstagedIo {
+                writer,
+                io_object,
+                io_failure,
+            })
+        }
     }
 }
 
 fn prepare_writer_output(
     ruby: &Ruby,
     write_to: Value,
+    stage_io: bool,
 ) -> Result<PreparedWriterOutput, MagnusError> {
     if write_to.is_kind_of(ruby.class_string()) {
+        if !stage_io {
+            return Err(MagnusError::new(
+                ruby.exception_arg_error(),
+                "stage_io: false only applies to an IO object; a path is always staged so \
+                 that it is published atomically",
+            ));
+        }
         let path_str: String = TryConvert::try_convert(write_to)?;
         let destination = PathBuf::from(path_str);
         let (temp_file, final_state) = create_path_staging_file(&destination).map_err(|error| {
@@ -144,6 +220,15 @@ fn prepare_writer_output(
             temp_file,
             destination,
             final_state,
+        })
+    } else if !write_to.respond_to("write", false)? {
+        Err(MagnusError::new(
+            ruby.exception_type_error(),
+            "write_to must be a String path or an IO object that responds to 'write'",
+        ))
+    } else if !stage_io {
+        Ok(PreparedWriterOutput::UnstagedIo {
+            io_object: write_to,
         })
     } else {
         let temp_file = NamedTempFile::new().map_err(|error| {
@@ -164,7 +249,7 @@ fn build_staged_writer(
     builder: WriterBuilder,
     temp_file: NamedTempFile,
     schema: Schema,
-) -> Result<(parquet_core::Writer<File>, TempPath), MagnusError> {
+) -> Result<(parquet_core::Writer<OutputSink>, TempPath), MagnusError> {
     let file = temp_file.reopen().map_err(|error| {
         MagnusError::new(
             ruby.exception_runtime_error(),
@@ -173,7 +258,7 @@ fn build_staged_writer(
     })?;
     let staging_path = temp_file.into_temp_path();
     let writer = builder
-        .build(file, schema)
+        .build(OutputSink::Staged(file), schema)
         .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
     Ok((writer, staging_path))
 }
@@ -422,6 +507,16 @@ fn finalize_writer(ruby: &Ruby, writer_output: WriterOutput) -> Result<(), Magnu
             })?;
             copy_temp_file_to_io(ruby, staging_path, io_object)
         }
+        WriterOutput::UnstagedIo {
+            writer,
+            io_object,
+            io_failure,
+        } => {
+            writer
+                .close()
+                .map_err(|error| io_writer_error(ruby, &io_failure, error))?;
+            flush_io(io_object)
+        }
     }
 }
 
@@ -471,21 +566,28 @@ fn copy_temp_file_to_io(
             format!("Failed to reopen temporary file: {error}"),
         )
     })?;
-    let mut reader = BufReader::new(file);
-    let mut writer = BufWriter::new(RubyIOWriter::new(io_object));
+    let io_failure = RubyIoFailure::default();
+    let mut sink = RubyIoSink::new(io_object, io_failure.clone());
 
-    std::io::copy(&mut reader, &mut writer).map_err(|error| {
-        MagnusError::new(
-            ruby.exception_runtime_error(),
-            format!("Failed to copy temp file to IO object: {error}"),
-        )
-    })?;
-    writer.flush().map_err(|error| {
-        MagnusError::new(
-            ruby.exception_runtime_error(),
-            format!("Failed to flush IO object: {error}"),
-        )
-    })
+    std::io::copy(&mut BufReader::new(file), &mut sink)
+        .and_then(|_| sink.flush())
+        .map_err(|error| {
+            io_writer_error(
+                ruby,
+                &io_failure,
+                format!("Failed to copy temp file to IO object: {error}"),
+            )
+        })?;
+    flush_io(io_object)
+}
+
+/// Calls the IO object's `flush` once the whole file has been written to it, when
+/// the IO object has one.
+fn flush_io(io_object: Value) -> Result<(), MagnusError> {
+    if io_object.respond_to("flush", false)? {
+        let _: Value = io_object.funcall("flush", ())?;
+    }
+    Ok(())
 }
 
 fn input_enumerator(ruby: &Ruby, input: Value) -> Result<Enumerator, MagnusError> {
@@ -527,7 +629,7 @@ fn array_entry(ruby: &Ruby, array: RArray, index: usize) -> Result<Value, Magnus
 
 fn write_row_value(
     ruby: &Ruby,
-    writer: &mut parquet_core::Writer<File>,
+    writer_output: &mut WriterOutput,
     converter: &mut RubyValueConverter,
     field_schemas: &[SchemaNode],
     row_value: Value,
@@ -561,14 +663,13 @@ fn write_row_value(
         );
     }
 
-    writer
-        .write_row(row)
-        .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))
+    let result = writer_output.writer_mut().write_row(row);
+    result.map_err(|error| writer_output.writer_error(ruby, error))
 }
 
 fn write_column_batch(
     ruby: &Ruby,
-    writer: &mut parquet_core::Writer<File>,
+    writer_output: &mut WriterOutput,
     converter: &mut RubyValueConverter,
     field_schemas: &[SchemaNode],
     batch_index: usize,
@@ -631,9 +732,8 @@ fn write_column_batch(
                     .map_err(|error| conversion_error(ruby, error))?,
             );
         }
-        writer
-            .write_row(row)
-            .map_err(|error| MagnusError::new(ruby.exception_runtime_error(), error.to_string()))?;
+        let result = writer_output.writer_mut().write_row(row);
+        result.map_err(|error| writer_output.writer_error(ruby, error))?;
     }
 
     Ok(row_count)
@@ -645,7 +745,7 @@ pub fn write_rows(
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
     let logger = RubyLogger::new(write_args.logger)?;
-    let prepared_output = prepare_writer_output(ruby, write_args.write_to)?;
+    let prepared_output = prepare_writer_output(ruby, write_args.write_to, write_args.stage_io)?;
     let mut input = input_enumerator(ruby, write_args.read_from)?;
     let first_row = input.next().transpose()?;
     let schema_hash = process_schema_value(ruby, write_args.schema_value, first_row)
@@ -679,7 +779,7 @@ pub fn write_rows(
     if let Some(row) = first_row {
         write_row_value(
             ruby,
-            writer_output.writer_mut(),
+            &mut writer_output,
             &mut converter,
             &field_schemas,
             row,
@@ -689,7 +789,7 @@ pub fn write_rows(
     for row in input {
         write_row_value(
             ruby,
-            writer_output.writer_mut(),
+            &mut writer_output,
             &mut converter,
             &field_schemas,
             row?,
@@ -723,7 +823,7 @@ pub fn write_columns(
     write_args: crate::types::ParquetWriteArgs,
 ) -> Result<Value, MagnusError> {
     let logger = RubyLogger::new(write_args.logger)?;
-    let prepared_output = prepare_writer_output(ruby, write_args.write_to)?;
+    let prepared_output = prepare_writer_output(ruby, write_args.write_to, write_args.stage_io)?;
     let mut input = input_enumerator(ruby, write_args.read_from)?;
     let first_batch = input.next().transpose()?;
     let schema_hash = process_schema_value(ruby, write_args.schema_value, first_batch)
@@ -759,7 +859,7 @@ pub fn write_columns(
     if let Some(batch) = first_batch {
         let rows = write_column_batch(
             ruby,
-            writer_output.writer_mut(),
+            &mut writer_output,
             &mut converter,
             &field_schemas,
             batch_index,
@@ -773,7 +873,7 @@ pub fn write_columns(
     for batch in input {
         let rows = write_column_batch(
             ruby,
-            writer_output.writer_mut(),
+            &mut writer_output,
             &mut converter,
             &field_schemas,
             batch_index,

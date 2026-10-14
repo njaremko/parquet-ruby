@@ -81,6 +81,7 @@ pub fn parse_parquet_write_args(
             Option<Option<usize>>,
             Option<Option<Value>>,
             Option<Option<Value>>,
+            Option<Option<Value>>,
         ),
         (),
     >(
@@ -93,6 +94,7 @@ pub fn parse_parquet_write_args(
             "sample_size",
             "logger",
             "string_cache",
+            "stage_io",
         ],
     )?;
 
@@ -120,7 +122,26 @@ pub fn parse_parquet_write_args(
         )?,
         logger: kwargs.optional.4.flatten(),
         string_cache: parse_string_cache(ruby, kwargs.optional.5.flatten())?,
+        stage_io: parse_stage_io(ruby, kwargs.optional.6.flatten())?,
     })
+}
+
+/// Parse `stage_io:`, which defaults to true. Only true, false and nil are
+/// accepted, so that a stray value is an error rather than Ruby truthiness.
+fn parse_stage_io(ruby: &Ruby, value: Option<Value>) -> Result<bool, MagnusError> {
+    let Some(value) = value else {
+        return Ok(true);
+    };
+    if value.is_nil() || value.eql(ruby.qtrue())? {
+        return Ok(true);
+    }
+    if value.eql(ruby.qfalse())? {
+        return Ok(false);
+    }
+    Err(MagnusError::new(
+        ruby.exception_type_error(),
+        "stage_io must be true or false",
+    ))
 }
 
 /// Parse and fully validate a `Parquet.repack` call.
