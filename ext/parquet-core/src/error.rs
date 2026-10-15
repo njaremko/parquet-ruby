@@ -39,6 +39,11 @@ pub enum ParquetError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// A panic in parquet-rs or arrow-rs while reading a file, which some
+    /// damaged files cause instead of an error
+    #[error("Failed to read Parquet file (reader panicked): {0}")]
+    ReadPanic(String),
+
     /// UTF-8 decoding errors
     #[error("UTF-8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
@@ -84,6 +89,19 @@ impl ParquetError {
     /// Create a new internal error
     pub fn internal<S: Into<String>>(msg: S) -> Self {
         ParquetError::Internal(msg.into())
+    }
+
+    /// Create the error for a panic caught while reading a file, from the
+    /// payload that `std::panic::catch_unwind` returns
+    pub fn read_panic(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let message = if let Some(message) = payload.downcast_ref::<&str>() {
+            message.to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "the panic carried no message".to_string()
+        };
+        ParquetError::ReadPanic(message)
     }
 
     fn with_context_message(self, ctx: String) -> Self {

@@ -1,6 +1,7 @@
 use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, IntoValue, Ruby, Value};
-use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::metadata::ParquetMetaData;
+use parquet_core::reader::read_metadata;
 use std::fs::File;
 
 use crate::error::{IntoMagnusError, Result, RubyAdapterError};
@@ -498,8 +499,7 @@ pub fn parse_metadata(arg: Value) -> std::result::Result<Value, MagnusError> {
 fn parse_metadata_impl(arg: Value) -> Result<Value> {
     let ruby = Ruby::get().map_err(|_| RubyAdapterError::runtime("Failed to get Ruby runtime"))?;
 
-    let mut reader = ParquetMetaDataReader::new();
-    if arg.is_kind_of(ruby.class_string()) {
+    let metadata = if arg.is_kind_of(ruby.class_string()) {
         let path = arg
             .to_r_string()
             .map_err(|e| {
@@ -510,19 +510,11 @@ fn parse_metadata_impl(arg: Value) -> Result<Value> {
                 RubyAdapterError::invalid_input(format!("Failed to convert to Rust string: {}", e))
             })?;
         let file = File::open(path).map_err(RubyAdapterError::Io)?;
-        reader
-            .try_parse(&file)
-            .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
+        read_metadata(&file)?
     } else {
         let file = RubyIOReader::new(arg).map_err(RubyAdapterError::Io)?;
-        reader
-            .try_parse(&ThreadSafeRubyIOReader::new(file))
-            .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
-    }
-
-    let metadata = reader
-        .finish()
-        .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
+        read_metadata(&ThreadSafeRubyIOReader::new(file))?
+    };
 
     // Use TryIntoValue instead of IntoValue
     RubyParquetMetaData(metadata).try_into_value(&ruby)

@@ -4,12 +4,33 @@ use crate::{arrow_conversion::arrow_to_parquet_value, ParquetError, ParquetValue
 use arrow::record_batch::RecordBatch;
 use arrow_array::Array;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use parquet::file::metadata::{FileMetaData, ParquetMetaData};
+use parquet::file::metadata::{FileMetaData, ParquetMetaData, ParquetMetaDataReader};
 use parquet::schema::types::{Type, TypePtr};
 use std::{
     collections::{HashMap, HashSet},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
 };
+
+/// Run part of a read, turning a panic into an error.
+///
+/// parquet-rs and arrow-rs panic on some damaged files instead of returning
+/// an error, for example on a column chunk whose offset is negative. A panic
+/// must not unwind into the language runtime that called this crate (magnus
+/// turns it into Ruby's `fatal`, which no `rescue` catches), so every read in
+/// this module runs here and reports a panic as [`ParquetError::ReadPanic`].
+/// What a panic interrupts is either dropped or, for an iterator, never asked
+/// for anything again, which is what makes asserting unwind safety sound.
+fn catch_read_panic<T>(read: impl FnOnce() -> T) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(read)).map_err(ParquetError::read_panic)
+}
+
+/// Read the footer metadata of a Parquet file, without decoding its pages or
+/// the Arrow schema in its key-value metadata
+pub fn read_metadata<R: parquet::file::reader::ChunkReader>(reader: &R) -> Result<ParquetMetaData> {
+    let metadata = catch_read_panic(|| ParquetMetaDataReader::new().parse_and_finish(reader))??;
+    Ok(metadata)
+}
 
 /// Core Parquet reader that works with any source implementing Read + Seek
 #[derive(Clone)]
@@ -28,28 +49,33 @@ where
 
     /// Get the Parquet file metadata
     pub fn metadata(&mut self) -> Result<FileMetaData> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner.clone())?;
-        Ok(builder.metadata().file_metadata().clone())
+        catch_read_panic(|| -> Result<FileMetaData> {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner.clone())?;
+            Ok(builder.metadata().file_metadata().clone())
+        })?
     }
 
     /// Read rows from the Parquet file
     ///
     /// Returns an iterator over rows where each row is a vector of ParquetValues
     pub fn read_rows(self) -> Result<RowIterator<R>> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let schema = builder.schema().clone();
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
-        let reader = builder.build()?;
+        catch_read_panic(|| -> Result<RowIterator<R>> {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+            let schema = builder.schema().clone();
+            let metadata = builder.metadata().clone();
+            let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
+            let reader = builder.build()?;
 
-        Ok(RowIterator {
-            batch_reader: reader,
-            schema,
-            current_batch: None,
-            current_row: 0,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+            Ok(RowIterator {
+                batch_reader: reader,
+                schema,
+                current_batch: None,
+                current_row: 0,
+                aligned_parquet_fields,
+                panicked: false,
+                _phantom: std::marker::PhantomData,
+            })
+        })?
     }
 
     /// Read rows with column projection
@@ -58,43 +84,47 @@ where
     /// improve performance for wide tables. Projected row values are returned
     /// in file schema order, not request order.
     pub fn read_rows_with_projection(self, columns: &[String]) -> Result<RowIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let arrow_schema = builder.schema();
-        let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
+        catch_read_panic(|| -> Result<RowIterator<R>> {
+            let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+            let arrow_schema = builder.schema();
+            let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
 
-        // Create projection mask based on column names
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if requested_columns.contains(field.name().as_str()) {
-                column_indices.push(idx);
+            // Create projection mask based on column names
+            let mut column_indices = Vec::new();
+            for (idx, field) in arrow_schema.fields().iter().enumerate() {
+                if requested_columns.contains(field.name().as_str()) {
+                    column_indices.push(idx);
+                }
             }
-        }
-        // The projected batches are emitted in file order over the selected
-        // columns; build that schema so alignment and field access match.
-        let projected_schema = Arc::new(arrow_schema::Schema::new(
-            column_indices
-                .iter()
-                .map(|idx| arrow_schema.field(*idx).clone())
-                .collect::<Vec<_>>(),
-        ));
+            // The projected batches are emitted in file order over the selected
+            // columns; build that schema so alignment and field access match.
+            let projected_schema = Arc::new(arrow_schema::Schema::new(
+                column_indices
+                    .iter()
+                    .map(|idx| arrow_schema.field(*idx).clone())
+                    .collect::<Vec<_>>(),
+            ));
 
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
+            // Allow empty column projections to match v1 behavior
+            // This will result in rows with no fields
 
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
-        let reader = builder.build()?;
+            let mask =
+                parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
+            builder = builder.with_projection(mask);
+            let metadata = builder.metadata().clone();
+            let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
+            let reader = builder.build()?;
 
-        Ok(RowIterator {
-            batch_reader: reader,
-            schema: projected_schema,
-            current_batch: None,
-            current_row: 0,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+            Ok(RowIterator {
+                batch_reader: reader,
+                schema: projected_schema,
+                current_batch: None,
+                current_row: 0,
+                aligned_parquet_fields,
+                panicked: false,
+                _phantom: std::marker::PhantomData,
+            })
+        })?
     }
 
     /// Read columns from the Parquet file
@@ -102,27 +132,30 @@ where
     /// Returns an iterator over column batches where each batch contains
     /// arrays of values for each column.
     pub fn read_columns(self, batch_size: Option<usize>) -> Result<ColumnIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+        catch_read_panic(|| -> Result<ColumnIterator<R>> {
+            let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
 
-        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
+            let is_empty = builder.metadata().file_metadata().num_rows() == 0;
 
-        if let Some(size) = batch_size {
-            builder = builder.with_batch_size(size);
-        }
+            if let Some(size) = batch_size {
+                builder = builder.with_batch_size(size);
+            }
 
-        let schema = builder.schema().clone();
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
-        let reader = builder.build()?;
+            let schema = builder.schema().clone();
+            let metadata = builder.metadata().clone();
+            let aligned_parquet_fields = build_alignment(&schema, &metadata)?;
+            let reader = builder.build()?;
 
-        Ok(ColumnIterator {
-            batch_reader: reader,
-            schema,
-            returned_empty_batch: false,
-            is_empty_file: is_empty,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+            Ok(ColumnIterator {
+                batch_reader: reader,
+                schema,
+                returned_empty_batch: false,
+                is_empty_file: is_empty,
+                aligned_parquet_fields,
+                panicked: false,
+                _phantom: std::marker::PhantomData,
+            })
+        })?
     }
 
     /// Read columns with projection
@@ -131,48 +164,52 @@ where
         columns: &[String],
         batch_size: Option<usize>,
     ) -> Result<ColumnIterator<R>> {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
-        let arrow_schema = builder.schema();
-        let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
+        catch_read_panic(|| -> Result<ColumnIterator<R>> {
+            let mut builder = ParquetRecordBatchReaderBuilder::try_new(self.inner)?;
+            let arrow_schema = builder.schema();
+            let requested_columns = columns.iter().map(String::as_str).collect::<HashSet<_>>();
 
-        let is_empty = builder.metadata().file_metadata().num_rows() == 0;
+            let is_empty = builder.metadata().file_metadata().num_rows() == 0;
 
-        // Create projection mask
-        let mut column_indices = Vec::new();
-        for (idx, field) in arrow_schema.fields().iter().enumerate() {
-            if requested_columns.contains(field.name().as_str()) {
-                column_indices.push(idx);
+            // Create projection mask
+            let mut column_indices = Vec::new();
+            for (idx, field) in arrow_schema.fields().iter().enumerate() {
+                if requested_columns.contains(field.name().as_str()) {
+                    column_indices.push(idx);
+                }
             }
-        }
-        let projected_schema = Arc::new(arrow_schema::Schema::new(
-            column_indices
-                .iter()
-                .map(|idx| arrow_schema.field(*idx).clone())
-                .collect::<Vec<_>>(),
-        ));
+            let projected_schema = Arc::new(arrow_schema::Schema::new(
+                column_indices
+                    .iter()
+                    .map(|idx| arrow_schema.field(*idx).clone())
+                    .collect::<Vec<_>>(),
+            ));
 
-        // Allow empty column projections to match v1 behavior
-        // This will result in rows with no fields
+            // Allow empty column projections to match v1 behavior
+            // This will result in rows with no fields
 
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
-        builder = builder.with_projection(mask);
+            let mask =
+                parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), column_indices);
+            builder = builder.with_projection(mask);
 
-        if let Some(size) = batch_size {
-            builder = builder.with_batch_size(size);
-        }
+            if let Some(size) = batch_size {
+                builder = builder.with_batch_size(size);
+            }
 
-        let metadata = builder.metadata().clone();
-        let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
-        let reader = builder.build()?;
+            let metadata = builder.metadata().clone();
+            let aligned_parquet_fields = build_alignment(&projected_schema, &metadata)?;
+            let reader = builder.build()?;
 
-        Ok(ColumnIterator {
-            batch_reader: reader,
-            schema: projected_schema,
-            returned_empty_batch: false,
-            is_empty_file: is_empty,
-            aligned_parquet_fields,
-            _phantom: std::marker::PhantomData,
-        })
+            Ok(ColumnIterator {
+                batch_reader: reader,
+                schema: projected_schema,
+                returned_empty_batch: false,
+                is_empty_file: is_empty,
+                aligned_parquet_fields,
+                panicked: false,
+                _phantom: std::marker::PhantomData,
+            })
+        })?
     }
 }
 
@@ -240,16 +277,16 @@ pub struct RowIterator<R> {
     current_row: usize,
     /// Parquet root fields aligned to `schema` column order, computed once.
     aligned_parquet_fields: Vec<TypePtr>,
+    /// Set once a panic has ended the iteration
+    panicked: bool,
     _phantom: std::marker::PhantomData<R>,
 }
 
-impl<R> Iterator for RowIterator<R>
+impl<R> RowIterator<R>
 where
     R: parquet::file::reader::ChunkReader + 'static,
 {
-    type Item = Result<Vec<ParquetValue>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_row(&mut self) -> Option<Result<Vec<ParquetValue>>> {
         loop {
             // If we have a current batch and haven't exhausted it
             if let Some(ref batch) = self.current_batch {
@@ -290,6 +327,28 @@ where
     }
 }
 
+impl<R> Iterator for RowIterator<R>
+where
+    R: parquet::file::reader::ChunkReader + 'static,
+{
+    type Item = Result<Vec<ParquetValue>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.panicked {
+            return None;
+        }
+        match catch_read_panic(|| self.next_row()) {
+            Ok(row) => row,
+            Err(error) => {
+                // The panic may have left the batch reader part way through
+                // a page, so it is not asked for anything more.
+                self.panicked = true;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
 /// Iterator over column batches in a Parquet file
 pub struct ColumnIterator<R> {
     batch_reader: ParquetRecordBatchReader,
@@ -298,6 +357,8 @@ pub struct ColumnIterator<R> {
     is_empty_file: bool,
     /// Parquet root fields aligned to `schema` column order, computed once.
     aligned_parquet_fields: Vec<TypePtr>,
+    /// Set once a panic has ended the iteration
+    panicked: bool,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -306,13 +367,11 @@ pub struct ColumnBatch {
     pub columns: Vec<(String, Vec<ParquetValue>)>,
 }
 
-impl<R> Iterator for ColumnIterator<R>
+impl<R> ColumnIterator<R>
 where
     R: parquet::file::reader::ChunkReader + 'static,
 {
-    type Item = Result<ColumnBatch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_batch(&mut self) -> Option<Result<ColumnBatch>> {
         // Check if this is the first call and we have no data
         if self.is_empty_file && !self.returned_empty_batch {
             // Return one batch with empty columns to show schema
@@ -351,6 +410,28 @@ where
             }
             Some(Err(e)) => Some(Err(e.into())),
             None => None,
+        }
+    }
+}
+
+impl<R> Iterator for ColumnIterator<R>
+where
+    R: parquet::file::reader::ChunkReader + 'static,
+{
+    type Item = Result<ColumnBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.panicked {
+            return None;
+        }
+        match catch_read_panic(|| self.next_batch()) {
+            Ok(batch) => batch,
+            Err(error) => {
+                // The panic may have left the batch reader part way through
+                // a page, so it is not asked for anything more.
+                self.panicked = true;
+                Some(Err(error))
+            }
         }
     }
 }

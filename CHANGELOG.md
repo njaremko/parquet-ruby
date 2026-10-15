@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Reading a damaged file that makes parquet-rs or arrow-rs panic, such as one
+  whose column chunk has a negative offset, now raises a `RuntimeError` that
+  carries the panic message, from `Parquet.each_row`, `Parquet.each_column` and
+  `Parquet.metadata`. The panic used to reach Ruby as `fatal`, which no `rescue`
+  catches, so it ended the process, or the thread that read the file. The
+  default panic hook still prints the panic to stderr.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

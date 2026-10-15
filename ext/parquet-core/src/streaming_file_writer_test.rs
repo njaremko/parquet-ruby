@@ -67,6 +67,7 @@ fn error_class(error: ParquetError) -> &'static str {
         ParquetError::DataValidation(_) => "data_validation",
         ParquetError::Unsupported(_) => "unsupported",
         ParquetError::Internal(_) => "internal",
+        ParquetError::ReadPanic(_) => "read_panic",
         ParquetError::Utf8(_) => "utf8",
         ParquetError::ParseInt(_) => "parse_int",
         ParquetError::ParseFloat(_) => "parse_float",
