@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Add an exception hierarchy. The gem now raises its own errors as `Parquet::Error`,
+  a `RuntimeError`, or as a subclass of it that says where the error arose:
+  `Parquet::InvalidFileError` when the input is not Parquet or its footer or pages are
+  damaged, `Parquet::UnsupportedError` for valid Parquet that the gem cannot read,
+  `Parquet::SchemaError` for an invalid schema given to a write, and
+  `Parquet::ConversionError` for a row or column batch that does not fit the schema.
+  Every message is unchanged and `rescue RuntimeError` still catches them all, but code
+  that compares `error.class` with `RuntimeError` sees the new class. `ArgumentError`,
+  `TypeError`, `IOError` and `EncodingError` are raised as before.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

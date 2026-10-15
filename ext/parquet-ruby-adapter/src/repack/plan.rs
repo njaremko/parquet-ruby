@@ -16,6 +16,7 @@ use parquet::schema::types::{ColumnDescPtr, ColumnDescriptor, ColumnPath, TypePt
 use parquet_core::max_batch_size_for_column_count;
 
 use crate::error::{Result, RubyAdapterError};
+use crate::error_class::ErrorClass;
 use crate::types::ParquetRepackArgs;
 
 use super::io_error;
@@ -321,6 +322,7 @@ pub fn load_metadata(path: &str) -> Result<ArrowReaderMetadata> {
         RubyAdapterError::runtime(format!(
             "failed to read Parquet metadata from {path:?}: {source}"
         ))
+        .raised_as(ErrorClass::reading_parquet(&source))
     })
 }
 

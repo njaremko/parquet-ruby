@@ -5,6 +5,7 @@ use magnus::{function, method, Error, Ruby};
 
 use crate::adapter_ffi::{each_column, each_row, repack, write_columns, write_rows};
 use parquet_ruby_adapter::metadata::parse_metadata;
+use parquet_ruby_adapter::ErrorClass;
 
 /// Initializes the Ruby extension and defines methods.
 #[magnus::init]
@@ -13,6 +14,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     ruby.require("bigdecimal")?;
 
     let module = ruby.define_module("Parquet")?;
+    ErrorClass::define_all(ruby, module)?;
 
     module.define_module_function("metadata", function!(parse_metadata, 1))?;
     module.define_module_function("each_row", method!(each_row, -1))?;

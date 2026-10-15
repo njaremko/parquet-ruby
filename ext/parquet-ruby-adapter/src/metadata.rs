@@ -4,6 +4,7 @@ use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use std::fs::File;
 
 use crate::error::{IntoMagnusError, Result, RubyAdapterError};
+use crate::error_class::ErrorClass;
 use crate::io::{RubyIOReader, ThreadSafeRubyIOReader};
 use crate::TryIntoValue;
 
@@ -490,6 +491,13 @@ impl IntoValue for RubyParquetMetaData {
     }
 }
 
+/// The error for a footer that could not be read, raised as the class for
+/// where it arose
+fn footer_error(error: parquet_core::ParquetError) -> RubyAdapterError {
+    let class = ErrorClass::reading(&error);
+    RubyAdapterError::Parquet(error).raised_as(class)
+}
+
 /// Parse metadata from a file path or Ruby IO object
 pub fn parse_metadata(arg: Value) -> std::result::Result<Value, MagnusError> {
     parse_metadata_impl(arg).into_magnus_error()
@@ -512,17 +520,17 @@ fn parse_metadata_impl(arg: Value) -> Result<Value> {
         let file = File::open(path).map_err(RubyAdapterError::Io)?;
         reader
             .try_parse(&file)
-            .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
+            .map_err(|e| footer_error(parquet_core::ParquetError::Parquet(e)))?;
     } else {
         let file = RubyIOReader::new(arg).map_err(RubyAdapterError::Io)?;
         reader
             .try_parse(&ThreadSafeRubyIOReader::new(file))
-            .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
+            .map_err(|e| footer_error(parquet_core::ParquetError::Parquet(e)))?;
     }
 
     let metadata = reader
         .finish()
-        .map_err(|e| RubyAdapterError::Parquet(parquet_core::ParquetError::Parquet(e)))?;
+        .map_err(|e| footer_error(parquet_core::ParquetError::Parquet(e)))?;
 
     // Use TryIntoValue instead of IntoValue
     RubyParquetMetaData(metadata).try_into_value(&ruby)

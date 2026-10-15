@@ -1,6 +1,30 @@
 # typed: true
 
 module Parquet
+  # The class of the errors that the gem raises for its own failures. It is a RuntimeError,
+  # so `rescue RuntimeError` also catches it, and its subclasses say where an error arose.
+  # Errors that Ruby has a class for are raised as ArgumentError, TypeError, IOError or
+  # EncodingError instead.
+  class Error < RuntimeError
+  end
+
+  # The input is not a Parquet file, or its footer or pages are damaged.
+  class InvalidFileError < Error
+  end
+
+  # The input is valid Parquet that the gem cannot read, such as a column of a type that it
+  # cannot convert to Ruby.
+  class UnsupportedError < Error
+  end
+
+  # The schema given to `write_rows` or `write_columns` is invalid.
+  class SchemaError < Error
+  end
+
+  # A row or column batch given to `write_rows` or `write_columns` does not fit the schema.
+  class ConversionError < Error
+  end
+
   # Returns metadata information about a Parquet file
   #
   # The returned hash contains information about:
@@ -8,10 +32,15 @@ module Parquet
   # - Schema information (fields, types, etc.)
   # - Row group details
   # - Column chunk information (compression, encodings, statistics)
+  #
+  # Raises Parquet::InvalidFileError when the file is not Parquet or its footer is damaged.
   sig { params(path: String).returns(T::Hash[String, T.untyped]) }
   def self.metadata(path)
   end
 
+  # Raises Parquet::InvalidFileError when the input is not a Parquet file or is damaged, and
+  # Parquet::UnsupportedError when it is valid Parquet that the gem cannot read.
+  #
   # Options:
   #   - `input`: String, File, or IO object containing parquet data
   #   - `result_type`: String specifying the output format
@@ -56,6 +85,9 @@ module Parquet
   def self.each_row(input, result_type: nil, columns: nil, strict: nil, string_storage: nil, &blk)
   end
 
+  # Raises Parquet::InvalidFileError when the input is not a Parquet file or is damaged, and
+  # Parquet::UnsupportedError when it is valid Parquet that the gem cannot read.
+  #
   # Options:
   #   - `input`: String, File, or IO object containing parquet data
   #   - `result_type`: String specifying the output format
@@ -89,6 +121,9 @@ module Parquet
   def self.each_column(input, result_type: nil, columns: nil, batch_size: nil, strict: nil, string_storage: nil, &blk)
   end
 
+  # Raises Parquet::SchemaError when the schema is invalid, and Parquet::ConversionError when
+  # a row does not fit it.
+  #
   # Options:
   #   - `read_from`: An Enumerable yielding arrays of values representing each row. The outer
   #                  enumerable is pulled incrementally and is never materialized with `to_a`.
@@ -140,6 +175,9 @@ module Parquet
   )
   end
 
+  # Raises Parquet::SchemaError when the schema is invalid, and Parquet::ConversionError when
+  # a column batch does not fit it.
+  #
   # Options:
   #   - `read_from`: An Enumerable yielding arrays of column batches. Batches are validated and
   #                  consumed one at a time; all columns in each batch must have equal length.
@@ -209,8 +247,9 @@ module Parquet
   #     `output_dir` raises ArgumentError. When true, that set is replaced and any files left
   #     over from a longer earlier run are removed. Files outside the set are never touched.
   #
-  # Raises ArgumentError for an invalid request or mismatched input schemas, and
-  # IOError when an input or output cannot be read or written.
+  # Raises ArgumentError for an invalid request or mismatched input schemas,
+  # IOError when an input or output cannot be read or written, and
+  # Parquet::InvalidFileError when an input is not a Parquet file or is damaged.
   sig do
     params(
       read_from: T.any(String, T::Array[String]),

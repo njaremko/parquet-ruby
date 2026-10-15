@@ -64,6 +64,7 @@ use parquet::arrow::arrow_reader::{
 };
 
 use crate::error::{Result, RubyAdapterError};
+use crate::error_class::ErrorClass;
 use crate::types::ParquetRepackArgs;
 use crate::utils::parse_parquet_repack_args;
 
@@ -143,10 +144,8 @@ fn repack_without_gvl(
     {
         Ok(Ok(files)) => Ok(files),
         Ok(Err(error)) => Err(error.into()),
-        Err(payload) => Err(MagnusError::new(
-            Ruby::get()
-                .expect("the GVL is held again once rb_thread_call_without_gvl returns")
-                .exception_runtime_error(),
+        Err(payload) => Err(ErrorClass::Error.error(
+            &Ruby::get().expect("the GVL is held again once rb_thread_call_without_gvl returns"),
             panic_message(payload),
         )),
     }
@@ -244,6 +243,7 @@ fn repack_files(args: &ParquetRepackArgs, cancelled: &AtomicBool) -> Result<Vec<
                         "failed reading {:?} row group {row_group_index}: {source}",
                         input.path
                     ))
+                    .raised_as(ErrorClass::reading_arrow(&source))
                 })?;
                 sink.write_batch(&batch)?;
                 check_cancelled(cancelled)?;
@@ -338,6 +338,7 @@ fn row_group_reader(
             RubyAdapterError::runtime(format!(
                 "failed to read row group {row_group_index}: {source}"
             ))
+            .raised_as(ErrorClass::reading_parquet(&source))
         })
 }
 

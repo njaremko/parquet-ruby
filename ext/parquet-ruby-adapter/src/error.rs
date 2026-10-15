@@ -3,6 +3,8 @@ use parquet_core::ParquetError as CoreParquetError;
 use std::fmt::Display;
 use thiserror::Error;
 
+use crate::error_class::ErrorClass;
+
 /// Error type for parquet-ruby-adapter
 #[derive(Error, Debug)]
 pub enum RubyAdapterError {
@@ -37,6 +39,14 @@ pub enum RubyAdapterError {
     /// Runtime errors
     #[error("Runtime error: {0}")]
     Runtime(String),
+
+    /// An error raised as a particular `Parquet::Error` class, with the
+    /// message of the error it wraps
+    #[error("{error}")]
+    Raised {
+        class: ErrorClass,
+        error: Box<RubyAdapterError>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, RubyAdapterError>;
@@ -71,6 +81,14 @@ impl RubyAdapterError {
     pub fn runtime<S: Into<String>>(msg: S) -> Self {
         RubyAdapterError::Runtime(msg.into())
     }
+
+    /// Raise this error as `class`, keeping its message
+    pub fn raised_as(self, class: ErrorClass) -> Self {
+        RubyAdapterError::Raised {
+            class,
+            error: Box::new(self),
+        }
+    }
 }
 
 /// Convert RubyAdapterError to MagnusError
@@ -87,7 +105,8 @@ impl From<RubyAdapterError> for MagnusError {
             RubyAdapterError::Io(_) => ruby.exception_io_error(),
             RubyAdapterError::TypeConversion(_) => ruby.exception_type_error(),
             RubyAdapterError::InvalidInput(_) => ruby.exception_arg_error(),
-            _ => ruby.exception_runtime_error(),
+            RubyAdapterError::Raised { class, .. } => class.exception_class(&ruby),
+            _ => ErrorClass::Error.exception_class(&ruby),
         };
         MagnusError::new(class, err.to_string())
     }

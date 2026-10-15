@@ -40,6 +40,9 @@
 pub mod error;
 pub use error::{ErrorContext, IntoMagnusError, Result, RubyAdapterError};
 
+pub mod error_class;
+pub use error_class::ErrorClass;
+
 pub mod chunk_reader;
 pub use chunk_reader::CloneableChunkReader;
 

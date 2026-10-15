@@ -455,6 +455,31 @@ data = [[
 Parquet.write_rows(data.each, schema: schema, write_to: "complex.parquet")
 ```
 
+## Errors
+
+The gem raises its own errors as `Parquet::Error` or one of its subclasses, which say where
+the error arose:
+
+| Class | Raised when |
+| --- | --- |
+| `Parquet::InvalidFileError` | the input is not a Parquet file, or its footer or pages are damaged |
+| `Parquet::UnsupportedError` | the input is valid Parquet that the gem cannot read, such as a column of a type it cannot convert to Ruby |
+| `Parquet::SchemaError` | the schema given to `write_rows` or `write_columns` is invalid |
+| `Parquet::ConversionError` | a row or column batch given to `write_rows` or `write_columns` does not fit the schema |
+| `Parquet::Error` | any other failure, such as an input path that cannot be opened by `each_row` |
+
+`Parquet::Error` is a `RuntimeError`, so `rescue RuntimeError` catches all of them. Errors that
+Ruby has a class for are raised as `ArgumentError`, `TypeError`, `IOError` or `EncodingError`
+instead, and an exception raised by your own block or enumerator reaches you unchanged.
+
+```ruby
+begin
+  Parquet.each_row(path) { |row| process(row) }
+rescue Parquet::InvalidFileError => e
+  quarantine(path, e.message) # the file itself is damaged
+end
+```
+
 ## ⚠️ Important Limitations
 
 ### Timezone Handling in Parquet

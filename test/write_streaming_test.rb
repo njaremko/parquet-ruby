@@ -257,7 +257,7 @@ class WriteStreamingTest < Minitest::Test
 
     assert_equal(
       [
-        RuntimeError,
+        Parquet::Error,
         "Failed to create staging file: refusing to atomically replace #{destination}: destination has 2 hard links",
         0,
         true,
@@ -290,7 +290,7 @@ class WriteStreamingTest < Minitest::Test
 
     assert_equal(
       [
-        RuntimeError,
+        Parquet::Error,
         "Failed to create staging file: destination is not writable: #{destination}",
         0,
         0o444,
@@ -346,7 +346,7 @@ class WriteStreamingTest < Minitest::Test
 
     assert_equal(
       [
-        RuntimeError,
+        Parquet::Error,
         "Failed to publish staging file to #{destination}: destination changed while writing: #{destination}",
         "concurrent creation"
       ],

@@ -4,6 +4,7 @@ use parquet_core::reader::Reader;
 
 use crate::{
     converter::parquet_to_ruby,
+    error_class::{read_error, ErrorClass},
     io::{RubyIOReader, ThreadSafeRubyIOReader},
     logger::RubyLogger,
     string_storage::{StringStorage, StringStorageConfig},
@@ -49,20 +50,18 @@ pub fn each_row(
     let chunk_reader = if to_read.is_kind_of(ruby.class_string()) {
         let path_str: String = TryConvert::try_convert(to_read)?;
         let _ = logger.debug(|| format!("Reading from file: {}", path_str));
-        CloneableChunkReader::from_path(&path_str)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+        CloneableChunkReader::from_path(&path_str).map_err(|e| read_error(ruby, e))?
     } else if to_read.respond_to("read", false)? {
         // Handle IO objects with streaming
         let _ = logger.debug(|| "Reading from IO object".to_string());
-        let ruby_reader = RubyIOReader::new(to_read)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let ruby_reader =
+            RubyIOReader::new(to_read).map_err(|e| ErrorClass::Error.error(ruby, e.to_string()))?;
         let thread_safe_reader = ThreadSafeRubyIOReader::new(ruby_reader);
 
-        CloneableChunkReader::from_ruby_io(thread_safe_reader)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+        CloneableChunkReader::from_ruby_io(thread_safe_reader).map_err(|e| read_error(ruby, e))?
     } else {
-        return Err(MagnusError::new(
-            ruby.exception_runtime_error(),
+        return Err(ErrorClass::Error.error(
+            ruby,
             format!(
                 "Invalid input type: expected String or IO object with read method, got {}",
                 to_read.class()
@@ -76,7 +75,7 @@ pub fn each_row(
     // Get metadata to extract column names
     let metadata = reader_for_metadata
         .metadata()
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        .map_err(|e| read_error(ruby, e))?;
     let schema = metadata.schema();
     let all_column_names: Vec<String> = schema
         .get_fields()
@@ -98,12 +97,10 @@ pub fn each_row(
             .collect::<Vec<_>>();
         let iter = reader
             .read_rows_with_projection(cols)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            .map_err(|e| read_error(ruby, e))?;
         (iter, projected_names)
     } else {
-        let iter = reader
-            .read_rows()
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let iter = reader.read_rows().map_err(|e| read_error(ruby, e))?;
         (iter, all_column_names)
     };
 
@@ -119,17 +116,15 @@ pub fn each_row(
         .collect::<Vec<_>>();
 
     for row_result in row_iter {
-        let row = row_result
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let row = row_result.map_err(|e| read_error(ruby, e))?;
 
         // Convert row to Ruby value based on result_type
         let ruby_row = match result_type {
             ParserResultType::Array => {
                 let array: RArray = ruby.ary_new_capa(row.len());
                 for value in row {
-                    let ruby_value = parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                        MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                    })?;
+                    let ruby_value = parquet_to_ruby(value, &mut string_storage)
+                        .map_err(|e| read_error(ruby, e))?;
                     array.push(ruby_value)?;
                 }
                 array.as_value()
@@ -138,10 +133,8 @@ pub fn each_row(
                 let hash: RHash = ruby.hash_new_capa(row.len());
                 for (idx, value) in row.into_iter().enumerate() {
                     if idx < interned_column_names.len() {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                            })?;
+                        let ruby_value = parquet_to_ruby(value, &mut string_storage)
+                            .map_err(|e| read_error(ruby, e))?;
                         hash.aset(interned_column_names[idx].as_value(), ruby_value)?;
                     }
                 }
@@ -231,22 +224,20 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         let _ = args
             .logger
             .debug(|| format!("Reading columns from file: {}", path_str));
-        CloneableChunkReader::from_path(&path_str)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+        CloneableChunkReader::from_path(&path_str).map_err(|e| read_error(ruby, e))?
     } else if args.to_read.respond_to("read", false)? {
         // Handle IO objects with streaming
         let _ = args
             .logger
             .debug(|| "Reading columns from IO object".to_string());
         let ruby_reader = RubyIOReader::new(args.to_read)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            .map_err(|e| ErrorClass::Error.error(ruby, e.to_string()))?;
         let thread_safe_reader = ThreadSafeRubyIOReader::new(ruby_reader);
 
-        CloneableChunkReader::from_ruby_io(thread_safe_reader)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?
+        CloneableChunkReader::from_ruby_io(thread_safe_reader).map_err(|e| read_error(ruby, e))?
     } else {
-        return Err(MagnusError::new(
-            ruby.exception_runtime_error(),
+        return Err(ErrorClass::Error.error(
+            ruby,
             format!(
                 "Invalid input type: expected String or IO object with read method, got {}",
                 args.to_read.class()
@@ -260,7 +251,7 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
     // Get metadata to extract column names
     let metadata = reader_for_metadata
         .metadata()
-        .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        .map_err(|e| read_error(ruby, e))?;
     let schema = metadata.schema();
     let all_column_names: Vec<String> = schema
         .get_fields()
@@ -272,12 +263,12 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
     let (col_iter, _column_names) = if let Some(ref cols) = args.columns {
         let iter = reader
             .read_columns_with_projection(cols, args.batch_size)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            .map_err(|e| read_error(ruby, e))?;
         (iter, cols.clone())
     } else {
         let iter = reader
             .read_columns(args.batch_size)
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+            .map_err(|e| read_error(ruby, e))?;
         (iter, all_column_names)
     };
 
@@ -285,8 +276,7 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
     let mut string_storage = StringStorage::new(args.string_storage);
 
     for batch_result in col_iter {
-        let batch = batch_result
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        let batch = batch_result.map_err(|e| read_error(ruby, e))?;
 
         // Convert batch to Ruby value based on result_type
         let ruby_batch = match args.result_type {
@@ -295,10 +285,8 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 for (_name, values) in batch.columns {
                     let col_array: RArray = ruby.ary_new_capa(values.len());
                     for value in values {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                            })?;
+                        let ruby_value = parquet_to_ruby(value, &mut string_storage)
+                            .map_err(|e| read_error(ruby, e))?;
                         col_array.push(ruby_value)?;
                     }
                     array.push(col_array)?;
@@ -310,10 +298,8 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 for (name, values) in batch.columns {
                     let col_array: RArray = ruby.ary_new_capa(values.len());
                     for value in values {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                            })?;
+                        let ruby_value = parquet_to_ruby(value, &mut string_storage)
+                            .map_err(|e| read_error(ruby, e))?;
                         col_array.push(ruby_value)?;
                     }
                     let ruby_key = string_storage.ruby_key(ruby, &name);
