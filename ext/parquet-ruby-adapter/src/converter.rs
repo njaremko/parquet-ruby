@@ -14,6 +14,9 @@ use std::cell::RefCell;
 use triomphe::Arc;
 use uuid::Uuid;
 
+/// The Julian day number of 1970-01-01, the day that a date32 counts from.
+const UNIX_EPOCH_JULIAN_DAY: i64 = 2_440_588;
+
 /// Ruby value converter
 ///
 /// Note: This converter is not thread-safe due to Ruby's GIL requirements.
@@ -492,7 +495,9 @@ impl RubyValueConverter {
             let secs: i64 = value
                 .funcall("to_i", ())
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
-            let days = (secs / 86400) as i32;
+            // Rounds down, so that a time before 1970 is written as its own day in UTC, rather than the day
+            // after it, which dividing toward zero gave.
+            let days = secs.div_euclid(86400) as i32;
             return Ok(ParquetValue::Date32(days));
         }
 
@@ -521,14 +526,13 @@ impl RubyValueConverter {
                     .map_err(|e| ParquetError::Conversion(format!("Failed to parse date: {}", e)))?
             };
 
-            // Convert to Time object then to days since epoch
-            let time = date
-                .funcall::<_, _, Value>("to_time", ())
+            // Days since the epoch from the Julian day number of the date, so that the date does not depend on the
+            // time zone of the process. Converting it to a Time gave its midnight in that zone, which wrote the day
+            // before east of UTC, and for a date before 1970 the day after west of UTC.
+            let julian_day: i64 = date
+                .funcall("jd", ())
                 .map_err(|e| ParquetError::Conversion(e.to_string()))?;
-            let secs: i64 = time
-                .funcall("to_i", ())
-                .map_err(|e| ParquetError::Conversion(e.to_string()))?;
-            let days = (secs / 86400) as i32;
+            let days = (julian_day - UNIX_EPOCH_JULIAN_DAY) as i32;
             return Ok(ParquetValue::Date32(days));
         }
 
