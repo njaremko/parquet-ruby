@@ -17,11 +17,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         unsafe { rb_sys::rb_ext_ractor_safe(true) };
     }
 
-    // The conversions use these without requiring them, since a require from
-    // any Ractor but the main one is handed over to the main Ractor.
-    ruby.require("date")?;
-    ruby.require("time")?;
-    ruby.require("bigdecimal")?;
+    parquet_ruby_adapter::converter::require_libraries(ruby)?;
 
     let module = ruby.define_module("Parquet")?;
 

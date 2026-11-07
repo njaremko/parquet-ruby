@@ -107,59 +107,50 @@ pub fn each_row(
         (iter, all_column_names)
     };
 
-    let mut row_count = 0u64;
-    let mut string_storage = StringStorage::new(string_storage);
+    let row_count = StringStorage::with(string_storage, |storage| {
+        storage.set_column_keys(ruby, &column_names)?;
+        let mut row_count = 0u64;
 
-    // The interned keys live in a Ruby Array held on this stack frame. The GC
-    // finds the Array through the stack and updates its elements on GC.compact,
-    // without the process-wide registration that parallel Ractors would race on.
-    let interned_column_names = ruby.ary_new_capa(column_names.len());
-    for name in &column_names {
-        interned_column_names.push(ruby.str_new(name).to_interned_str())?;
-    }
-    let key_count = column_names.len();
+        for row_result in row_iter {
+            let row = row_result
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
-    for row_result in row_iter {
-        let row = row_result
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
-
-        // Convert row to Ruby value based on result_type
-        let ruby_row = match result_type {
-            ParserResultType::Array => {
-                let array: RArray = ruby.ary_new_capa(row.len());
-                for value in row {
-                    let ruby_value = parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                        MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                    })?;
-                    array.push(ruby_value)?;
+            // Convert row to Ruby value based on result_type
+            let ruby_row = match result_type {
+                ParserResultType::Array => {
+                    let array: RArray = ruby.ary_new_capa(row.len());
+                    for value in row {
+                        let ruby_value = parquet_to_ruby(value, storage).map_err(|e| {
+                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                        })?;
+                        array.push(ruby_value)?;
+                    }
+                    array.as_value()
                 }
-                array.as_value()
-            }
-            ParserResultType::Hash => {
-                let hash: RHash = ruby.hash_new_capa(row.len());
-                for (idx, value) in row.into_iter().enumerate() {
-                    if idx < key_count {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
-                                MagnusError::new(ruby.exception_runtime_error(), e.to_string())
-                            })?;
-                        let key: Value = interned_column_names.entry(idx as isize)?;
+                ParserResultType::Hash => {
+                    let hash: RHash = ruby.hash_new_capa(row.len());
+                    for (position, value) in row.into_iter().enumerate() {
+                        let Some(key) = storage.column_key(position) else {
+                            continue;
+                        };
+                        let ruby_value = parquet_to_ruby(value, storage).map_err(|e| {
+                            MagnusError::new(ruby.exception_runtime_error(), e.to_string())
+                        })?;
                         hash.aset(key, ruby_value)?;
                     }
+                    hash.as_value()
                 }
-                hash.as_value()
+            };
+
+            let _: Value = ruby.yield_value(ruby_row)?;
+
+            row_count += 1;
+            if row_count % 1000 == 0 {
+                let _ = logger.debug(|| format!("Processed {} rows", row_count));
             }
-        };
-
-        let _: Value = ruby.yield_value(ruby_row)?;
-
-        row_count += 1;
-        if row_count % 1000 == 0 {
-            let _ = logger.debug(|| format!("Processed {} rows", row_count));
         }
-    }
-    // Keep the key Array on the stack until the last row has been yielded.
-    std::hint::black_box(interned_column_names);
+        Ok::<_, MagnusError>(row_count)
+    })?;
 
     let _ = logger.info(|| format!("Finished processing {} rows", row_count));
 
@@ -285,55 +276,55 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         (iter, all_column_names)
     };
 
-    let mut batch_count = 0u64;
-    let mut string_storage = StringStorage::new(args.string_storage);
+    let batch_count = StringStorage::with(args.string_storage, |storage| {
+        let mut batch_count = 0u64;
 
-    for batch_result in col_iter {
-        let batch = batch_result
-            .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
+        for batch_result in col_iter {
+            let batch = batch_result
+                .map_err(|e| MagnusError::new(ruby.exception_runtime_error(), e.to_string()))?;
 
-        // Convert batch to Ruby value based on result_type
-        let ruby_batch = match args.result_type {
-            ParserResultType::Array => {
-                let array: RArray = ruby.ary_new_capa(batch.columns.len());
-                for (_name, values) in batch.columns {
-                    let col_array: RArray = ruby.ary_new_capa(values.len());
-                    for value in values {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
+            // Convert batch to Ruby value based on result_type
+            let ruby_batch = match args.result_type {
+                ParserResultType::Array => {
+                    let array: RArray = ruby.ary_new_capa(batch.columns.len());
+                    for (_name, values) in batch.columns {
+                        let col_array: RArray = ruby.ary_new_capa(values.len());
+                        for value in values {
+                            let ruby_value = parquet_to_ruby(value, storage).map_err(|e| {
                                 MagnusError::new(ruby.exception_runtime_error(), e.to_string())
                             })?;
-                        col_array.push(ruby_value)?;
+                            col_array.push(ruby_value)?;
+                        }
+                        array.push(col_array)?;
                     }
-                    array.push(col_array)?;
+                    array.as_value()
                 }
-                array.as_value()
-            }
-            ParserResultType::Hash => {
-                let hash: RHash = ruby.hash_new();
-                for (name, values) in batch.columns {
-                    let col_array: RArray = ruby.ary_new_capa(values.len());
-                    for value in values {
-                        let ruby_value =
-                            parquet_to_ruby(value, &mut string_storage).map_err(|e| {
+                ParserResultType::Hash => {
+                    let hash: RHash = ruby.hash_new();
+                    for (name, values) in batch.columns {
+                        let col_array: RArray = ruby.ary_new_capa(values.len());
+                        for value in values {
+                            let ruby_value = parquet_to_ruby(value, storage).map_err(|e| {
                                 MagnusError::new(ruby.exception_runtime_error(), e.to_string())
                             })?;
-                        col_array.push(ruby_value)?;
+                            col_array.push(ruby_value)?;
+                        }
+                        let ruby_key = storage.ruby_key(ruby, &name);
+                        hash.aset(ruby_key, col_array)?;
                     }
-                    let ruby_key = string_storage.ruby_key(ruby, &name);
-                    hash.aset(ruby_key, col_array)?;
+                    hash.as_value()
                 }
-                hash.as_value()
-            }
-        };
+            };
 
-        let _: Value = ruby.yield_value(ruby_batch)?;
+            let _: Value = ruby.yield_value(ruby_batch)?;
 
-        batch_count += 1;
-        let _ = args
-            .logger
-            .debug(|| format!("Processed batch {}", batch_count));
-    }
+            batch_count += 1;
+            let _ = args
+                .logger
+                .debug(|| format!("Processed batch {}", batch_count));
+        }
+        Ok::<_, MagnusError>(batch_count)
+    })?;
 
     let _ = args
         .logger

@@ -1368,6 +1368,17 @@ impl RubyValueConverter {
     }
 }
 
+/// Load the Ruby libraries the conversions use: `Date`, `Time.parse` and
+/// `BigDecimal`. Call it once when the extension loads. The conversions never
+/// require anything themselves, since a require from any Ractor but the main
+/// one is handed over to the main Ractor.
+pub fn require_libraries(ruby: &Ruby) -> std::result::Result<(), MagnusError> {
+    for library in ["date", "time", "bigdecimal"] {
+        ruby.require(library)?;
+    }
+    Ok(())
+}
+
 // Helper functions for one-off conversions where we don't need string caching
 
 pub fn ruby_to_parquet(value: Value) -> Result<ParquetValue> {
