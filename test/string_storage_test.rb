@@ -229,6 +229,40 @@ class StringStorageTest < Minitest::Test
     tempfile&.close!
   end
 
+  # A read keeps the strings it caches in Arrays that Ruby code cannot reach.
+  # A block that clears every Array holding a key or value it was given must
+  # not change the rows that follow.
+  def test_cached_strings_are_out_of_reach_of_the_block
+    tempfile = Tempfile.new(["string_storage_hidden", ".parquet"])
+    schema = [{ "hidden_cache_key_a" => "string" }, { "hidden_cache_key_b" => "string" }]
+    Parquet.write_rows(
+      Array.new(3) { %w[hidden_cache_value_a hidden_cache_value_b] },
+      schema: schema,
+      write_to: tempfile.path
+    )
+    expected = Array.new(3) do
+      { "hidden_cache_key_a" => "hidden_cache_value_a", "hidden_cache_key_b" => "hidden_cache_value_b" }
+    end
+
+    %i[copy intern].each do |mode|
+      rows = []
+      Parquet.each_row(tempfile.path, string_storage: mode) do |row|
+        rows << row
+        next unless rows.size == 1
+
+        cached = row.keys + row.values
+        ObjectSpace.each_object(Array) do |array|
+          next if array.frozen? || array.equal?(cached)
+
+          array.clear if array.any? { |element| cached.any? { |string| string.equal?(element) } }
+        end
+      end
+      assert_equal expected, rows, "string_storage: #{mode}"
+    end
+  ensure
+    tempfile&.close!
+  end
+
   def test_each_column_honors_string_storage
     batches = []
     Parquet.each_column(@path, string_storage: :intern, batch_size: 10) { |batch| batches << batch }

@@ -322,36 +322,37 @@ fn leak_nul_terminated(s: &str) -> &'static str {
 pub struct StringStorage {
     values: ValueStrategy,
     keys: InternCache,
-    column_keys: Option<HiddenArray>,
+    column_keys: HiddenArray,
 }
 
 impl StringStorage {
     /// Run `read` with a new `StringStorage` configured by `config`, which
     /// lives on this function's stack frame until `read` returns.
-    pub fn with<T>(config: StringStorageConfig, read: impl FnOnce(&mut StringStorage) -> T) -> T {
+    /// `column_names`, in order, become the keys of row hashes, which
+    /// [`column_key`](Self::column_key) returns by position.
+    pub fn with<T>(
+        ruby: &Ruby,
+        config: StringStorageConfig,
+        column_names: &[String],
+        read: impl FnOnce(&mut StringStorage) -> Result<T, magnus::Error>,
+    ) -> Result<T, magnus::Error> {
         let mut storage = Self {
             values: ValueStrategy::new(config),
             keys: InternCache::new(KEY_CACHE_ENTRY_COUNT_MAX),
-            column_keys: None,
+            column_keys: HiddenArray::new(ruby, column_names.len()),
         };
+        for name in column_names {
+            storage
+                .column_keys
+                .push(ruby.str_new(name).to_interned_str())?;
+        }
         read(&mut storage)
     }
 
-    /// Intern `names`, in order, as the keys of row hashes, so that
-    /// [`column_key`](Self::column_key) returns each one by position.
-    pub fn set_column_keys(&mut self, ruby: &Ruby, names: &[String]) -> Result<(), magnus::Error> {
-        let keys = HiddenArray::new(ruby, names.len());
-        for name in names {
-            keys.push(ruby.str_new(name).to_interned_str())?;
-        }
-        self.column_keys = Some(keys);
-        Ok(())
-    }
-
     /// The row hash key of the column at `position`, or `None` past the last
-    /// key given to [`set_column_keys`](Self::set_column_keys).
+    /// column name given to [`with`](Self::with).
     pub fn column_key(&self, position: usize) -> Option<Value> {
-        self.column_keys.as_ref()?.get(position)
+        self.column_keys.get(position)
     }
 
     /// Materialize a string *value* per the configured mode. The result is

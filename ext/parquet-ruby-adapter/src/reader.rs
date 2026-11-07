@@ -107,8 +107,7 @@ pub fn each_row(
         (iter, all_column_names)
     };
 
-    let row_count = StringStorage::with(string_storage, |storage| {
-        storage.set_column_keys(ruby, &column_names)?;
+    let row_count = StringStorage::with(ruby, string_storage, &column_names, |storage| {
         let mut row_count = 0u64;
 
         for row_result in row_iter {
@@ -149,7 +148,7 @@ pub fn each_row(
                 let _ = logger.debug(|| format!("Processed {} rows", row_count));
             }
         }
-        Ok::<_, MagnusError>(row_count)
+        Ok(row_count)
     })?;
 
     let _ = logger.info(|| format!("Finished processing {} rows", row_count));
@@ -276,7 +275,9 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
         (iter, all_column_names)
     };
 
-    let batch_count = StringStorage::with(args.string_storage, |storage| {
+    // Column batches look up their hash keys by name, through ruby_key, so they
+    // need no keys by position.
+    let batch_count = StringStorage::with(ruby, args.string_storage, &[], |storage| {
         let mut batch_count = 0u64;
 
         for batch_result in col_iter {
@@ -323,7 +324,7 @@ fn each_column_impl(ruby: &Ruby, args: EachColumnArgs) -> Result<Value, MagnusEr
                 .logger
                 .debug(|| format!("Processed batch {}", batch_count));
         }
-        Ok::<_, MagnusError>(batch_count)
+        Ok(batch_count)
     })?;
 
     let _ = args
