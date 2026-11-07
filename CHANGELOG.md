@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- On Ruby 4.0 and later, every `Parquet` method can be called from any Ractor,
+  so reads and writes can run in parallel. Earlier Rubies still limit them to
+  the main Ractor and raise `Ractor::UnsafeError` elsewhere, because they crash
+  when `Enumerator#next`, which the writers use to pull their input, runs in
+  parallel Ractors. `Parquet::VERSION` is now frozen, so any Ractor can read it.
+- Reading a date32 or decimal value no longer calls `require` for each value;
+  `date` and `bigdecimal` are loaded once when the gem loads.
 - Add `Parquet.repack` to concatenate Parquet files and re-split them into
   differently sized files without translating rows through Ruby. Reading and
   writing run with the GVL released.

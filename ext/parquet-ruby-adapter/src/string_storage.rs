@@ -3,8 +3,8 @@ use std::os::raw::{c_char, c_long};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 
-use magnus::value::{BoxValue, ReprValue};
-use magnus::{RString, Ruby, Value};
+use magnus::value::ReprValue;
+use magnus::{RArray, Ruby, Value};
 
 /// Default cap on how many distinct strings the [`StringStorageMode::Shared`]
 /// strategy will leak before returning frozen owned copies (overridable via the
@@ -311,6 +311,10 @@ fn leak_nul_terminated(s: &str) -> &'static str {
 /// names). One `StringStorage` is created per `each_row`/`each_column`
 /// invocation; its local caches are not shared across calls. In `Shared` mode,
 /// value bytes are coordinated through the process-wide leak registry above.
+///
+/// A `StringStorage` must be a local variable of the read, never boxed or
+/// otherwise moved to the heap: its caches hold Ruby objects that the GC finds
+/// only by scanning the stack.
 #[derive(Debug)]
 pub struct StringStorage {
     values: ValueStrategy,
@@ -382,12 +386,15 @@ impl ValueStrategy {
 /// allocation. Used both for hash keys (struct field names) and for `:intern`
 /// values.
 ///
-/// Each cached value is held in a [`BoxValue`], which registers the string with
-/// Ruby's GC via `rb_gc_register_address`. That is required for correctness: a
-/// plain `RString` stored in this Rust-heap map is invisible to the GC, and
-/// `GC.compact` would relocate the interned string and leave the cached handle
-/// dangling. `BoxValue` keeps the handle at a stable address that the GC updates
-/// on compaction.
+/// The cached strings are held in a Ruby `Array` that this cache creates, and
+/// the Rust map holds only each string's index in it. A plain `RString` in the
+/// Rust-heap map would be invisible to the GC, and `GC.compact` would move the
+/// string and leave the handle dangling. The GC finds the `Array` through the
+/// stack, because [`StringStorage`] lives on the stack of the read, and updates
+/// its elements on compaction. Registering each string with the GC instead
+/// (`BoxValue`, `rb_gc_register_address`) is not an option: those calls edit
+/// one process-wide list without a lock, so reads in parallel Ractors corrupt
+/// it.
 ///
 /// Bounded: at most `capacity` distinct values are cached. Value callers fall
 /// back to frozen owned copies after that; key callers continue interning after
@@ -395,7 +402,10 @@ impl ValueStrategy {
 /// part of the public read contract.
 #[derive(Debug)]
 struct InternCache {
-    cache: HashMap<Box<str>, BoxValue<RString>>,
+    // Index of each cached string in `values`.
+    cache: HashMap<Box<str>, usize>,
+    // The cached strings, created on first use.
+    values: Option<RArray>,
     capacity: usize,
 }
 
@@ -403,19 +413,22 @@ impl InternCache {
     fn new(capacity: usize) -> Self {
         Self {
             cache: HashMap::new(),
+            values: None,
             capacity,
         }
     }
 
     fn intern_cached(&mut self, ruby: &Ruby, s: &str) -> Option<Value> {
-        if let Some(boxed) = self.cache.get(s) {
-            return Some(boxed.as_value());
+        let values = *self.values.get_or_insert_with(|| ruby.ary_new());
+        if let Some(&idx) = self.cache.get(s) {
+            return values.entry::<Value>(idx as isize).ok();
         }
         if self.cache.len() >= self.capacity {
             return None;
         }
         let interned = ruby.str_new(s).to_interned_str();
-        self.cache.insert(Box::from(s), BoxValue::new(interned));
+        values.push(interned).ok()?;
+        self.cache.insert(Box::from(s), values.len() - 1);
         debug_assert!(self.cache.len() <= self.capacity);
         Some(interned.as_value())
     }

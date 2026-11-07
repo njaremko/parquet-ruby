@@ -1,4 +1,4 @@
-use magnus::value::{BoxValue, ReprValue};
+use magnus::value::ReprValue;
 use magnus::{Error as MagnusError, IntoValue, RArray, RHash, Ruby, TryConvert, Value};
 use parquet_core::reader::Reader;
 
@@ -110,13 +110,14 @@ pub fn each_row(
     let mut row_count = 0u64;
     let mut string_storage = StringStorage::new(string_storage);
 
-    // BoxValue registers each interned key with the GC so it survives a
-    // GC.compact triggered by user code inside the yield loop; a bare RString
-    // held in this Vec would be relocated and dangle.
-    let interned_column_names = column_names
-        .iter()
-        .map(|name| BoxValue::new(ruby.str_new(name).to_interned_str()))
-        .collect::<Vec<_>>();
+    // The interned keys live in a Ruby Array held on this stack frame. The GC
+    // finds the Array through the stack and updates its elements on GC.compact,
+    // without the process-wide registration that parallel Ractors would race on.
+    let interned_column_names = ruby.ary_new_capa(column_names.len());
+    for name in &column_names {
+        interned_column_names.push(ruby.str_new(name).to_interned_str())?;
+    }
+    let key_count = column_names.len();
 
     for row_result in row_iter {
         let row = row_result
@@ -137,12 +138,13 @@ pub fn each_row(
             ParserResultType::Hash => {
                 let hash: RHash = ruby.hash_new_capa(row.len());
                 for (idx, value) in row.into_iter().enumerate() {
-                    if idx < interned_column_names.len() {
+                    if idx < key_count {
                         let ruby_value =
                             parquet_to_ruby(value, &mut string_storage).map_err(|e| {
                                 MagnusError::new(ruby.exception_runtime_error(), e.to_string())
                             })?;
-                        hash.aset(interned_column_names[idx].as_value(), ruby_value)?;
+                        let key: Value = interned_column_names.entry(idx as isize)?;
+                        hash.aset(key, ruby_value)?;
                     }
                 }
                 hash.as_value()
@@ -156,6 +158,8 @@ pub fn each_row(
             let _ = logger.debug(|| format!("Processed {} rows", row_count));
         }
     }
+    // Keep the key Array on the stack until the last row has been yielded.
+    std::hint::black_box(interned_column_names);
 
     let _ = logger.info(|| format!("Finished processing {} rows", row_count));
 
