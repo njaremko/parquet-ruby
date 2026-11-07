@@ -515,6 +515,23 @@ Encoded data and completed row-group metadata are staged on disk, so large
 writes need temporary disk space. Ruby still owns the current row or batch, and
 an in-memory destination such as `StringIO` holds the output in memory.
 
+## Ractors
+
+On Ruby 4.0 and later, every `Parquet` method can be called from any Ractor, so
+files can be read and written in parallel:
+
+```ruby
+ractors = paths.map do |path|
+  Ractor.new(path) { |p| Parquet.each_row(p).count }
+end
+ractors.sum(&:value)
+```
+
+On earlier Rubies the methods run only in the main Ractor and raise
+`Ractor::UnsafeError` in any other, because those Rubies crash when
+`Enumerator#next`, which the writers use to pull their input, runs in parallel
+Ractors.
+
 ## Architecture
 
 This gem uses a modular architecture:

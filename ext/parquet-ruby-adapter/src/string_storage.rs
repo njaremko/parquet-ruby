@@ -3,8 +3,9 @@ use std::os::raw::{c_char, c_long};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 
-use magnus::value::{BoxValue, ReprValue};
-use magnus::{RString, Ruby, Value};
+use magnus::rb_sys::AsRawValue;
+use magnus::value::ReprValue;
+use magnus::{RArray, RString, Ruby, Value};
 
 /// Default cap on how many distinct strings the [`StringStorageMode::Shared`]
 /// strategy will leak before returning frozen owned copies (overridable via the
@@ -308,21 +309,50 @@ fn leak_nul_terminated(s: &str) -> &'static str {
 
 /// Per-read string output: how string *values* are materialized (per the
 /// configured mode) plus a cache that always interns hash *keys* (struct field
-/// names). One `StringStorage` is created per `each_row`/`each_column`
-/// invocation; its local caches are not shared across calls. In `Shared` mode,
-/// value bytes are coordinated through the process-wide leak registry above.
+/// names) and the keys of row hashes (column names, by position). One
+/// `StringStorage` is created per `each_row`/`each_column` invocation; its local
+/// caches are not shared across calls. In `Shared` mode, value bytes are
+/// coordinated through the process-wide leak registry above.
+///
+/// The caches hold Ruby strings in [`HiddenArray`]s, which the GC finds only by
+/// scanning the stack, so a `StringStorage` must never be moved to the heap.
+/// [`StringStorage::with`] is the only way to get one, and it lends it out by
+/// reference from its own stack frame.
 #[derive(Debug)]
 pub struct StringStorage {
     values: ValueStrategy,
     keys: InternCache,
+    column_keys: HiddenArray,
 }
 
 impl StringStorage {
-    pub fn new(config: StringStorageConfig) -> Self {
-        Self {
+    /// Run `read` with a new `StringStorage` configured by `config`, which
+    /// lives on this function's stack frame until `read` returns.
+    /// `column_names`, in order, become the keys of row hashes, which
+    /// [`column_key`](Self::column_key) returns by position.
+    pub fn with<T>(
+        ruby: &Ruby,
+        config: StringStorageConfig,
+        column_names: &[String],
+        read: impl FnOnce(&mut StringStorage) -> Result<T, magnus::Error>,
+    ) -> Result<T, magnus::Error> {
+        let mut storage = Self {
             values: ValueStrategy::new(config),
             keys: InternCache::new(KEY_CACHE_ENTRY_COUNT_MAX),
+            column_keys: HiddenArray::new(ruby, column_names.len()),
+        };
+        for name in column_names {
+            storage
+                .column_keys
+                .push(ruby.str_new(name).to_interned_str())?;
         }
+        read(&mut storage)
+    }
+
+    /// The row hash key of the column at `position`, or `None` past the last
+    /// column name given to [`with`](Self::with).
+    pub fn column_key(&self, position: usize) -> Option<Value> {
+        self.column_keys.get(position)
     }
 
     /// Materialize a string *value* per the configured mode. The result is
@@ -382,12 +412,8 @@ impl ValueStrategy {
 /// allocation. Used both for hash keys (struct field names) and for `:intern`
 /// values.
 ///
-/// Each cached value is held in a [`BoxValue`], which registers the string with
-/// Ruby's GC via `rb_gc_register_address`. That is required for correctness: a
-/// plain `RString` stored in this Rust-heap map is invisible to the GC, and
-/// `GC.compact` would relocate the interned string and leave the cached handle
-/// dangling. `BoxValue` keeps the handle at a stable address that the GC updates
-/// on compaction.
+/// The cached strings are held in a [`HiddenArray`], and the Rust map holds
+/// only each string's position in it.
 ///
 /// Bounded: at most `capacity` distinct values are cached. Value callers fall
 /// back to frozen owned copies after that; key callers continue interning after
@@ -395,7 +421,10 @@ impl ValueStrategy {
 /// part of the public read contract.
 #[derive(Debug)]
 struct InternCache {
-    cache: HashMap<Box<str>, BoxValue<RString>>,
+    // Position of each cached string in `values`.
+    cache: HashMap<Box<str>, usize>,
+    // The cached strings, created on first use.
+    values: Option<HiddenArray>,
     capacity: usize,
 }
 
@@ -403,19 +432,22 @@ impl InternCache {
     fn new(capacity: usize) -> Self {
         Self {
             cache: HashMap::new(),
+            values: None,
             capacity,
         }
     }
 
     fn intern_cached(&mut self, ruby: &Ruby, s: &str) -> Option<Value> {
-        if let Some(boxed) = self.cache.get(s) {
-            return Some(boxed.as_value());
+        let values = self.values.get_or_insert_with(|| HiddenArray::new(ruby, 0));
+        if let Some(&position) = self.cache.get(s) {
+            return values.get(position);
         }
         if self.cache.len() >= self.capacity {
             return None;
         }
         let interned = ruby.str_new(s).to_interned_str();
-        self.cache.insert(Box::from(s), BoxValue::new(interned));
+        let position = values.push(interned).ok()?;
+        self.cache.insert(Box::from(s), position);
         debug_assert!(self.cache.len() <= self.capacity);
         Some(interned.as_value())
     }
@@ -425,6 +457,53 @@ impl InternCache {
             let interned = ruby.str_new(s).to_interned_str();
             interned.as_value()
         })
+    }
+}
+
+/// A Ruby `Array` of the strings that one read caches, hidden from Ruby code.
+///
+/// A Ruby string held only in Rust-heap memory is invisible to the GC: the GC
+/// may free it, and `GC.compact` may move it and leave the handle dangling. The
+/// strings are therefore kept in this `Array`, which the GC finds by scanning
+/// the stack, where [`StringStorage`] keeps it, and whose elements compaction
+/// updates. Registering each string with the GC instead (`BoxValue`,
+/// `rb_gc_register_address`) is not an option: those calls edit one
+/// process-wide list without a lock, so reads in parallel Ractors corrupt it.
+///
+/// Hidden, the `Array` has no class, so `ObjectSpace` cannot find it and the
+/// block given to a read cannot change the cached strings.
+struct HiddenArray(RArray);
+
+impl HiddenArray {
+    fn new(ruby: &Ruby, capacity: usize) -> Self {
+        let array = ruby.ary_new_capa(capacity);
+        // SAFETY: `array` is a new Array that nothing else refers to yet.
+        unsafe { rb_sys::rb_obj_hide(array.as_raw()) };
+        Self(array)
+    }
+
+    /// Append `string` and return its position.
+    fn push(&self, string: RString) -> Result<usize, magnus::Error> {
+        self.0.push(string)?;
+        Ok(self.0.len() - 1)
+    }
+
+    /// The string at `position`, or `None` past the end.
+    fn get(&self, position: usize) -> Option<Value> {
+        if position < self.0.len() {
+            self.0.entry(position as isize).ok()
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Debug for HiddenArray {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Not through `inspect`: a hidden object has no class to answer it.
+        f.debug_struct("HiddenArray")
+            .field("len", &self.0.len())
+            .finish()
     }
 }
 

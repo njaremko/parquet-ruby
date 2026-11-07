@@ -9,8 +9,15 @@ use parquet_ruby_adapter::metadata::parse_metadata;
 /// Initializes the Ruby extension and defines methods.
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
-    ruby.require("time")?;
-    ruby.require("bigdecimal")?;
+    // On Ruby 4.0 and later, the methods defined below may be called from any
+    // Ractor. Earlier Rubies keep the default, which limits them to the main
+    // Ractor: they crash when Enumerator#next, which the writers use to pull
+    // their input, runs in parallel Ractors.
+    if cfg!(ruby_gte_4) {
+        unsafe { rb_sys::rb_ext_ractor_safe(true) };
+    }
+
+    parquet_ruby_adapter::converter::require_libraries(ruby)?;
 
     let module = ruby.define_module("Parquet")?;
 

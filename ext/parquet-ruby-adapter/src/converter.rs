@@ -499,7 +499,6 @@ impl RubyValueConverter {
         // Handle strings
         if value.is_kind_of(ruby.class_string()) {
             // Use Ruby's Date module
-            let _ = ruby.require("date");
             let kernel = ruby.module_kernel();
             let date_module = kernel
                 .const_get::<_, Value>("Date")
@@ -557,7 +556,6 @@ impl RubyValueConverter {
         // Handle strings
         if value.is_kind_of(ruby.class_string()) {
             // Use Ruby's Date module
-            let _ = ruby.require("date");
             let kernel = ruby.module_kernel();
             let date_module = kernel
                 .const_get::<_, Value>("Date")
@@ -1370,6 +1368,17 @@ impl RubyValueConverter {
     }
 }
 
+/// Load the Ruby libraries the conversions use: `Date`, `Time.parse` and
+/// `BigDecimal`. Call it once when the extension loads. The conversions never
+/// require anything themselves, since a require from any Ractor but the main
+/// one is handed over to the main Ractor.
+pub fn require_libraries(ruby: &Ruby) -> std::result::Result<(), MagnusError> {
+    for library in ["date", "time", "bigdecimal"] {
+        ruby.require(library)?;
+    }
+    Ok(())
+}
+
 // Helper functions for one-off conversions where we don't need string caching
 
 pub fn ruby_to_parquet(value: Value) -> Result<ParquetValue> {
@@ -1441,7 +1450,6 @@ pub fn parquet_to_ruby(value: ParquetValue, string_storage: &mut StringStorage) 
         ParquetValue::Bytes(b) => Ok(ruby.enc_str_new(&b, ruby.ascii8bit_encoding()).as_value()),
         ParquetValue::Date32(days) => {
             // Convert days since epoch to Date object
-            let _ = ruby.require("date");
             let kernel = ruby.module_kernel();
             let date_class = kernel
                 .const_get::<_, Value>("Date")
@@ -1588,9 +1596,6 @@ pub fn parquet_to_ruby(value: ParquetValue, string_storage: &mut StringStorage) 
             apply_timezone(time, &tz)
         }
         ParquetValue::Decimal128(val, scale) => {
-            // Load BigDecimal if needed
-            let _ = ruby.require("bigdecimal");
-
             // Format decimal with scale
             let str_val = format_decimal128(val, scale);
             let kernel = ruby.module_kernel();
@@ -1599,9 +1604,6 @@ pub fn parquet_to_ruby(value: ParquetValue, string_storage: &mut StringStorage) 
                 .map_err(|e| ParquetError::Conversion(e.to_string()))
         }
         ParquetValue::Decimal256(val, scale) => {
-            // Load BigDecimal if needed
-            let _ = ruby.require("bigdecimal");
-
             // Format decimal with scale
             let str_val = format_decimal256(&val, scale);
             let kernel = ruby.module_kernel();
